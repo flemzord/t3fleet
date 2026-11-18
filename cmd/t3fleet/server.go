@@ -257,6 +257,8 @@ func operationFailure(err error) (int, string) {
 		return http.StatusBadRequest, "invalid_request"
 	case errors.Is(err, fleet.ErrConflict):
 		return http.StatusConflict, "conflict"
+	case errors.Is(err, fleet.ErrRuntimeUnavailable):
+		return http.StatusUnprocessableEntity, "runtime_unavailable"
 	case errors.Is(err, provider.ErrUnsupported):
 		return http.StatusNotImplemented, "unsupported"
 	case errors.Is(err, context.Canceled):

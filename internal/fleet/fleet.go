@@ -28,6 +28,7 @@ var ErrNotFound = errors.New("fleet machine not found")
 var ErrClosed = errors.New("fleet is shutting down")
 var ErrInvalid = errors.New("invalid fleet request")
 var ErrConflict = errors.New("fleet machine already exists")
+var ErrRuntimeUnavailable = errors.New("fleet: image does not provide t3fleet-runtime-info or its required executables; use a prepared t3fleet image")
 var validName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
 type Storage interface {
@@ -257,8 +258,9 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (Machine, error
 	}
 	for _, existing := range m.machines {
 		if existing.record.Name == req.Name {
+			machine := existing.record.Machine
 			m.mu.Unlock()
-			return Machine{}, ErrConflict
+			return machine, ErrConflict
 		}
 	}
 	h, err := m.listen(record{Machine: Machine{ID: id, Name: req.Name, Provider: req.Provider, State: "creating"}, Template: req.Template, Size: req.Size})
@@ -309,6 +311,9 @@ func (m *Manager) initialize(ctx context.Context, h *machineHandle, p provider.P
 	result, err := p.Exec(ctx, r.RemoteID, provider.ExecRequest{Args: []string{"/bin/bash", "-lc", "exec t3fleet-runtime-info"}})
 	if err != nil {
 		return errors.New("fleet: private runtime execution failed; inspect provider connectivity")
+	}
+	if result.ExitCode == 127 {
+		return ErrRuntimeUnavailable
 	}
 	if result.ExitCode != 0 {
 		return fmt.Errorf("fleet: image runtime initialization exited %d; use a prepared t3fleet image", result.ExitCode)

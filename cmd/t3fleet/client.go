@@ -184,7 +184,18 @@ func callAdmin(ctx context.Context, address, token, method, path string, body an
 		}
 		_ = json.Unmarshal(data, &failure)
 		switch failure.Error {
+		case "runtime_unavailable":
+			if raw, err := hex.DecodeString(failure.Machine.ID); err == nil && len(raw) == 16 {
+				return nil, fmt.Errorf("daemon: image is missing t3fleet-runtime-info or its required executables (HTTP %d); machine %s remains allocated; prepare its T3 runtime before running start, or delete it and use a prepared t3fleet snapshot", response.StatusCode, failure.Machine.ID)
+			}
+			return nil, fmt.Errorf("daemon: image is missing t3fleet-runtime-info or its required executables (HTTP %d); use a prepared t3fleet snapshot or prepare the existing machine's T3 runtime before retrying start", response.StatusCode)
 		case "not_found", "unsupported", "invalid_request", "conflict", "operation_failed", "unauthorized":
+			if failure.Error == "conflict" && method == http.MethodPost && path == "/v1/machines" {
+				if raw, err := hex.DecodeString(failure.Machine.ID); err == nil && len(raw) == 16 {
+					return nil, fmt.Errorf("daemon: machine name already exists (HTTP %d); existing machine %s; use another --name to create a new VM, or inspect %s", response.StatusCode, failure.Machine.ID, failure.Machine.ID)
+				}
+				return nil, fmt.Errorf("daemon: machine name already exists (HTTP %d); use another --name to create a new VM, or run list to inspect the existing record", response.StatusCode)
+			}
 			if raw, err := hex.DecodeString(failure.Machine.ID); err == nil && len(raw) == 16 {
 				return nil, fmt.Errorf("daemon: %s (HTTP %d); machine %s remains managed; inspect it or run start to recover", failure.Error, response.StatusCode, failure.Machine.ID)
 			}

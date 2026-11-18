@@ -33,6 +33,7 @@ type mockProvider struct {
 	execs           int
 	createFailsOnce bool
 	execFails       bool
+	execExitCode    int
 	deleteFails     bool
 	version         string
 }
@@ -146,6 +147,9 @@ func (p *mockProvider) Exec(ctx context.Context, id string, req provider.ExecReq
 		return provider.ExecResult{}, provider.ErrNotFound
 	}
 	p.execs++
+	if p.execExitCode != 0 {
+		return provider.ExecResult{ExitCode: p.execExitCode, Stderr: "private command details must remain hidden"}, nil
+	}
 	if p.execFails {
 		return provider.ExecResult{ExitCode: 1, Stderr: "must-not-be-exposed"}, nil
 	}
@@ -344,14 +348,33 @@ func TestValidationAndDuplicateNames(t *testing.T) {
 			t.Fatalf("invalid create succeeded: %#v", req)
 		}
 	}
-	create(t, f, "same-name")
-	if _, err := f.m.Create(t.Context(), fleet.CreateRequest{Name: "same-name", Provider: "mock"}); err == nil {
-		t.Fatal("duplicate machine name succeeded")
+	existing := create(t, f, "same-name")
+	if duplicate, err := f.m.Create(t.Context(), fleet.CreateRequest{Name: "same-name", Provider: "mock"}); !errors.Is(err, fleet.ErrConflict) || duplicate.ID != existing.ID {
+		t.Fatalf("duplicate must identify the existing record: machine=%#v err=%v", duplicate, err)
 	}
 	f.p.mu.Lock()
 	defer f.p.mu.Unlock()
 	if f.p.allocations != 1 {
 		t.Fatalf("invalid/duplicate requests allocated %d machines", f.p.allocations)
+	}
+}
+
+func TestFailedCreationReservesOnlyItsOwnName(t *testing.T) {
+	f := newFleet(t)
+	f.p.createFailsOnce = true
+	original, err := f.m.Create(t.Context(), fleet.CreateRequest{Name: "reserved-name", Provider: "mock"})
+	if err == nil || original.State != "create-failed" {
+		t.Fatal("expected an interrupted creation")
+	}
+	duplicate, err := f.m.Create(t.Context(), fleet.CreateRequest{Name: "reserved-name", Provider: "mock", Template: provider.Template{Snapshot: "different-base"}})
+	if !errors.Is(err, fleet.ErrConflict) || duplicate.ID != original.ID || duplicate.State != "create-failed" {
+		t.Fatalf("conflict discarded the failed reservation identity: %#v %v", duplicate, err)
+	}
+	create(t, f, "another-name")
+	f.p.mu.Lock()
+	defer f.p.mu.Unlock()
+	if len(f.p.requests) != 2 {
+		t.Fatal("duplicate name reached the provider or prevented an independent machine")
 	}
 }
 
@@ -366,6 +389,21 @@ func TestPreparedTemplateIsRequired(t *testing.T) {
 	defer f.p.mu.Unlock()
 	if f.p.allocations != 0 {
 		t.Fatal("missing image allocated a billable machine")
+	}
+}
+
+func TestMissingRuntimeIsDistinguishableAndKeepsAllocatedMachine(t *testing.T) {
+	f := newFleet(t)
+	f.p.execExitCode = 127
+	machine, err := f.m.Create(t.Context(), fleet.CreateRequest{Name: "unprepared-base", Provider: "mock"})
+	if !errors.Is(err, fleet.ErrRuntimeUnavailable) || machine.RemoteID == "" || machine.State != "not-ready" {
+		t.Fatalf("missing runtime was not classified with a recoverable machine: %#v %v", machine, err)
+	}
+	if strings.Contains(err.Error(), "private command") {
+		t.Fatal("runtime error exposed command output")
+	}
+	if err := f.m.Delete(t.Context(), machine.ID); err != nil {
+		t.Fatalf("unprepared VM could not be cleaned up: %v", err)
 	}
 }
 

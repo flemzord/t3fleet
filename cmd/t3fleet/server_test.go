@@ -150,6 +150,7 @@ func TestAdminErrorsNeverExposeProviderSecrets(t *testing.T) {
 		{errors.New("private-url?_token=secret"), 502, "operation_failed"},
 		{provider.ErrNotFound, 404, "not_found"},
 		{provider.ErrUnsupported, 501, "unsupported"},
+		{fleet.ErrRuntimeUnavailable, 422, "runtime_unavailable"},
 		{context.DeadlineExceeded, 504, "operation_failed"},
 	} {
 		h := newAdminHandler(&fakeFleet{err: tc.err}, "token")
@@ -241,6 +242,39 @@ func TestClientCancellationAndErrorRedaction(t *testing.T) {
 	_, err = callAdmin(ctx, address, "admin-token", "GET", "/v1/machines", nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation ignored: %v", err)
+	}
+}
+
+func TestClientExplainsNameConflictForCurrentAndOlderDaemons(t *testing.T) {
+	for _, body := range []string{
+		`{"error":"conflict","machine":{"id":"2c9951085a1fbe87f586f8f370706f6b","state":"create-failed"}}`,
+		`{"error":"conflict"}`,
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusConflict)
+			io.WriteString(w, body)
+		}))
+		_, err := callAdmin(t.Context(), strings.TrimPrefix(server.URL, "http://"), "token", "POST", "/v1/machines", map[string]string{"name": "mon-test2"})
+		server.Close()
+		if err == nil || !strings.Contains(err.Error(), "name already exists") || !strings.Contains(err.Error(), "--name") {
+			t.Fatalf("conflict did not explain name reservation: %v", err)
+		}
+		if strings.Contains(body, "2c9951085a1fbe87f586f8f370706f6b") && !strings.Contains(err.Error(), "2c9951085a1fbe87f586f8f370706f6b") {
+			t.Fatal("conflict did not identify the existing record")
+		}
+	}
+}
+
+func TestClientExplainsMissingRuntimeWithoutLosingAllocatedIdentity(t *testing.T) {
+	const id = "f2e1a7e3f84914948dfe3f04869a79ef"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		io.WriteString(w, `{"error":"runtime_unavailable","machine":{"id":"`+id+`"},"details":"private-command-output"}`)
+	}))
+	defer server.Close()
+	_, err := callAdmin(t.Context(), strings.TrimPrefix(server.URL, "http://"), "token", "POST", "/v1/machines", nil)
+	if err == nil || !strings.Contains(err.Error(), "t3fleet-runtime-info") || !strings.Contains(err.Error(), id) || !strings.Contains(err.Error(), "remains allocated") || strings.Contains(err.Error(), "private-command-output") {
+		t.Fatalf("missing runtime did not produce safe, recoverable guidance: %v", err)
 	}
 }
 

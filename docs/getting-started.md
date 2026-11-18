@@ -222,3 +222,25 @@ Authenticated requests for live T3 data can wake a stopped machine. Public disco
 | Pairing token is invalid | Generate a fresh link; an old code may have expired or been used. |
 | Namespace `snapshot` is unsupported | Use an existing completed provider snapshot or image; explicit capture is not a capability of this adapter. |
 | Machine still incurs charges after daemon exit | Stop or delete the remote resource explicitly; daemon shutdown is not VM shutdown. |
+
+
+### Duplicate names and unprepared snapshots
+
+A name stays reserved after a failed or interrupted creation. `create` reports a
+conflict and, when supported by the running daemon, identifies the existing
+record. Use `list` and `inspect ID` before retrying. Choose a different `--name`
+for an independent VM. Repeating `create` does not replace an existing machine
+or change its saved template. In particular, `start` on an interrupted creation
+reuses its original template and operation identity.
+
+A saved provider snapshot is not necessarily a t3fleet template. It must contain
+T3 and `t3fleet-runtime-info` before use. If the fixed runtime command exits 127,
+the daemon reports `runtime_unavailable` instead of a generic gateway error.
+The allocated machine remains managed and billable. Prepare its runtime before
+retrying `start`, or delete it before creating a replacement from a prepared
+snapshot. Repeating `start` cannot install missing software.
+
+After rebuilding the daemon, restart `t3fleet serve` with the same configuration
+to use updated API errors. Replacing the CLI binary alone does not update an
+already running daemon. Machine records and client authorization persist across
+a normal daemon restart; cloud VMs are not stopped by that restart.
