@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -19,6 +20,7 @@ import (
 	"github.com/flemzord/t3fleet/internal/fleet"
 	"github.com/flemzord/t3fleet/internal/state"
 	"github.com/flemzord/t3fleet/pkg/provider"
+	"github.com/flemzord/t3fleet/pkg/provider/boat"
 )
 
 // TestCloudLifecycle is explicitly opt-in: it creates and deletes billable
@@ -55,6 +57,7 @@ func TestCloudLifecycle(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer disk.Close()
+			providers[name] = diagnosticProvider{Provider: p, t: t}
 			m, err := fleet.New(fleet.Options{Providers: providers, Templates: cfg.Templates, Store: disk, ExpectedVersion: cfg.ExpectedVersion, ReadyTimeout: 5 * time.Minute})
 			if err != nil {
 				t.Fatal(err)
@@ -83,10 +86,49 @@ func TestCloudLifecycle(t *testing.T) {
 					defer cancel()
 					if err := m.Delete(cleanup, machine.ID); err != nil {
 						t.Errorf("cloud cleanup failed; local machine %s remains in private canary state: %v", machine.ID, err)
+						return
+					}
+					if machine.RemoteID == "" {
+						return
+					}
+					for {
+						remote, err := p.Get(cleanup, machine.RemoteID)
+						if errors.Is(err, provider.ErrNotFound) || (err == nil && remote.State == provider.StateDeleted) {
+							break
+						}
+						select {
+						case <-cleanup.Done():
+							t.Error("cloud deletion was not observed after cleanup")
+							return
+						case <-time.After(time.Second):
+						}
 					}
 				}()
 			}
 			if createErr != nil {
+				if machine.RemoteID != "" {
+					// Diagnostics emit only fixed exit codes, never runtime-info or
+					// provider credential output. Keep unknown command results private.
+					diagnostic, diagnosticErr := p.Exec(ctx, machine.RemoteID, provider.ExecRequest{Args: []string{"/bin/bash", "-lc", "command -v t3fleet-runtime-info >/dev/null; printf 'helper=%s\\n' \"$?\"; command -v t3 >/dev/null; printf 'server=%s\\n' \"$?\""}})
+					if diagnosticErr != nil {
+						t.Log("private execution transport diagnostic failed; output withheld")
+					} else if diagnostic.Stdout == "helper=0\nserver=0\n" {
+						t.Log("runtime binaries resolve correctly in the login shell")
+					} else {
+						t.Logf("runtime binaries are unavailable or helper failed (diagnostic exit %d)", diagnostic.ExitCode)
+					}
+					initialization, initErr := p.Exec(ctx, machine.RemoteID, provider.ExecRequest{Args: []string{"/bin/bash", "-lc", "exec t3fleet-runtime-info"}})
+					if initErr != nil {
+						t.Log("runtime diagnostic transport failed; output withheld")
+					} else {
+						t.Logf("runtime diagnostic exit: %d", initialization.ExitCode)
+						for _, category := range []string{"CalledProcessError", "RuntimeError", "HTTPError", "URLError", "PermissionError", "TimeoutExpired", "T3 server did not become ready", "Permission denied"} {
+							if strings.Contains(initialization.Stderr, category) {
+								t.Logf("runtime diagnostic category: %s", category)
+							}
+						}
+					}
+				}
 				t.Fatalf("cloud create/readiness failed (saved machine %s): %v", machine.ID, createErr)
 			}
 			t.Logf("%s ready: remote %s, local %s", name, machine.RemoteID, machine.ID)
@@ -109,7 +151,7 @@ func TestCloudLifecycle(t *testing.T) {
 			decodeErr := json.NewDecoder(response.Body).Decode(&exchange)
 			response.Body.Close()
 			if response.StatusCode != http.StatusOK || decodeErr != nil || exchange.Token == "" {
-				t.Fatal("pair exchange failed")
+				t.Fatalf("pair exchange failed (HTTP%d, decoded=%t, token=%t)", response.StatusCode, decodeErr == nil, exchange.Token != "")
 			}
 			cloudRPC(t, ctx, machine.URL, exchange.Token)
 			// The real server's shell endpoint checks protocol version as well as auth.
@@ -225,4 +267,19 @@ func cloudRPC(t *testing.T, ctx context.Context, origin, token string) {
 			return
 		}
 	}
+}
+
+// Only explicitly sanitized adapter diagnostics may enter cloud-test logs.
+// Arbitrary errors and command output can contain service credentials.
+type diagnosticProvider struct {
+	provider.Provider
+	t *testing.T
+}
+
+func (p diagnosticProvider) Exec(ctx context.Context, id string, req provider.ExecRequest) (provider.ExecResult, error) {
+	result, err := p.Provider.Exec(ctx, id, req)
+	if safe, ok := errors.AsType[*boat.ExecError](err); ok {
+		p.t.Logf("private execution diagnostic: %s", safe.Error())
+	}
+	return result, err
 }

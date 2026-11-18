@@ -36,3 +36,17 @@ jobs:
         run: make test
       - name: Build CLI
         run: make build
+
+  runtime:
+    name: Nix runtime contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install Nix
+        uses: cachix/install-nix-action@08dcb3a5e62fa31e2da3d490afc4176ef55ecd72 # v30
+      - name: Verify runtime initialization and credential isolation
+        run: nix build .#checks.x86_64-linux.runtime --no-link
