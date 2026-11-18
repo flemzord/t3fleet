@@ -1,0 +1,159 @@
+# Experimental single-environment dispatch
+
+`t3fleet serve` can expose one additional T3 environment that automatically
+places each new thread on a distinct machine. Pair with that environment once.
+The Desktop sends ordinary T3 protocol v2 requests and does not supply a
+provider or machine ID. The proxy owns placement and identity; each worker
+retains its own T3 database, checkout and model session.
+
+## Boat workers on demand
+
+This mode starts with **zero Boat VMs**. It starts a dedicated local T3
+controller, with a separate home and state directory, for pairing and project
+metadata only. The controller does not clone the repository or run an agent.
+
+Start from [the complete Boat example](../examples/dispatch-boat.json). All
+provider selections and templates are read from the file passed to
+`t3fleet serve --config PATH`; use the same file for CLI commands.
+
+1. Set `templates.boat.snapshot` to a prepared T3 snapshot. Set
+   `providers.boat.environment` if the VM needs its Boat environment's repository
+   and model credentials.
+2. Add the block below to your config and start `t3fleet serve --config PATH`.
+   Supply an absolute executable path to the T3 binary that matches
+   `expectedVersion`. Leave `idleTimeout` unset or at `"0"`. Do not include
+   `workers` in this mode.
+3. Run `t3fleet pair-dispatch --config PATH` and confirm **t3fleet**
+   in T3 Desktop. From a GitHub project, choose **Add to another machine** and
+   select this environment. Clear any selected ignored files; copying them
+   across machines is outside this proof.
+4. Choose the default Git branch and send a text message. The proxy reserves a
+   Boat VM, starts it, clones the GitHub repository using credentials already
+   available on that VM, and forwards the first message. The folder shown at
+   project registration represents the virtual project; the checkout itself
+   lives on the worker. A second thread gets a different VM.
+
+```json
+{
+  "dispatchPOC": {
+    "listen": "127.0.0.1:47733",
+    "onDemand": {
+      "t3Binary": "/opt/homebrew/bin/t3",
+      "maxWorkers": 8
+    }
+  }
+}
+```
+
+This mode supports one GitHub repository, text messages, and a single Codex
+model (set `dispatchPOC.onDemand.model`; the default is `gpt-5.4`). The worker
+still needs model access; the local catalog cannot verify it before allocation.
+A saved pairing
+and assignment survive daemon restarts at the same origin. A failed or
+interrupted launch retains its reservation so a retry can reconcile it
+without allocating a second VM. The limit counts reservations, including
+deleted or failed workers. The daemon never destroys or migrates workers
+automatically. Use `t3fleet list` and `t3fleet delete ID` to manage them.
+
+The cold path waits for cloud allocation and checkout. Large repositories can
+exceed Boat's private command deadline. Paste only a credential-free GitHub
+HTTPS or SSH URL; the dispatcher never forwards desktop credentials. Keep the
+same private state directory and listen address on restart. T3 will reconnect
+to the same named environment without another pairing. An older fixed-pool pairing
+has a different environment identity, even if you use the same port.
+
+The on-demand canary started with zero Boat VMs, then paired and registered a
+public GitHub project with the fleet still empty. It sent two first messages
+through the pinned T3 protocol, observed two Boat VMs and checked the cloned
+repository on both. The original token recovered the histories and accepted a
+follow-up on the same worker after restarting the daemon. Codex had no login on
+either fresh VM, so the real model runs did not complete. The local genuine-T3
+canary completes both first turns and the follow-up with a deterministic ACP
+replay agent, and checks recovery of an interrupted reservation without a new
+allocation.
+
+```sh
+T3FLEET_T3_BINARY=/absolute/path/to/t3 \
+T3FLEET_T3_SOURCE=/absolute/path/to/pinned/t3code \
+  nix develop --command go test -race -v -run TestLiveOnDemandDispatch ./internal/proxy
+```
+
+## Fixed worker pool (original proof)
+
+Use [the provider config example](../examples/config.json) to configure Boat,
+Namespace, or both. Namespace accepts either a prepared OCI `image`, or a
+`source` Devbox with its `snapshot` ID. Each selected image or snapshot must
+include the pinned T3 runtime and hook.
+
+1. Provision 2–8 **dedicated** machines with the existing `create --no-register`
+   command. Use an initialized Boat machine and an initialized Namespace
+   machine to exercise both providers. Prepare the same repository at the same
+   absolute path on both workers. Configure the same T3 provider instance IDs
+   and model options on all workers.
+2. Stop the local daemon. Add the following block to its config, substituting
+   the managed IDs from `t3fleet list`. Leave `idleTimeout` unset or set it to
+   `"0"`.
+3. Start `t3fleet serve --config PATH`, then run
+   `t3fleet pair-dispatch --config PATH`. Open the resulting one-use link
+   privately and confirm **t3fleet** in T3. Do not pair the
+   individual machines in Desktop for this test.
+4. In the new environment, add the prepared path as an existing project.
+   Open two threads under the same project and send a first message in each.
+   Restart the daemon at the same address and send a follow-up in the second
+   thread. The environment and thread assignment should survive.
+
+```json
+{
+  "dispatchPOC": {
+    "listen": "127.0.0.1:47731",
+    "workers": ["MANAGED_BOAT_ID", "MANAGED_NAMESPACE_ID"]
+  }
+}
+```
+
+The first new thread takes the first worker, the second takes the next worker,
+and so on. A reservation is persisted before anything is forwarded, and a retry
+with the same thread ID keeps its original worker. The POC never releases a
+reservation, even after a rejected launch, because the worker may already have
+accepted the request. It does not allocate more VMs, skip an unavailable worker,
+migrate an existing thread or replay writes. Use a fresh dedicated state and
+worker pool to start another experiment.
+
+The proxy mirrors existing-directory project creation to the workers. It polls
+their shell snapshots while subscribed and merges their assigned threads under
+one environment ID. Thread detail HTTP requests and thread RPC streams go
+directly to the assigned worker; the proxy uses a full shell snapshot on
+reconnect. This makes each worker's history authoritative and avoids combining
+independent application event cursors. Polling can wake stopped workers, so the
+POC disallows automatic idle stop. The desktop's virtual provider catalog is
+read from the first worker. Editing projects, device/preview/terminal,
+attachments, uploads, cross-thread operations, jobs started outside the proxy,
+and reconciliation of shell and worker cursors for advanced lifecycle commands
+are outside this proof. Unsupported requests fail rather than silently using
+another worker.
+
+To repeat the protocol canary locally, use the pinned T3 binary and the
+matching upstream source tree (see `nix/t3-server.nix`). Bun runs the upstream
+deterministic ACP test agent; no Claude/Codex credentials are needed.
+
+```sh
+T3FLEET_T3_BINARY=/absolute/path/to/t3 \
+T3FLEET_T3_SOURCE=/absolute/path/to/pinned/t3code \
+  nix develop --command go test -race -v -run TestLiveDispatchPOC ./internal/proxy
+```
+
+The test opens one client WebSocket through the virtual environment, checks
+that two first messages complete on different genuine servers, observes the
+unified list, then reopens the saved pairing after a proxy restart and checks
+the follow-up and history.
+
+On the pinned nightly (`0.1.11-nightly.20261117.4838`), the same protocol
+exercise also ran against one real Boat sandbox and one real Namespace
+Devbox. Both ACP replay turns completed, the unified shell listed both
+threads, and a separate read of each worker showed only its assigned thread.
+After restarting the local daemon, the same client token could read the
+Namespace history and continue its thread without changing the Boat thread.
+The desktop click-through is still unverified: an isolated installation of the
+same nightly did not get through startup and onboarding during this exercise.
+The cloud test used the desktop's protocol over HTTP/WebSocket and a replay
+fixture, with no commercial model calls.

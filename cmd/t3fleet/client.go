@@ -53,6 +53,11 @@ func runClient(ctx context.Context, cfg config.Config, command string, args []st
 	pairing := false
 	register := false
 	switch command {
+	case "pair-dispatch":
+		if len(args) != 0 {
+			return errors.New("pair-dispatch takes no arguments")
+		}
+		method, path, pairing = http.MethodPost, "/v1/dispatch-poc/pair", true
 	case "list":
 		if len(args) != 0 {
 			return errors.New("list takes no arguments")

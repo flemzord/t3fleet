@@ -22,7 +22,8 @@ import (
 // TestLiveT3Compatibility is opt-in: it launches a genuine T3 server with a
 // disposable home, without using a provider account, opening a browser, or
 // touching the developer's T3 database. No credentials enter test diagnostics.
-func TestLiveT3Compatibility(t *testing.T) {
+func startLiveT3(t *testing.T, setup func(baseDir string)) (string, string, map[string]any) {
+	t.Helper()
 	binary := os.Getenv("T3FLEET_T3_BINARY")
 	if binary == "" {
 		t.Skip("set T3FLEET_T3_BINARY to test a genuine T3 server")
@@ -36,6 +37,9 @@ func TestLiveT3Compatibility(t *testing.T) {
 
 	home := t.TempDir()
 	baseDir := filepath.Join(home, "t3-data")
+	if setup != nil {
+		setup(baseDir)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -49,7 +53,14 @@ func TestLiveT3Compatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	origin := "http://" + address
-	env := append(os.Environ(), "HOME="+home, "T3CODE_HOME="+baseDir, "XDG_CONFIG_HOME="+filepath.Join(home, "config"), "XDG_CACHE_HOME="+filepath.Join(home, "cache"), "XDG_DATA_HOME="+filepath.Join(home, "data"))
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal("Git is required for the genuine T3 fixture")
+	}
+	// Avoid discovering a real Codex/Claude executable from the developer
+	// shell. Otherwise T3 starts its background jobs in the disposable home.
+	path := strings.Join([]string{filepath.Dir(git), "/usr/bin", "/bin", "/usr/sbin", "/sbin"}, string(os.PathListSeparator))
+	env := append(os.Environ(), "PATH="+path, "HOME="+home, "T3CODE_HOME="+baseDir, "XDG_CONFIG_HOME="+filepath.Join(home, "config"), "XDG_CACHE_HOME="+filepath.Join(home, "cache"), "XDG_DATA_HOME="+filepath.Join(home, "data"))
 	ctx, cancel := context.WithCancel(t.Context())
 	command := exec.CommandContext(ctx, binary, "serve", "--mode", "desktop", "--host", "127.0.0.1", "--port", port, "--base-dir", baseDir, "--no-browser")
 	command.Dir = home
@@ -125,7 +136,11 @@ func TestLiveT3Compatibility(t *testing.T) {
 	if serviceToken == "" || strings.ContainsAny(serviceToken, "\r\n") {
 		t.Fatal("disposable T3 service session did not return a token")
 	}
+	return origin, serviceToken, descriptor
+}
 
+func TestLiveT3Compatibility(t *testing.T) {
+	origin, serviceToken, descriptor := startLiveT3(t, nil)
 	gateway, server := proxyServer(t, origin, func(cfg *Config) {
 		cfg.Label = "live-compatibility"
 		cfg.Resolve = func(context.Context) (Upstream, error) {

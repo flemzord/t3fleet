@@ -63,11 +63,59 @@ func serve(ctx context.Context, cfg config.Config, diagnostics io.Writer) error 
 		defer cancel()
 		_ = manager.Close(shutdown)
 	}()
+	var dispatch *proxy.Proxy
+	if poc := cfg.DispatchPOC; poc != nil {
+		stateName := "dispatch-poc"
+		if poc.OnDemand != nil {
+			stateName = "dispatch-boat"
+		}
+		store, err := state.Open(filepath.Join(cfg.StateDir, stateName))
+		if err != nil {
+			return fmt.Errorf("cannot open private dispatch state: %w", err)
+		}
+		defer store.Close()
+		origin := "http://" + poc.Listen
+		if poc.OnDemand != nil {
+			controller, stop, startErr := startDispatchController(ctx, cfg, diagnostics)
+			if startErr != nil {
+				return startErr
+			}
+			defer stop()
+			dispatch, err = proxy.NewDispatchOnDemand(origin, store, proxy.DispatchOnDemand{
+				Controller: controller, ProjectRoot: filepath.Join(cfg.StateDir, stateName, "projects"),
+				MaxWorkers: poc.OnDemand.MaxWorkerCount(), Model: poc.OnDemand.Model,
+				Provision: manager.ProvisionDispatchBoat, Lookup: manager.LookupDispatchBoat,
+			})
+		} else {
+			var workers []proxy.DispatchWorker
+			for _, id := range poc.Workers {
+				worker, err := manager.DispatchWorker(id)
+				if err != nil {
+					return fmt.Errorf("dispatch worker %q is missing or unprepared: %w", id, err)
+				}
+				workers = append(workers, worker)
+			}
+			dispatch, err = proxy.NewDispatchPOC(origin, store, workers)
+		}
+		if err != nil {
+			return fmt.Errorf("cannot initialize dispatch POC: %w", err)
+		}
+		ln, err := net.Listen("tcp", poc.Listen)
+		if err != nil {
+			return errors.New("cannot listen for dispatch requests")
+		}
+		pocCtx, cancel := context.WithCancel(ctx)
+		srv := &http.Server{Handler: dispatch, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second,
+			MaxHeaderBytes: 64 << 10, BaseContext: func(net.Listener) context.Context { return pocCtx }}
+		defer func() { cancel(); _ = srv.Close() }()
+		go func() { _ = srv.Serve(ln) }()
+		fmt.Fprintln(diagnostics, "t3fleet dispatch POC listening on", ln.Addr().String())
+	}
 	listener, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return errors.New("cannot listen for admin requests; check listen address or another daemon")
 	}
-	server := http.Server{Handler: newAdminHandler(manager, token), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 11 * time.Minute, IdleTimeout: 60 * time.Second}
+	server := http.Server{Handler: newAdminHandlerWithDispatch(manager, token, dispatch), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 11 * time.Minute, IdleTimeout: 60 * time.Second}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
 	fmt.Fprintln(diagnostics, "t3fleet control listening on", listener.Addr().String())
@@ -89,6 +137,10 @@ func serve(ctx context.Context, cfg config.Config, diagnostics io.Writer) error 
 }
 
 func newAdminHandler(manager fleetAPI, token string) http.Handler {
+	return newAdminHandlerWithDispatch(manager, token, nil)
+}
+
+func newAdminHandlerWithDispatch(manager fleetAPI, token string, dispatch *proxy.Proxy) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := r.Host
 		if h, _, err := net.SplitHostPort(host); err == nil {
@@ -119,6 +171,19 @@ func newAdminHandler(manager fleetAPI, token string) http.Handler {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 		defer cancel()
+
+		if r.URL.Path == "/v1/dispatch-poc/pair" {
+			if dispatch == nil {
+				safeError(w, http.StatusNotFound, "not_found")
+			} else if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+			} else if pair, err := dispatch.NewPairing(); err != nil {
+				operationError(w, err)
+			} else {
+				writeJSON(w, http.StatusOK, pair)
+			}
+			return
+		}
 
 		if r.URL.Path == "/v1/batches" || strings.HasPrefix(r.URL.Path, "/v1/batches/") {
 			var batch fleet.Batch

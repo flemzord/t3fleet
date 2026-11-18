@@ -568,6 +568,22 @@ func (m *Manager) resolve(ctx context.Context, id string) (proxy.Upstream, error
 	}
 	return proxy.Upstream{Endpoint: endpoint, Token: r.Token}, nil
 }
+
+// DispatchWorker reuses the normal fleet wake and private transport paths.
+// The experimental dispatcher requires pre-provisioned, dedicated machines.
+func (m *Manager) DispatchWorker(id string) (proxy.DispatchWorker, error) {
+	h, err := m.handle(id)
+	if err != nil {
+		return proxy.DispatchWorker{}, err
+	}
+	if r := m.copy(h); r.Token == "" || r.RemoteID == "" {
+		return proxy.DispatchWorker{}, errors.New("dispatch worker has not completed initialization")
+	}
+	return proxy.DispatchWorker{ID: id,
+		Resolve:    func(ctx context.Context) (proxy.Upstream, error) { return m.resolve(ctx, id) },
+		Descriptor: func(ctx context.Context) (map[string]any, error) { return m.descriptor(ctx, id) },
+	}, nil
+}
 func (m *Manager) Stop(ctx context.Context, id string) error {
 	h, err := m.handle(id)
 	if err != nil {

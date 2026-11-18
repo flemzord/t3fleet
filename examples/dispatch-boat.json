@@ -1,0 +1,23 @@
+{
+  "listen": "127.0.0.1:47730",
+  "stateDir": "/absolute/path/to/private/t3fleet-state",
+  "expectedVersion": "0.1.11-nightly.20261117.4838",
+  "providers": {
+    "boat": {
+      "apiKeyEnv": "BOAT_API_KEY",
+      "organization": "YOUR_BOAT_ORGANIZATION",
+      "environment": "YOUR_BOAT_ENVIRONMENT"
+    }
+  },
+  "templates": {
+    "boat": { "snapshot": "YOUR_READY_BOAT_SNAPSHOT" }
+  },
+  "dispatchPOC": {
+    "listen": "127.0.0.1:47733",
+    "onDemand": {
+      "t3Binary": "/absolute/path/to/t3",
+      "maxWorkers": 8,
+      "model": "gpt-5.4"
+    }
+  }
+}

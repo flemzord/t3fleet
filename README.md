@@ -80,6 +80,12 @@ If T3 cannot be opened, the machine remains created and the CLI reports its ID. 
 
 For Namespace, use `--provider namespace`. [The complete setup guide](docs/getting-started.md) explains credentials, template preparation, model sign-in, and troubleshooting.
 
+To pair T3 with one endpoint that creates a Boat worker on the first message,
+use [the on-demand config example](examples/dispatch-boat.json) and the
+[dispatch guide](docs/dispatch-poc.md). The regular [provider config](examples/config.json)
+supports Boat and Namespace, including a mix of preprovisioned workers in the
+fixed-pool dispatch mode. On-demand dispatch currently provisions only Boat.
+
 ## Stop idle machines automatically
 
 Add `"idleTimeout": "30m"` to your configuration and restart `serve` with the
@@ -122,6 +128,7 @@ All commands take `--config PATH`. The CLI sends authenticated requests to the l
 | `create … --no-register` | Create without opening T3; useful for headless hosts and scripts. |
 | `list` / `inspect ID` | Read the daemon's managed records. |
 | `pair ID` | Ensure readiness and print a T3 Code pairing link. |
+| `pair-dispatch` | Print a T3 Code pairing link for the configured virtual endpoint. |
 | `stop ID` / `start ID` | Explicitly stop or resume a machine. Authenticated proxy traffic can also wake it. |
 | `snapshot ID --name NAME` | Create a private backup where the provider supports explicit capture. |
 | `create … --count 10` | Create an identical batch with bounded concurrency and a durable recovery ID. |
@@ -140,6 +147,7 @@ A snapshot of a used machine can contain code, credentials, and sessions. Treat 
 - [Bulk lifecycle and recovery](docs/bulk-lifecycle.md)
 - [Architecture and lifecycle](docs/architecture.md)
 - [T3 protocol gateway](docs/protocol.md)
+- [Experimental single-environment dispatch](docs/dispatch-poc.md)
 - [Adding a provider](docs/adding-a-provider.md)
 - [Security and credential handling](docs/security.md)
 - [Current scope and roadmap](docs/roadmap.md)

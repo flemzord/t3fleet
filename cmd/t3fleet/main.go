@@ -35,6 +35,7 @@ Commands:
   delete [ID]                 Delete one machine, or interactively select several
   snapshot ID --name NAME     Capture a provider-supported snapshot
   pair ID                     Print the T3 Code pairing deep link
+  pair-dispatch               Print the experimental dispatch pairing deep link
   version                     Print the CLI version
 
 Bulk create: --count 10 --concurrency 3; names become t3fleet-NAME-01 through t3fleet-NAME-10.
@@ -69,7 +70,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return nil
 	}
 	switch command {
-	case "serve", "create", "list", "inspect", "start", "stop", "delete", "snapshot", "pair":
+	case "serve", "create", "list", "inspect", "start", "stop", "delete", "snapshot", "pair", "pair-dispatch":
 	default:
 		return errors.New("unknown command; run t3fleet help")
 	}

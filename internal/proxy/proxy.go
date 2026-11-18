@@ -74,12 +74,13 @@ type ticket struct {
 // Proxy owns ephemeral pairing codes and scoped socket tickets. Client token
 // persistence belongs to the fleet state store, rather than the HTTP module.
 type Proxy struct {
-	cfg     Config
-	origin  *url.URL
-	mu      sync.Mutex
-	pairing credential
-	tickets map[string]ticket
-	clients map[string]time.Time
+	cfg      Config
+	origin   *url.URL
+	dispatch *dispatchPOC
+	mu       sync.Mutex
+	pairing  credential
+	tickets  map[string]ticket
+	clients  map[string]time.Time
 }
 
 func New(cfg Config) (*Proxy, error) {
@@ -171,6 +172,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if !authorized {
 			fail(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if p.dispatch != nil {
+			p.dispatch.serve(p, w, r)
 			return
 		}
 		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
@@ -290,9 +295,13 @@ func (p *Proxy) redeemTicket(value, use string) bool {
 // resolve bounds startup without imposing a fixed lifetime on established
 // streaming responses or WebSockets. Cancellation still follows the client.
 func (p *Proxy) resolve(r *http.Request) (Upstream, context.Context, context.CancelFunc, error) {
-	ctx, cancel := context.WithCancel(r.Context())
-	timer := time.AfterFunc(p.cfg.RequestTimeout, cancel)
-	up, err := p.cfg.Resolve(ctx)
+	return resolveUpstream(r.Context(), p.cfg.RequestTimeout, p.cfg.Resolve)
+}
+
+func resolveUpstream(parent context.Context, timeout time.Duration, resolve func(context.Context) (Upstream, error)) (Upstream, context.Context, context.CancelFunc, error) {
+	ctx, cancel := context.WithCancel(parent)
+	timer := time.AfterFunc(timeout, cancel)
+	up, err := resolve(ctx)
 	timer.Stop()
 	if err == nil {
 		err = ctx.Err()

@@ -22,6 +22,7 @@ import (
 const DefaultVersion = "0.1.11-nightly.20261117.4838"
 
 type Config struct {
+	DispatchPOC     *DispatchPOC                 `json:"dispatchPOC,omitempty"`
 	IdleTimeout     string                       `json:"idleTimeout,omitempty"`
 	Listen          string                       `json:"listen"`
 	StateDir        string                       `json:"stateDir"`
@@ -29,6 +30,25 @@ type Config struct {
 	ExpectedVersion string                       `json:"expectedVersion"`
 	Providers       ProviderConfigs              `json:"providers"`
 	Templates       map[string]provider.Template `json:"templates"`
+}
+
+type DispatchPOC struct {
+	Listen   string            `json:"listen"`
+	Workers  []string          `json:"workers,omitzero"`
+	OnDemand *DispatchOnDemand `json:"onDemand,omitempty"`
+}
+
+type DispatchOnDemand struct {
+	T3Binary   string `json:"t3Binary"`
+	MaxWorkers int    `json:"maxWorkers,omitempty"`
+	Model      string `json:"model,omitempty"`
+}
+
+func (d DispatchOnDemand) MaxWorkerCount() int {
+	if d.MaxWorkers == 0 {
+		return 8
+	}
+	return d.MaxWorkers
 }
 
 type ProviderConfigs struct {
@@ -108,7 +128,8 @@ func (cfg Config) IdleDuration() (time.Duration, error) {
 }
 
 func (cfg Config) Validate() error {
-	if _, err := cfg.IdleDuration(); err != nil {
+	idle, err := cfg.IdleDuration()
+	if err != nil {
 		return err
 	}
 	host, port, err := net.SplitHostPort(cfg.Listen)
@@ -118,6 +139,32 @@ func (cfg Config) Validate() error {
 	}
 	if !loopback(host) {
 		return errors.New("admin listen address must be loopback")
+	}
+	if poc := cfg.DispatchPOC; poc != nil {
+		host, port, splitErr := net.SplitHostPort(poc.Listen)
+		n, portErr := strconv.Atoi(port)
+		if splitErr != nil || portErr != nil || host != "127.0.0.1" || n < 1 || n > 65535 || poc.Listen == cfg.Listen {
+			return errors.New("dispatchPOC.listen must be a separate 127.0.0.1 port")
+		}
+		if idle != 0 {
+			return errors.New("dispatchPOC requires idleTimeout disabled")
+		}
+		if onDemand := poc.OnDemand; onDemand != nil {
+			if len(poc.Workers) != 0 || cfg.Providers.Boat == nil || cfg.Templates["boat"] == (provider.Template{}) {
+				return errors.New("dispatchPOC.onDemand requires a Boat template and no dedicated workers")
+			}
+			if !filepath.IsAbs(onDemand.T3Binary) || strings.ContainsAny(onDemand.T3Binary, "\x00\r\n") {
+				return errors.New("dispatchPOC.onDemand.t3Binary must be an absolute executable path")
+			}
+			if onDemand.MaxWorkerCount() < 1 || onDemand.MaxWorkerCount() > 8 {
+				return errors.New("dispatchPOC.onDemand.maxWorkers must be between 1 and 8")
+			}
+			if len(onDemand.Model) > 128 || strings.ContainsAny(onDemand.Model, " \t\r\n\x00") {
+				return errors.New("dispatchPOC.onDemand.model must be a Codex model identifier")
+			}
+		} else if len(poc.Workers) < 2 || len(poc.Workers) > 8 {
+			return errors.New("dispatchPOC requires 2–8 dedicated workers or onDemand")
+		}
 	}
 	if cfg.MachineHost != "127.0.0.1" {
 		return errors.New("machineHost must be 127.0.0.1 in this release")

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/flemzord/t3fleet/pkg/provider"
 )
 
 func writeConfig(t *testing.T, content string) string {
@@ -65,6 +67,43 @@ func TestValidateLoopbackAndTemplates(t *testing.T) {
 			tt.modify(&c)
 			if c.Validate() == nil {
 				t.Fatal("invalid config accepted")
+			}
+		})
+	}
+}
+
+func TestDispatchOnDemandConfiguration(t *testing.T) {
+	base := func() Config {
+		cfg := Default()
+		cfg.DispatchPOC = &DispatchPOC{
+			Listen:   "127.0.0.1:47731",
+			OnDemand: &DispatchOnDemand{T3Binary: "/opt/t3/bin/t3"},
+		}
+		cfg.Providers.Boat = &Boat{}
+		cfg.Templates["boat"] = provider.Template{Snapshot: "golden"}
+		return cfg
+	}
+	cfg := base()
+	if err := cfg.Validate(); err != nil || cfg.DispatchPOC.OnDemand.MaxWorkerCount() != 8 {
+		t.Fatalf("zero-worker on-demand config rejected or wrong limit: %v", err)
+	}
+	tests := []struct {
+		name   string
+		modify func(*Config)
+	}{
+		{"mixed with fixed workers", func(c *Config) { c.DispatchPOC.Workers = []string{"a", "b"} }},
+		{"no Boat config", func(c *Config) { c.Providers.Boat = nil }},
+		{"no Boat template", func(c *Config) { delete(c.Templates, "boat") }},
+		{"relative binary", func(c *Config) { c.DispatchPOC.OnDemand.T3Binary = "t3" }},
+		{"oversized pool", func(c *Config) { c.DispatchPOC.OnDemand.MaxWorkers = 9 }},
+		{"idle management", func(c *Config) { c.IdleTimeout = "2m" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := base()
+			tc.modify(&c)
+			if err := c.Validate(); err == nil {
+				t.Fatal("incompatible on-demand configuration accepted")
 			}
 		})
 	}
