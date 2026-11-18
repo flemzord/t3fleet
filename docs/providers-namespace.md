@@ -83,8 +83,11 @@ concurrent collision can still return an API error; this does not justify
 creating another name automatically.
 
 `Stop` and `Delete` resolve the machine's current name before calling `Stop`
-and `Expire`. Deletion is permanent at the provider and must be an explicit
-operator action.
+and `Expire`. After `Expire`, `Delete` polls `Fetch` until the machine is not
+found or has a terminal `destroyedAt` state. A successful request alone does
+not establish completed cleanup. The wait honors cancellation and is bounded
+to two minutes; on failure the caller must retain its pending cleanup record.
+Deletion must be an explicit operator action.
 
 ## Private T3 transport
 

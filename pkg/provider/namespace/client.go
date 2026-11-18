@@ -307,8 +307,47 @@ func (c *Client) byName(ctx context.Context, id, method string) error {
 	}
 	return c.call(ctx, method, map[string]string{"name": out.Devbox.Name}, nil)
 }
-func (c *Client) Stop(ctx context.Context, id string) error   { return c.byName(ctx, id, "Stop") }
-func (c *Client) Delete(ctx context.Context, id string) error { return c.byName(ctx, id, "Expire") }
+func (c *Client) Stop(ctx context.Context, id string) error { return c.byName(ctx, id, "Stop") }
+
+// Delete acknowledges completion only after the control plane reports a
+// terminal state. Expire accepting a request is insufficient cleanup proof.
+func (c *Client) Delete(ctx context.Context, id string) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	out, err := c.fetch(ctx, id)
+	if errors.Is(err, provider.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	machine, err := out.machine()
+	if err != nil {
+		return err
+	}
+	if machine.State == provider.StateDeleted {
+		return nil
+	}
+	if err := c.call(ctx, "Expire", map[string]string{"name": machine.Name}, nil); err != nil {
+		return err
+	}
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		machine, err := c.Get(ctx, id)
+		if errors.Is(err, provider.ErrNotFound) || (err == nil && machine.State == provider.StateDeleted) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("namespace: confirm deletion: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("namespace: confirm deletion: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
 
 // ListSnapshots discovers provider-created snapshots. Namespace does not expose
 // an explicit capture RPC; this client deliberately does not implement Snapshotter.

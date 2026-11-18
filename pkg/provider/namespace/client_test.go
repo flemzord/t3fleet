@@ -113,6 +113,7 @@ func TestCreateAndReconcileOperation(t *testing.T) {
 func TestSnapshotForkAndLifecycle(t *testing.T) {
 	methods := []string{}
 	running := true
+	deleted := false
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		method := strings.TrimPrefix(r.URL.Path, servicePath)
 		methods = append(methods, method)
@@ -122,6 +123,10 @@ func TestSnapshotForkAndLifecycle(t *testing.T) {
 		case "Fetch":
 			if len(methods) == 1 {
 				w.WriteHeader(404)
+				return
+			}
+			if deleted {
+				w.WriteHeader(http.StatusNotFound)
 				return
 			}
 			res := map[string]any{"devbox": box}
@@ -150,6 +155,7 @@ func TestSnapshotForkAndLifecycle(t *testing.T) {
 			if input["name"] != "fork" {
 				t.Error("delete uses resolved name")
 			}
+			deleted = true
 			reply(t, w, map[string]any{})
 		case "ListSnapshots":
 			reply(t, w, map[string]any{"snapshots": []map[string]any{{"id": "ready", "completedSnapshot": "complete"}, {"id": "pending"}, {"id": "abandoned", "completedSnapshot": "complete", "abandonedAt": "2026-01-01T00:00:00Z"}}})
@@ -361,5 +367,72 @@ func TestInvalidLabelsDoNotReachControlPlane(t *testing.T) {
 		if err == nil {
 			t.Fatalf("accepted invalid labels: %v", labels)
 		}
+	}
+}
+
+func TestDeleteRequiresObservedFinalState(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	expired := false
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/Expire") {
+			expired = true
+			reply(t, w, map[string]any{})
+			return
+		}
+		if expired {
+			cancel()
+		}
+		reply(t, w, map[string]any{"devbox": map[string]any{"id": "deleting", "name": "delete-test"}, "instanceId": "still-running"})
+	}, nil)
+	err := client.Delete(ctx, "deleting")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Delete returned without observing deletion: %v", err)
+	}
+}
+
+func TestDeleteWaitsForAsynchronousCompletion(t *testing.T) {
+	for _, terminal := range []string{"not-found", "destroyed"} {
+		t.Run(terminal, func(t *testing.T) {
+			expired := false
+			checks := 0
+			client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/Expire") {
+					expired = true
+					reply(t, w, map[string]any{})
+					return
+				}
+				box := map[string]any{"id": "deleting", "name": "delete-test"}
+				if expired {
+					checks++
+					if checks == 2 {
+						if terminal == "not-found" {
+							w.WriteHeader(http.StatusNotFound)
+							return
+						}
+						box["destroyedAt"] = "2026-11-18T00:00:00Z"
+					}
+				}
+				reply(t, w, map[string]any{"devbox": box, "instanceId": "still-visible"})
+			}, nil)
+			if err := client.Delete(t.Context(), "deleting"); err != nil {
+				t.Fatal(err)
+			}
+			if checks != 2 {
+				t.Fatalf("Delete did not wait for terminal state: %d", checks)
+			}
+		})
+	}
+}
+
+func TestDeleteAlreadyAbsentIsIdempotent(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/Fetch") {
+			t.Errorf("unexpected mutation: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}, nil)
+	if err := client.Delete(t.Context(), "already-gone"); err != nil {
+		t.Fatal(err)
 	}
 }
