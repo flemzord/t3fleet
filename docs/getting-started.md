@@ -208,7 +208,7 @@ Add or clone your project using T3's supported project workflow or the remote te
 
 `delete` is an explicit permanent deletion. Saved snapshots are separate provider resources and may remain after the VM is deleted. Remove unneeded snapshots through the provider when appropriate.
 
-Authenticated requests for live T3 data can wake a stopped machine. Public discovery reads use the persisted descriptor and never wake the machine. There is no offline chat cache or agent-aware automatic sleep yet.
+Authenticated requests for live T3 data can wake a stopped machine. Public discovery reads use the persisted descriptor and never wake the machine. There is no offline chat cache. An opt-in `idleTimeout` can stop idle VMs while `serve` runs; its background traffic rules avoid waking them for known passive requests. See [idle lifecycle and safety limits](idle-lifecycle.md).
 
 ## Troubleshooting
 
@@ -255,3 +255,12 @@ work. Each T3 backend still requires confirmation in T3.
 Run `delete` in a terminal to select managed machines by row number and confirm
 the exact selection. Scripts must use `delete --ids ID,ID --yes` or the existing
 `delete ID`. See [bulk lifecycle and recovery](bulk-lifecycle.md).
+
+## Enable automatic idle stop
+
+Add `"idleTimeout": "30m"` at the top level of your existing configuration,
+then restart `serve` with the new binary. Omission or `"0"` disables it.
+Fresh authenticated T3 workload checks protect active agents, subagents,
+approvals and background tasks. Unknown activity keeps the VM running.
+`inspect ID` reports the last stop reason and time. See
+[idle lifecycle](idle-lifecycle.md) for passive traffic, wake behavior and limits.

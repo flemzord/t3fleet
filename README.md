@@ -4,7 +4,7 @@ Run T3 Code agents on persistent **Boat** and **Namespace** machines from one lo
 
 `t3fleet` creates machines from prepared images or snapshots, waits for their T3 server, and gives T3 Code a stable, authenticated local endpoint. Provider adapters use native APIs; the Boat and Namespace CLIs are not needed while the daemon runs.
 
-**Status: early alpha.** The CLI, lifecycle, private state, and live HTTP/WebSocket gateway are implemented. This is a loopback-only first release, with explicit stop/start controls. It does not yet reproduce t3boat's offline chat cache or agent-aware automatic sleep. Read the [current limits](docs/roadmap.md) before using it for unattended work.
+**Status: early alpha.** The CLI, lifecycle, private state, and live HTTP/WebSocket gateway are implemented. This is a loopback-only first release, with explicit stop/start controls. An optional agent-aware idle timeout is available; offline chat replay is not implemented. Read the [current limits](docs/roadmap.md) before using it for unattended work.
 
 ## How it fits together
 
@@ -80,6 +80,19 @@ If T3 cannot be opened, the machine remains created and the CLI reports its ID. 
 
 For Namespace, use `--provider namespace`. [The complete setup guide](docs/getting-started.md) explains credentials, template preparation, model sign-in, and troubleshooting.
 
+## Stop idle machines automatically
+
+Add `"idleTimeout": "30m"` to your configuration and restart `serve` with the
+new binary. The daemon stops a VM only after its idle window and fresh T3 checks
+show no agent run, subagent, pending approval or background task. Failed or
+unknown activity checks keep it running. Useful authenticated requests wake the
+same VM with its existing T3 pairing.
+
+This is disabled by default (`"0"`). Known background RPC subscriptions and
+pings do not keep a VM awake or wake it again. The policy needs `serve` running;
+it does not protect detached non-T3 jobs or schedule future wakes. Read
+[idle lifecycle and safety limits](docs/idle-lifecycle.md) before enabling it.
+
 ## Create and delete in bulk
 
 ```sh
@@ -123,6 +136,7 @@ A snapshot of a used machine can contain code, credentials, and sessions. Treat 
 
 - [Getting started and troubleshooting](docs/getting-started.md)
 - [Validation evidence and limits](docs/validation.md)
+- [Automatic idle stop and wake](docs/idle-lifecycle.md)
 - [Bulk lifecycle and recovery](docs/bulk-lifecycle.md)
 - [Architecture and lifecycle](docs/architecture.md)
 - [T3 protocol gateway](docs/protocol.md)

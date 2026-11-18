@@ -1,6 +1,7 @@
 {
   "listen": "127.0.0.1:47730",
   "stateDir": "/absolute/path/to/private/t3fleet-state",
+  "idleTimeout": "0",
   "machineHost": "127.0.0.1",
   "expectedVersion": "0.1.11-nightly.20261117.4838",
   "providers": {

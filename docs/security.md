@@ -45,7 +45,7 @@ An explicit snapshot of a used machine is a **private backup**. It can retain co
 
 Stopping the daemon only closes local connections. It does not stop agents, remove VMs, or guarantee that billing ends. Explicitly stop or delete cloud resources and verify the provider result.
 
-The current gateway has no multi-user authorization model, hosted TLS management, automatic agent-idle policy, or complete offline protocol emulation. URL-only attachment credentials and OAuth MCP linked-environment flows are not yet supported. See [protocol scope](protocol.md#current-scope).
+The current gateway has no multi-user authorization model, hosted TLS management, remote idle watchdog, or complete offline protocol emulation. URL-only attachment credentials and OAuth MCP linked-environment flows are not yet supported. See [protocol scope](protocol.md#current-scope).
 
 If using an always-on host, use authenticated SSH forwarding and keep control/listener ports private. A public bind address or a reverse proxy alone does not create a supported hosted deployment.
 
@@ -67,3 +67,15 @@ unknown IDs reject the selection. No cloud inventory or implicit `--all` path is
 used. Batch pairing links retain the existing admin authorization, one-use token
 and per-machine client credential rules. Desktop handoff is not proof of saved
 T3 registration. See [bulk lifecycle](bulk-lifecycle.md).
+
+## Idle lifecycle authorization
+
+Idle probes use private provider connections and the saved service credential;
+they do not redeem client tickets, bypass authorization or open public ports.
+Sleeping session checks still require a valid per-machine client token and
+return only cached authorization metadata. Background classification runs only
+after client authorization. Unknown RPCs hold the machine awake, and unknown
+workload responses never authorize a stop. Held requests are bounded. The proxy
+does not automatically replay an uncertain mutation. See
+[idle lifecycle](idle-lifecycle.md) for limitations around external clients,
+non-T3 processes and scheduled work.
