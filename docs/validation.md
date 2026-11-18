@@ -77,3 +77,35 @@ identifiers, credentials, private endpoints, or runtime output are stored here.
 
 For repeatable commands and cleanup rules, see
 [Contributing](../CONTRIBUTING.md#optional-live-validation).
+
+## Bulk lifecycle offline validation (2026-11-18)
+
+The prepared bulk-lifecycle checkout was verified to start at local commit
+`fa200e3e87c955a1cbaae62f81dd7b6212e813f4` before edits. Its Nix shell now
+explicitly selects Go 1.27.3 through `GOTOOLCHAIN`; the locked nixpkgs Go is the
+bootstrap compiler, and the first use may download the verified toolchain.
+Previously the shell's automatic toolchain selection ran Go 1.27.0 from `go.mod`.
+
+The following command passes on macOS arm64 with Go 1.27.3:
+
+```sh
+nix develop --command make lint test build
+```
+
+Live-test opt-in variables were explicitly unset for validation. `lint` checks
+gofmt and runs `go vet`; `test` runs all packages with `-race -count=1`; `build`
+writes `bin/t3fleet` inside this checkout only. The CLI help was also checked.
+No cloud machine was allocated or deleted, and no real T3 desktop was opened.
+The existing `mon-test*` resources, private configurations and other checkouts
+were not used. No push, PR, merge or remote CI run is part of this evidence.
+
+New fixtures verify full local name preflight, persistence failure without
+allocation, stable IDs after restart, replay conflicts, identical template/size,
+reconciliation after a lost create response, deleted-member tombstones,
+cancellation, bounded concurrent starts and individual partial outcomes. They
+also verify runtime/service/client credential isolation, rejection of a cloned
+runtime identity, and a start/delete race on planned intents without orphaning
+an allocation. CLI tests cover admin authentication, managed-ID selection,
+deduplication, declined/empty/invalid/EOF selection, headless deletion, partial
+delete failure, and pacing/cancellation of desktop handoffs with an injected
+launcher. T3 confirmations and a real ten-VM batch remain unverified live.

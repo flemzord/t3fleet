@@ -52,3 +52,18 @@ If using an always-on host, use authenticated SSH forwarding and keep control/li
 ## Reporting a vulnerability
 
 Use GitHub's private vulnerability reporting for this repository if it is available. Otherwise, open an issue asking the maintainer for a private contact channel without including exploitation details, tokens, private URLs, or user data. Do not post live credentials in a public issue.
+
+## Bulk operations
+
+Batch plans persist unique machine operation IDs before any allocation. Retries
+reuse those IDs; deleted members remain tombstones. The daemon rejects a runtime
+identity or service token already used by another managed VM. This check does
+not make a credential-bearing snapshot safe to share.
+
+Interactive multi-delete resolves row numbers to a fixed list of managed IDs,
+then requires explicit confirmation. Scripted multi-delete requires both an
+explicit `--ids` list and `--yes`. All IDs are validated before the first deletion;
+unknown IDs reject the selection. No cloud inventory or implicit `--all` path is
+used. Batch pairing links retain the existing admin authorization, one-use token
+and per-machine client credential rules. Desktop handoff is not proof of saved
+T3 registration. See [bulk lifecycle](bulk-lifecycle.md).

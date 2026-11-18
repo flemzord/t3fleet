@@ -30,6 +30,24 @@ The public extension surface is `pkg/provider`. Storage records, CLI wire types,
 
 A failed initialization does not erase the remote ID. The machine remains visible for diagnosis, restart, or explicit deletion. An incomplete creation retains its operation ID so `start` can reconcile it. Deletion does not discard local recovery state until provider deletion succeeds.
 
+## Batch lifecycle
+
+`PrepareBatch` reserves deterministic names, distinct machine IDs and stable
+listeners in one durable state transaction before cloud allocation. Batch plans
+persist the resolved template and size plus member IDs. CLI workers use the
+existing authenticated `start` operation with bounded concurrency; provider
+adapters do not know about batches. Replaying an identical batch ID returns its
+original plan. Deleted members remain tombstones and cannot be recreated by
+resume. Planned members can be deleted locally before any allocation attempt;
+ambiguous allocations require provider reconciliation before cleanup.
+
+The admin API exposes authenticated `POST /v1/batches` (prepare/replay) and
+`GET /v1/batches/ID` (read current member states). Preparation does not allocate
+cloud machines. The CLI owns individual progress, concurrency and desktop
+handoffs. Multi-delete snapshots an explicit managed-ID selection, validates
+all IDs before deletion and uses the existing per-machine DELETE route.
+See [bulk lifecycle](bulk-lifecycle.md) for recovery and confirmation behavior.
+
 ## Stable T3 origin
 
 Each managed machine has a separate loopback listener. T3 Code associates with that origin, not with a provider address. A resumed Namespace instance can have a new ID or gateway route without changing T3's local URL.

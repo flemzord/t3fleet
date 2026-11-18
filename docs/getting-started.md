@@ -11,7 +11,7 @@ make test
 make build
 ```
 
-Alternatively, install Go 1.27 and a C compiler, then run the same Make targets. The binary is `bin/t3fleet`.
+Alternatively, install Go 1.27 and a C compiler, then run the same Make targets. The binary is `bin/t3fleet`. The Nix shell selects Go 1.27.3 with `GOTOOLCHAIN`; its first use may download the verified toolchain into the normal Go cache.
 
 ## 2. Prepare a template
 
@@ -244,3 +244,14 @@ After rebuilding the daemon, restart `t3fleet serve` with the same configuration
 to use updated API errors. Replacing the CLI binary alone does not update an
 already running daemon. Machine records and client authorization persist across
 a normal daemon restart; cloud VMs are not stopped by that restart.
+
+## Create or delete several machines
+
+Use `create --name workers --provider boat --count 10 --concurrency 3` to reserve
+and start an identical batch. The daemon records the plan before allocation.
+Use `create --resume BATCH_ID` after interruption, or `--no-register` for headless
+work. Each T3 backend still requires confirmation in T3.
+
+Run `delete` in a terminal to select managed machines by row number and confirm
+the exact selection. Scripts must use `delete --ids ID,ID --yes` or the existing
+`delete ID`. See [bulk lifecycle and recovery](bulk-lifecycle.md).

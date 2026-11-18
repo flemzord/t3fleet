@@ -42,7 +42,7 @@ make test
 make build
 ```
 
-Without Nix, run the same `make` commands with Go 1.27 installed. Nix pins Go 1.27.3; CI also checks the minimum Go version declared in `go.mod`.
+Without Nix, run the same `make` commands with Go 1.27 installed. The Nix shell selects Go 1.27.3 through Go's verified toolchain download (network access is needed on first use); CI also checks the minimum Go version declared in `go.mod`.
 
 Copy and edit the example configuration:
 
@@ -76,6 +76,24 @@ If T3 cannot be opened, the machine remains created and the CLI reports its ID. 
 
 For Namespace, use `--provider namespace`. [The complete setup guide](docs/getting-started.md) explains credentials, template preparation, model sign-in, and troubleshooting.
 
+## Create and delete in bulk
+
+```sh
+./bin/t3fleet create --name workers --provider boat --count 10 --concurrency 3
+./bin/t3fleet create --resume BATCH_ID --no-register
+./bin/t3fleet delete
+# Explicit scriptable selection:
+./bin/t3fleet delete --ids MACHINE_ID_1,MACHINE_ID_2 --yes
+```
+
+Bulk create uses `workers-01` through `workers-10` with the same template and
+size. It saves the full plan before allocation, reports each outcome and retains
+failed members for safe recovery. Use `--no-register` for scripts. Interactive
+association opens each ready VM in T3 and waits before the next handoff; T3 still
+requires confirmation for every backend. `delete` lists only managed machines,
+accepts multiple row numbers and confirms the exact selection before deletion.
+Read [bulk lifecycle and recovery](docs/bulk-lifecycle.md) before running a batch.
+
 ## Everyday commands
 
 All commands take `--config PATH`. The CLI sends authenticated requests to the local daemon; it does not modify the state file directly.
@@ -89,6 +107,10 @@ All commands take `--config PATH`. The CLI sends authenticated requests to the l
 | `pair ID` | Ensure readiness and print a T3 Code pairing link. |
 | `stop ID` / `start ID` | Explicitly stop or resume a machine. Authenticated proxy traffic can also wake it. |
 | `snapshot ID --name NAME` | Create a private backup where the provider supports explicit capture. |
+| `create … --count 10` | Create an identical batch with bounded concurrency and a durable recovery ID. |
+| `create --resume BATCH_ID` | Resume incomplete batch members and reopen ready members for association. |
+| `delete` | Select managed machines interactively and confirm permanent deletion. |
+| `delete --ids ID,ID --yes` | Delete exactly the listed managed IDs in scripts. |
 | `delete ID` | Permanently delete the remote machine and then its local record. |
 
 A snapshot of a used machine can contain code, credentials, and sessions. Treat it as a private backup, not as a shared golden template. Namespace currently supports creating from existing snapshots but does not implement the explicit `snapshot` command. See the [Boat](docs/providers-boat.md) and [Namespace](docs/providers-namespace.md) adapter notes.
@@ -97,6 +119,7 @@ A snapshot of a used machine can contain code, credentials, and sessions. Treat 
 
 - [Getting started and troubleshooting](docs/getting-started.md)
 - [Validation evidence and limits](docs/validation.md)
+- [Bulk lifecycle and recovery](docs/bulk-lifecycle.md)
 - [Architecture and lifecycle](docs/architecture.md)
 - [T3 protocol gateway](docs/protocol.md)
 - [Adding a provider](docs/adding-a-provider.md)
