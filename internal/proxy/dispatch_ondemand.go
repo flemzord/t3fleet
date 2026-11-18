@@ -52,7 +52,7 @@ type onDemandDisk struct {
 func NewDispatchOnDemand(origin string, store *state.Store, opts DispatchOnDemand) (*Proxy, error) {
 	if store == nil || opts.Controller.Resolve == nil || opts.Provision == nil || opts.Lookup == nil ||
 		!filepath.IsAbs(opts.ProjectRoot) || opts.MaxWorkers < 1 || opts.MaxWorkers > 16 {
-		return nil, errors.New("on-demand dispatch requires a local T3 controller, private project root and Boat provisioner")
+		return nil, errors.New("on-demand dispatch requires a local T3 controller, private project root and worker provisioner")
 	}
 	d := &dispatchPOC{store: store, workers: []DispatchWorker{opts.Controller}, timeout: 3 * time.Minute,
 		onDemand: &opts, preparing: map[string]chan struct{}{}}
@@ -126,7 +126,7 @@ func (d *dispatchPOC) registerRepository(ctx context.Context, payload map[string
 	if existing := d.disk.OnDemand.Project; existing != nil {
 		if existing.Remote != remote {
 			d.mu.Unlock()
-			return nil, errors.New("this Boat experiment supports one GitHub repository")
+			return nil, errors.New("on-demand dispatch supports one GitHub repository")
 		}
 		id, title = existing.ID, existing.Title
 	} else {
@@ -176,12 +176,12 @@ func (d *dispatchPOC) threadWorker(threadID string) (DispatchWorker, error) {
 	r, ok := d.disk.OnDemand.Routes[threadID]
 	d.mu.Unlock()
 	if !ok || !r.Ready {
-		return DispatchWorker{}, errors.New("thread has no ready Boat worker")
+		return DispatchWorker{}, errors.New("thread has no ready dispatch worker")
 	}
 	return d.onDemand.Lookup(r.Key)
 }
 
-func (d *dispatchPOC) prepareBoat(ctx context.Context, id, projectID string) (DispatchWorker, error) {
+func (d *dispatchPOC) prepareDemandWorker(ctx context.Context, id, projectID string) (DispatchWorker, error) {
 	for {
 		d.mu.Lock()
 		project := d.disk.OnDemand.Project
@@ -206,7 +206,7 @@ func (d *dispatchPOC) prepareBoat(ctx context.Context, id, projectID string) (Di
 		if !exists {
 			if len(d.disk.OnDemand.Routes) >= d.onDemand.MaxWorkers {
 				d.mu.Unlock()
-				return DispatchWorker{}, errors.New("the Boat worker limit has been reached")
+				return DispatchWorker{}, errors.New("the dispatch worker limit has been reached")
 			}
 			route = demandRoute{Key: demandKey(d.disk.EnvironmentID, "thread", id), ProjectID: projectID}
 			if err := d.saveDemandRouteLocked(id, route); err != nil {
@@ -245,7 +245,7 @@ func (d *dispatchPOC) saveDemandRouteLocked(id string, r demandRoute) error {
 	demand.Routes[id] = r
 	next.OnDemand = &demand
 	if err := d.store.Save(next); err != nil {
-		return errors.New("could not persist the Boat thread assignment")
+		return errors.New("could not persist the dispatch thread assignment")
 	}
 	d.disk = next
 	return nil
@@ -323,9 +323,9 @@ func (d *dispatchPOC) callOnDemand(ctx context.Context, tag string, frame, paylo
 		initialAttachments, _ := initial["attachments"].([]any)
 		strategy, _ := payload["workspaceStrategy"].(map[string]any)
 		if !ok || commandID == "" || len(initialAttachments) != 0 || (strategy["type"] != "root" && strategy["type"] != "worktree") {
-			return errors.New("start a new Boat thread with a text message in a new or root checkout")
+			return errors.New("start a new dispatch thread with a text message in a new or root checkout")
 		}
-		worker, err := d.prepareBoat(ctx, threadID, projectID)
+		worker, err := d.prepareDemandWorker(ctx, threadID, projectID)
 		if err != nil {
 			return err
 		}
@@ -334,7 +334,7 @@ func (d *dispatchPOC) callOnDemand(ctx context.Context, tag string, frame, paylo
 		cmd, _ := payload["type"].(string)
 		if !slices.Contains([]string{"message.dispatch", "thread.visit", "thread.mark-unread", "thread.metadata.update",
 			"thread.model-selection.set", "thread.stop", "thread.archive", "thread.unarchive", "thread.settle", "thread.pin", "thread.unpin"}, cmd) {
-			return errors.New("this command is outside Boat dispatch")
+			return errors.New("this command is outside on-demand dispatch")
 		}
 		fallthrough
 	case "orchestration.subscribeThread", "orchestration.getThreadProjection", "orchestration.subscribePromptSuggestion",
@@ -360,7 +360,7 @@ func (d *dispatchPOC) callOnDemand(ctx context.Context, tag string, frame, paylo
 	case "server.refreshProviders":
 		return send(rpcSuccess(id, map[string]any{"providers": d.demandProviders()}))
 	default:
-		return errors.New("RPC outside Boat dispatch")
+		return errors.New("RPC outside on-demand dispatch")
 	}
 }
 

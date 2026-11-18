@@ -436,3 +436,24 @@ func TestDeleteAlreadyAbsentIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCreateRegisteredImageWithSlash(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch strings.TrimPrefix(r.URL.Path, servicePath) {
+		case "Fetch":
+			w.WriteHeader(http.StatusNotFound)
+		case "Create":
+			input := body(t, r)
+			if input["imageName"] != "formance/max-dev" || input["imageRef"] != nil {
+				t.Errorf("registered image was not sent by name: %+v", input)
+			}
+			reply(t, w, map[string]any{"devbox": map[string]any{"id": "id", "name": "test"}, "instanceId": "instance-1"})
+		default:
+			t.Errorf("unexpected request: %s", r.URL.Path)
+		}
+	}, nil)
+	req := provider.CreateRequest{Name: "test", OperationID: "op", Template: provider.Template{Image: "registered:formance/max-dev"}}
+	if _, err := client.Create(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+}

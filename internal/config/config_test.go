@@ -87,10 +87,21 @@ func TestDispatchOnDemandConfiguration(t *testing.T) {
 	if err := cfg.Validate(); err != nil || cfg.DispatchPOC.OnDemand.MaxWorkerCount() != 8 {
 		t.Fatalf("zero-worker on-demand config rejected or wrong limit: %v", err)
 	}
+	cfg.DispatchPOC.OnDemand.NamespaceFallback = true
+	cfg.Providers.Namespace = &Namespace{}
+	cfg.Templates["namespace"] = provider.Template{Image: "registered:formance/max-dev"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Namespace fallback configuration rejected: %v", err)
+	}
 	tests := []struct {
 		name   string
 		modify func(*Config)
 	}{
+		{"fallback without provider", func(c *Config) { c.DispatchPOC.OnDemand.NamespaceFallback = true }},
+		{"fallback without image", func(c *Config) {
+			c.DispatchPOC.OnDemand.NamespaceFallback = true
+			c.Providers.Namespace = &Namespace{}
+		}},
 		{"mixed with fixed workers", func(c *Config) { c.DispatchPOC.Workers = []string{"a", "b"} }},
 		{"no Boat config", func(c *Config) { c.Providers.Boat = nil }},
 		{"no Boat template", func(c *Config) { delete(c.Templates, "boat") }},

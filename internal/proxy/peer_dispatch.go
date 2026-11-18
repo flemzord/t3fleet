@@ -331,7 +331,7 @@ func (d *dispatchPOC) launchPeerThread(w http.ResponseWriter, r *http.Request, r
 		failTool("invalid_request", "A launch retry must use the original project and link.")
 		return
 	}
-	worker, err := d.prepareBoat(r.Context(), id, projectID)
+	worker, err := d.prepareDemandWorker(r.Context(), id, projectID)
 	if err != nil {
 		failTool("orchestration_error", err.Error())
 		return

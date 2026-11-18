@@ -196,6 +196,9 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 	if t.Snapshot != "" && t.Source == "" {
 		return provider.Machine{}, errors.New("namespace: snapshot requires its source Devbox")
 	}
+	if t.Image == "registered:" {
+		return provider.Machine{}, errors.New("namespace: registered image name is empty")
+	}
 	if (t.Image == "") == (t.Source == "") {
 		return provider.Machine{}, errors.New("namespace: choose either an image or a source Devbox snapshot")
 	}
@@ -237,7 +240,9 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 		input["site"] = c.config.Site
 		input["activate"] = true
 		input["versionControl"] = map[string]any{}
-		if strings.HasPrefix(t.Image, "builtin:") {
+		if name, ok := strings.CutPrefix(t.Image, "registered:"); ok {
+			input["imageName"] = name
+		} else if strings.HasPrefix(t.Image, "builtin:") {
 			input["imageName"] = t.Image
 		} else if strings.ContainsAny(t.Image, "/@:") {
 			input["imageRef"] = t.Image

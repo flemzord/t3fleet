@@ -47,7 +47,10 @@ A creation request selects one of two template types:
 
 - `Template.Image`: a registered image name or OCI reference containing the
   prepared T3 server. The adapter calls `DevBoxService.Create`, starts the
-  machine, and explicitly disables any inherited repository checkout.
+  machine, and explicitly disables any inherited repository checkout. If a
+  registered image name contains a slash, prefix it with `registered:`
+  (for example, `registered:formance/max-dev`). An unprefixed OCI reference
+  remains an OCI reference.
 - `Template.Source` plus optional `Template.Snapshot`: the golden Devbox name
   and snapshot ID. The adapter calls `CreateFromDevbox`. With no snapshot ID,
   Namespace selects the source's latest completed snapshot.

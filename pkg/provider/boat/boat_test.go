@@ -762,3 +762,62 @@ func TestGetRejectsPathTraversalAndInconsistentResponse(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateFallbackRequiresConfirmedRefusal(t *testing.T) {
+	for _, tt := range []struct {
+		name, method, code string
+		status             int
+		rejected           bool
+	}{
+		{"billing", "POST", "payment_required", 402, true},
+		{"limit", "POST", "limit_reached", 429, true},
+		{"unclassified billing", "POST", "", 402, false},
+		{"unclassified limit", "POST", "", 429, false},
+		{"capacity", "POST", "out_of_capacity", 503, true},
+		{"unknown 503", "POST", "unavailable", 503, false},
+		{"unknown 500", "POST", "internal_error", 500, false},
+		{"lookup", "GET", "limit_reached", 429, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == tt.method {
+					w.WriteHeader(tt.status)
+					respond(t, w, map[string]any{"ok": false, "code": tt.code})
+					return
+				}
+				respond(t, w, map[string]any{"ok": true, "sandboxes": []any{}})
+			})
+			m, err := c.Create(t.Context(), provider.CreateRequest{Template: provider.Template{Snapshot: "golden"}, OperationID: "op"})
+			if m.ID != "" || err == nil || errors.Is(err, provider.ErrCreateRejected) != tt.rejected {
+				t.Fatalf("unexpected refusal classification: %v, %v", m, err)
+			}
+		})
+	}
+}
+
+func TestCreateDoesNotReplayLostPostBeforeReconciliation(t *testing.T) {
+	var posts int
+	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			respond(t, w, map[string]any{"ok": true, "sandboxes": []any{}})
+			return
+		}
+		posts++
+		if posts != 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			respond(t, w, map[string]any{"ok": false, "code": "limit_reached"})
+			return
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_ = conn.Close()
+	})
+	_, err := c.Create(t.Context(), provider.CreateRequest{Template: provider.Template{Snapshot: "golden"}, OperationID: "op"})
+	if err == nil || errors.Is(err, provider.ErrCreateRejected) {
+		t.Fatalf("lost response was treated as an explicit rejection: %v", err)
+	}
+}

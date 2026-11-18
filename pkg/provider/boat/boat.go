@@ -121,6 +121,11 @@ func (c *Client) request(ctx context.Context, method, path string, body any, hea
 	if err != nil {
 		return errors.New("boat: cannot construct request")
 	}
+	if method == http.MethodPost && path == "/sandboxes" {
+		// A transport replay could hide a lost create response behind a
+		// refusal on the second request. Reconcile in Create instead.
+		req.GetBody = nil
+	}
 	req.Header.Set("Authorization", "Bearer "+c.key)
 	if c.organization != "" {
 		req.Header.Set("X-Boat-Org", c.organization)
@@ -235,6 +240,14 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 	}
 	err = c.request(ctx, http.MethodPost, "/sandboxes", body, http.Header{"Idempotency-Key": {req.OperationID}}, &res)
 	if err != nil {
+		// Only explicit refusals of this POST qualify. A failed reconciliation
+		// lookup, timeout, or generic 5xx may hide an existing sandbox.
+		if apiErr, ok := errors.AsType[*APIError](err); ok &&
+			((apiErr.Status == http.StatusPaymentRequired && apiErr.Code != "") ||
+				(apiErr.Status == http.StatusTooManyRequests && slices.Contains([]string{"limit_reached", "member_limit_reached", "rate_limited"}, apiErr.Code)) ||
+				(apiErr.Status == http.StatusServiceUnavailable && (apiErr.Code == "out_of_capacity" || apiErr.Code == "no_ready_machine"))) {
+			err = fmt.Errorf("%w: %w", provider.ErrCreateRejected, err)
+		}
 		return provider.Machine{}, err
 	}
 	if res.Sandbox.ID == "" {

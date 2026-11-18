@@ -1,0 +1,127 @@
+package fleet_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/flemzord/t3fleet/pkg/provider"
+)
+
+type dispatchProvider struct {
+	*mockProvider
+	createErrors []error
+	attempts     int
+	checkouts    int
+	bootstrap    int
+}
+
+func (p *dispatchProvider) Create(ctx context.Context, req provider.CreateRequest) (provider.Machine, error) {
+	p.attempts++
+	if len(p.createErrors) > 0 {
+		err := p.createErrors[0]
+		p.createErrors = p.createErrors[1:]
+		if err != nil {
+			return provider.Machine{}, err
+		}
+	}
+	return p.mockProvider.Create(ctx, req)
+}
+
+func (p *dispatchProvider) Exec(ctx context.Context, id string, req provider.ExecRequest) (provider.ExecResult, error) {
+	if len(req.Args) >= 4 {
+		switch req.Args[3] {
+		case "t3fleet-dispatch":
+			p.checkouts++
+			return provider.ExecResult{Stdout: fmt.Sprintf("/home/devbox/.t3fleet/dispatch-workspaces/%s/repo\n", req.Args[4])}, nil
+		case "t3fleet-runtime":
+			p.bootstrap++
+			req.Args = []string{"/bin/bash", "-lc", "exec t3fleet-runtime-info"}
+		}
+	}
+	return p.mockProvider.Exec(ctx, id, req)
+}
+
+func dispatchProviders(t *testing.T) (*fixture, *dispatchProvider, *dispatchProvider) {
+	t.Helper()
+	f := newFleet(t)
+	boat := &dispatchProvider{mockProvider: f.p}
+	namespace := &dispatchProvider{mockProvider: newProvider(t)}
+	f.options.Providers["boat"] = boat
+	f.options.Providers["namespace"] = namespace
+	f.options.Templates["boat"] = provider.Template{Snapshot: "golden"}
+	f.options.Templates["namespace"] = provider.Template{Image: "registered:formance/max-dev"}
+	f.restart(t)
+	return f, boat, namespace
+}
+
+func TestDispatchFallbackRecoversSameDevboxAfterRestart(t *testing.T) {
+	f, boat, namespace := dispatchProviders(t)
+	boat.createErrors = []error{provider.ErrCreateRejected}
+	namespace.createFailsOnce = true // Namespace allocates, then loses its reply.
+	key := strings.Repeat("a", 32)
+	remote := "https://github.com/octocat/Hello-World.git"
+	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, true); err == nil {
+		t.Fatal("expected interrupted Namespace create")
+	}
+	first, err := f.m.Batch(key)
+	if err != nil || len(first.Machines) != 1 || first.Machines[0].Provider != "namespace" {
+		t.Fatalf("fallback reservation was not saved: %+v, %v", first, err)
+	}
+	f.restart(t)
+	// A config change prevents new fallbacks, but can't reroute an existing thread.
+	if _, cwd, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, false); err != nil || cwd == "" {
+		t.Fatalf("Namespace worker could not recover through restart: %q, %v", cwd, err)
+	}
+	batch, _ := f.m.Batch(key)
+	if len(batch.Machines) != 1 || batch.Machines[0].ID != first.Machines[0].ID || batch.Machines[0].State != "ready" {
+		t.Fatalf("fallback lost its original machine: %+v", batch)
+	}
+	if boat.attempts != 1 || boat.allocations != 0 || namespace.allocations != 1 || namespace.bootstrap != 1 ||
+		namespace.checkouts != 1 || namespace.requests[1].Template.Image != "registered:formance/max-dev" {
+		t.Fatalf("unexpected provider activity: Boat attempts=%d, Namespace allocations=%d", boat.attempts, namespace.allocations)
+	}
+	if _, err := f.m.LookupDispatchWorker(key); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.m.Delete(t.Context(), batch.Machines[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, true); err == nil || namespace.allocations != 1 {
+		t.Fatal("retry resurrected a deleted worker")
+	}
+}
+
+func TestDispatchDoesNotSwitchAfterUncertainBoatCreate(t *testing.T) {
+	f, boat, namespace := dispatchProviders(t)
+	boat.createErrors = []error{errors.New("response lost"), provider.ErrCreateRejected}
+	key := strings.Repeat("b", 32)
+	for range 2 {
+		if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, "https://github.com/octocat/Hello-World.git", true); err == nil {
+			t.Fatal("expected Boat create failure")
+		}
+		f.restart(t)
+	}
+	if boat.attempts != 2 || namespace.attempts != 0 {
+		t.Fatalf("ambiguous Boat operation changed providers: Boat=%d Namespace=%d", boat.attempts, namespace.attempts)
+	}
+}
+
+func TestDispatchRemainsOnBoatAfterAllocation(t *testing.T) {
+	f, boat, namespace := dispatchProviders(t)
+	boat.execFails = true
+	key := strings.Repeat("c", 32)
+	remote := "https://github.com/octocat/Hello-World.git"
+	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, true); err == nil {
+		t.Fatal("expected Boat runtime failure")
+	}
+	boat.execFails = false
+	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, true); err != nil {
+		t.Fatal(err)
+	}
+	if boat.allocations != 1 || boat.checkouts != 1 || namespace.attempts != 0 {
+		t.Fatal("launch did not stay with its original Boat sandbox")
+	}
+}

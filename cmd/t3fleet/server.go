@@ -84,7 +84,10 @@ func serve(ctx context.Context, cfg config.Config, diagnostics io.Writer) error 
 			dispatch, err = proxy.NewDispatchOnDemand(origin, store, proxy.DispatchOnDemand{
 				Controller: controller, ProjectRoot: filepath.Join(cfg.StateDir, stateName, "projects"),
 				MaxWorkers: poc.OnDemand.MaxWorkerCount(), Model: poc.OnDemand.Model,
-				Provision: manager.ProvisionDispatchBoat, Lookup: manager.LookupDispatchBoat,
+				Provision: func(ctx context.Context, key, remote string) (proxy.DispatchWorker, string, error) {
+					return manager.ProvisionDispatchWorker(ctx, key, remote, poc.OnDemand.NamespaceFallback)
+				},
+				Lookup: manager.LookupDispatchWorker,
 			})
 		} else {
 			var workers []proxy.DispatchWorker

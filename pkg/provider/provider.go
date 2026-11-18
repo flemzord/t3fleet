@@ -9,6 +9,11 @@ import (
 )
 
 var ErrNotFound = errors.New("machine not found")
+
+// ErrCreateRejected means the provider explicitly declined creation without
+// allocating a machine. Transport errors and unknown outcomes must not use it.
+var ErrCreateRejected = errors.New("provider refused machine creation")
+
 var ErrUnsupported = errors.New("operation not supported by provider")
 
 type State string

@@ -6,9 +6,9 @@ The Desktop sends ordinary T3 protocol v2 requests and does not supply a
 provider or machine ID. The proxy owns placement and identity; each worker
 retains its own T3 database, checkout and model session.
 
-## Boat workers on demand
+## Workers on demand
 
-This mode starts with **zero Boat VMs**. It starts a dedicated local T3
+This mode starts with **zero worker VMs**. It starts a dedicated local T3
 controller, with a separate home and state directory, for pairing and project
 metadata only. The controller does not clone the repository or run an agent.
 
@@ -72,6 +72,38 @@ canary completes both first turns and the follow-up with a deterministic ACP
 replay agent, and checks recovery of an interrupted reservation without a new
 allocation.
 
+### Fall back to Namespace
+
+Keep the Boat provider and snapshot. Merge these fields into the existing
+configuration to use the registered Namespace image `formance/max-dev`:
+
+```json
+{
+  "providers": { "namespace": {} },
+  "templates": { "namespace": { "image": "registered:formance/max-dev" } },
+  "dispatchPOC": { "onDemand": { "namespaceFallback": true } }
+}
+```
+
+Use a Namespace identity that can create Devboxes and access this image. The
+`registered:` prefix selects the name registered with Namespace, even when
+the name contains a slash.
+
+Boat remains first in line. A new reservation switches to Namespace only
+when Boat explicitly refuses its first creation request for billing, limits
+or capacity. If Boat returns a sandbox ID, or if the result is uncertain
+(for example, after a timeout), retry keeps the Boat reservation. The worker
+stays on Namespace once the fallback is recorded, including after daemon
+restart. To disable new fallbacks, clear `namespaceFallback` and retain the
+Namespace provider while existing Namespace workers still use it.
+
+If the image has no t3fleet runtime, the daemon uses Nix in the Devbox to
+install the pinned T3 and agent CLIs bundled with t3fleet. The first worker
+start needs network access to the Nix inputs and upstream T3 release, and
+can take longer with a cold cache. A failed bootstrap retains the same worker
+for a retry. Each Devbox needs its own model access and, for private projects,
+GitHub access. The daemon does not copy credentials from Boat or Desktop.
+
 ### Launch from another T3 environment
 
 On-demand dispatch also accepts T3 **Linked Environments** on the pinned
@@ -88,7 +120,7 @@ be reachable from the source T3 server. t3fleet itself binds only to loopback.
 From a source thread, call `t3_project_list` on the linked environment for the
 project ID. Use `t3_thread_launch` with that project ID and a first text
 message in a root checkout or a new worktree. Two launches with different
-request IDs reserve two different Boat workers. Retry a launch with the same
+request IDs reserve two different workers. Retry a launch with the same
 `clientRequestId` to recover its original worker and thread. The selected
 Codex model and repository credentials must be available on each worker.
 

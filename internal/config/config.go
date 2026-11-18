@@ -39,9 +39,10 @@ type DispatchPOC struct {
 }
 
 type DispatchOnDemand struct {
-	T3Binary   string `json:"t3Binary"`
-	MaxWorkers int    `json:"maxWorkers,omitempty"`
-	Model      string `json:"model,omitempty"`
+	T3Binary          string `json:"t3Binary"`
+	NamespaceFallback bool   `json:"namespaceFallback,omitempty"`
+	MaxWorkers        int    `json:"maxWorkers,omitempty"`
+	Model             string `json:"model,omitempty"`
 }
 
 func (d DispatchOnDemand) MaxWorkerCount() int {
@@ -152,6 +153,10 @@ func (cfg Config) Validate() error {
 		if onDemand := poc.OnDemand; onDemand != nil {
 			if len(poc.Workers) != 0 || cfg.Providers.Boat == nil || cfg.Templates["boat"] == (provider.Template{}) {
 				return errors.New("dispatchPOC.onDemand requires a Boat template and no dedicated workers")
+			}
+			if onDemand.NamespaceFallback && (cfg.Providers.Namespace == nil ||
+				strings.TrimPrefix(cfg.Templates["namespace"].Image, "registered:") == "") {
+				return errors.New("dispatchPOC.onDemand.namespaceFallback requires providers.namespace and templates.namespace.image")
 			}
 			if !filepath.IsAbs(onDemand.T3Binary) || strings.ContainsAny(onDemand.T3Binary, "\x00\r\n") {
 				return errors.New("dispatchPOC.onDemand.t3Binary must be an absolute executable path")

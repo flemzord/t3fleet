@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	runtimebundle "github.com/flemzord/t3fleet"
 	"github.com/flemzord/t3fleet/internal/proxy"
 	"github.com/flemzord/t3fleet/internal/state"
 	"github.com/flemzord/t3fleet/pkg/provider"
@@ -76,6 +77,8 @@ type record struct {
 	Clients       []clientToken     `json:"clients,omitempty"`
 	Descriptor    map[string]any    `json:"descriptor,omitempty"`
 	Session       map[string]any    `json:"session,omitempty"`
+
+	InstallRuntime bool `json:"installRuntime,omitempty"`
 }
 type diskState struct {
 	Schema  int                    `json:"schema"`
@@ -91,6 +94,10 @@ type machineHandle struct {
 	listener    net.Listener
 	checked     time.Time // protected by operation
 	initialized time.Time // independent service-authorization refresh clock
+
+	// A failed save may have already replaced the on-disk provider selection.
+	// Guarded by operation; reset only by reloading the store on restart.
+	dispatchSwitchUncertain bool
 }
 type Manager struct {
 	mu       sync.RWMutex
@@ -339,8 +346,8 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (Machine, error
 	return m.copy(h).Machine, nil
 }
 
-// initialize executes an already installed first-boot hook; it never installs
-// code or copies a user's local model credentials into the machine.
+// initialize runs the first-boot hook. A Namespace dispatch reservation may
+// also install the pinned runtime bundled with the daemon on its base image.
 func (m *Manager) initialize(ctx context.Context, h *machineHandle, p provider.Provider) error {
 	ctx, cancel := context.WithTimeout(ctx, m.opts.ReadyTimeout)
 	defer cancel()
@@ -348,7 +355,11 @@ func (m *Manager) initialize(ctx context.Context, h *machineHandle, p provider.P
 	if err := waitRunning(ctx, p, r.RemoteID); err != nil {
 		return err
 	}
-	result, err := p.Exec(ctx, r.RemoteID, provider.ExecRequest{Args: []string{"/bin/bash", "-lc", "exec t3fleet-runtime-info"}})
+	args := []string{"/bin/bash", "-lc", "exec t3fleet-runtime-info"}
+	if r.InstallRuntime {
+		args = append([]string{"/bin/bash", "-lc", dispatchRuntimeScript, "t3fleet-runtime"}, runtimebundle.Sources()...)
+	}
+	result, err := p.Exec(ctx, r.RemoteID, provider.ExecRequest{Args: args})
 	if err != nil {
 		return errors.New("fleet: private runtime execution failed; inspect provider connectivity")
 	}
@@ -356,6 +367,9 @@ func (m *Manager) initialize(ctx context.Context, h *machineHandle, p provider.P
 		return ErrRuntimeUnavailable
 	}
 	if result.ExitCode != 0 {
+		if r.InstallRuntime {
+			return fmt.Errorf("fleet: Namespace runtime bootstrap or initialization exited %d", result.ExitCode)
+		}
 		return fmt.Errorf("fleet: image runtime initialization exited %d; use a prepared t3fleet image", result.ExitCode)
 	}
 	var info struct {
@@ -485,6 +499,9 @@ func (m *Manager) Start(ctx context.Context, id string) error {
 		return ErrNotFound
 	}
 	err = m.ensure(ctx, h, true)
+	if errors.Is(err, errDispatchSwitchUncertain) {
+		return err
+	}
 	if err != nil {
 		_ = m.update(h, func(r *record) {
 			if r.State == "planned" {
@@ -503,6 +520,9 @@ func (m *Manager) Start(ctx context.Context, id string) error {
 	return err
 }
 func (m *Manager) ensure(ctx context.Context, h *machineHandle, force bool) error {
+	if h.dispatchSwitchUncertain {
+		return errDispatchSwitchUncertain
+	}
 	r := m.copy(h)
 	p := m.opts.Providers[r.Provider]
 	if r.RemoteID == "" {
@@ -521,6 +541,9 @@ func (m *Manager) ensure(ctx context.Context, h *machineHandle, force bool) erro
 			}
 		}
 		if createErr != nil {
+			if remote.ID == "" && errors.Is(createErr, provider.ErrCreateRejected) {
+				return provider.ErrCreateRejected
+			}
 			return errors.New("fleet: provider creation reconciliation failed; saved operation retained")
 		}
 		return m.initialize(ctx, h, p)
