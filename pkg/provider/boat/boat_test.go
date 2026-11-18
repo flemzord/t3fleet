@@ -239,6 +239,39 @@ func TestDeleteConfirmationAndCompletion(t *testing.T) {
 	}
 }
 
+func TestDeleteStopsOnFailedOperation(t *testing.T) {
+	reads := 0
+	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+		status := "processing"
+		if r.Method != "DELETE" {
+			reads++
+			status = "failed"
+		}
+		respond(t, w, map[string]any{"ok": true, "operation": map[string]string{"id": "delete-1", "status": status}})
+	})
+	err := c.Delete(t.Context(), "bx_test")
+	if err == nil || reads != 1 {
+		t.Fatalf("failed deletion reads=%d err=%v", reads, err)
+	}
+}
+
+func TestDeleteBoundsUnfinishedOperation(t *testing.T) {
+	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+		respond(t, w, map[string]any{"ok": true, "operation": map[string]string{"id": "delete-1", "status": "processing"}})
+	})
+	c.deleteTimeout = 20 * time.Millisecond
+	done := make(chan error, 1)
+	go func() { done <- c.Delete(t.Context(), "bx_test") }()
+	select {
+	case err := <-done:
+		if err == nil || errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "in time") {
+			t.Fatalf("unfinished deletion err=%v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Delete kept polling an unfinished operation")
+	}
+}
+
 func TestSnapshotWaitsUntilReady(t *testing.T) {
 	reads := 0
 	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {

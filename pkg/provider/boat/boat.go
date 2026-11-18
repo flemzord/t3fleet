@@ -28,6 +28,11 @@ import (
 
 const defaultBaseURL = "https://boat.dev/api/v1"
 
+// defaultDeleteTimeout bounds how long Delete follows a deletion operation.
+// Callers hold the machine's operation lock while deleting, so an operation
+// that never completes must not block that machine indefinitely.
+const defaultDeleteTimeout = 10 * time.Minute
+
 // Config contains runtime credentials, never image-building credentials.
 type Config struct {
 	APIKey       string
@@ -43,13 +48,14 @@ type Config struct {
 }
 
 type Client struct {
-	base         string
-	key          string
-	organization string
-	environment  string
-	http         *http.Client
-	accessHTTP   *http.Client
-	pollInterval time.Duration
+	base          string
+	key           string
+	organization  string
+	environment   string
+	http          *http.Client
+	accessHTTP    *http.Client
+	pollInterval  time.Duration
+	deleteTimeout time.Duration
 }
 
 var _ provider.Provider = (*Client)(nil)
@@ -81,7 +87,7 @@ func New(cfg Config) (*Client, error) {
 	}
 	access.Jar = nil
 	access.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Client{base: strings.TrimRight(base, "/"), key: cfg.APIKey, organization: cfg.Organization, environment: cfg.Environment, http: &hc, accessHTTP: &access, pollInterval: time.Second}, nil
+	return &Client{base: strings.TrimRight(base, "/"), key: cfg.APIKey, organization: cfg.Organization, environment: cfg.Environment, http: &hc, accessHTTP: &access, pollInterval: time.Second, deleteTimeout: defaultDeleteTimeout}, nil
 }
 
 func (*Client) Name() string { return "boat" }
@@ -367,15 +373,28 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 	if res.Operation.ID == "" {
 		return errors.New("boat: deletion response has no operation id")
 	}
-	for res.Operation.Status != "completed" {
+	ctx, cancel := context.WithTimeout(ctx, c.deleteTimeout)
+	defer cancel()
+	for {
+		switch res.Operation.Status {
+		case "completed":
+			return nil
+		case "failed", "error", "cancelled", "canceled":
+			return errors.New("boat: deletion operation did not complete")
+		}
 		if err := c.wait(ctx); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return errors.New("boat: deletion operation did not complete in time")
+			}
 			return err
 		}
 		if err := c.request(ctx, http.MethodGet, "/deletion-operations/"+url.PathEscape(res.Operation.ID), nil, nil, &res); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return errors.New("boat: deletion operation did not complete in time")
+			}
 			return err
 		}
 	}
-	return nil
 }
 
 var envKey = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
