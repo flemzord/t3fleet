@@ -28,7 +28,7 @@ The [provider guides](providers-boat.md) and [protocol guide](protocol.md) defin
 
 ## Next milestones
 
-1. Establish repeatable, opt-in cloud canaries for both providers, including stop/resume and resource cleanup.
+1. Maintain the [validated cloud canaries](validation.md) for both providers and automate scheduled runs with explicit billing controls.
 2. Automate clean golden-template publication with version manifests and compatibility checks.
 3. Improve safe recovery and provider reconciliation after process/network failures.
 4. Add remote model-login forwarding using the vendor's own login, without copying local credentials.

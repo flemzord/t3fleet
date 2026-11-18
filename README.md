@@ -95,6 +95,7 @@ A snapshot of a used machine can contain code, credentials, and sessions. Treat 
 ## Documentation
 
 - [Getting started and troubleshooting](docs/getting-started.md)
+- [Validation evidence and limits](docs/validation.md)
 - [Architecture and lifecycle](docs/architecture.md)
 - [T3 protocol gateway](docs/protocol.md)
 - [Adding a provider](docs/adding-a-provider.md)
@@ -111,7 +112,7 @@ make test   # run all tests with the race detector
 make build  # write bin/t3fleet
 ```
 
-CI runs the same lint, test, and build commands on Linux and macOS. Offline tests do not need cloud credentials or create billable resources. Optional genuine-T3 and paid cloud validation commands are documented in [Contributing](CONTRIBUTING.md#optional-live-validation).
+CI runs the same lint, test, and build commands on Linux and macOS, plus the Nix runtime contract on Linux. Offline tests do not need cloud credentials or create billable resources. Optional genuine-T3 and paid cloud validation commands are documented in [Contributing](CONTRIBUTING.md#optional-live-validation).
 
 ## License and inspiration
 
