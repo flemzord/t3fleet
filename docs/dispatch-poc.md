@@ -16,6 +16,10 @@ Start from the complete [Boat-only](../examples/dispatch-boat.json) or
 [Boat with Namespace fallback](../examples/dispatch-boat-namespace.json)
 configuration. Use the same file for the daemon and CLI commands.
 
+`dispatchPOC.onDemand.maxWorkers` limits how many worker reservations the
+dispatcher accepts. Omit it or set it to `0` to use the default of 8, or set
+any positive integer (for example, `100`). Provider quotas still apply.
+
 1. Configure each provider in `dispatchPOC.onDemand.providerOrder`. For Boat,
    set `templates.boat.snapshot` to a prepared T3 snapshot. Set
    `providers.boat.environment` if the VM needs that environment's repository

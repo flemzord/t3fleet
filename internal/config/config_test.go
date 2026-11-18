@@ -88,6 +88,11 @@ func TestDispatchOnDemandConfiguration(t *testing.T) {
 	if err := cfg.Validate(); err != nil || cfg.DispatchPOC.OnDemand.MaxWorkerCount() != 8 {
 		t.Fatalf("zero-worker on-demand config rejected or wrong limit: %v", err)
 	}
+	largePool := base()
+	largePool.DispatchPOC.OnDemand.MaxWorkers = 100
+	if err := largePool.Validate(); err != nil || largePool.DispatchPOC.OnDemand.MaxWorkerCount() != 100 {
+		t.Fatalf("explicit dispatch capacity of 100 rejected or changed: %v", err)
+	}
 	cfg.DispatchPOC.OnDemand.NamespaceFallback = true
 	cfg.Providers.Namespace = &Namespace{}
 	cfg.Templates["namespace"] = provider.Template{Image: "registered:example-org/t3-worker"}
@@ -126,7 +131,7 @@ func TestDispatchOnDemandConfiguration(t *testing.T) {
 		{"no Boat config", func(c *Config) { c.Providers.Boat = nil }},
 		{"no Boat template", func(c *Config) { delete(c.Templates, "boat") }},
 		{"relative binary", func(c *Config) { c.DispatchPOC.OnDemand.T3Binary = "t3" }},
-		{"oversized pool", func(c *Config) { c.DispatchPOC.OnDemand.MaxWorkers = 9 }},
+		{"negative capacity", func(c *Config) { c.DispatchPOC.OnDemand.MaxWorkers = -1 }},
 		{"idle management", func(c *Config) { c.IdleTimeout = "2m" }},
 	}
 	for _, tc := range tests {

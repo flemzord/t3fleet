@@ -56,8 +56,11 @@ type onDemandDisk struct {
 
 func NewDispatchOnDemand(origin string, store *state.Store, opts DispatchOnDemand) (*Proxy, error) {
 	if store == nil || opts.Controller.Resolve == nil || opts.Provision == nil || opts.Lookup == nil ||
-		!filepath.IsAbs(opts.ProjectRoot) || opts.MaxWorkers < 1 || opts.MaxWorkers > 16 {
+		!filepath.IsAbs(opts.ProjectRoot) {
 		return nil, errors.New("on-demand dispatch requires a local T3 controller, private project root and worker provisioner")
+	}
+	if opts.MaxWorkers < 1 {
+		return nil, errors.New("on-demand dispatch requires a positive worker capacity")
 	}
 	d := &dispatchPOC{store: store, workers: []DispatchWorker{opts.Controller}, timeout: 3 * time.Minute,
 		onDemand: &opts, preparing: map[string]chan struct{}{}}
