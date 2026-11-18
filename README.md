@@ -8,6 +8,14 @@ Create a remote machine from a prepared template, pair it with T3 Code Desktop, 
 
 ## Install
 
+With Nix flakes on macOS or Linux (arm64 or amd64):
+
+```sh
+nix profile install github:flemzord/t3fleet#t3fleet
+```
+
+See [Nix installation and background service](docs/nix.md) for declarative installs and the Home Manager service.
+
 Download the archive for macOS or Linux (amd64 or arm64) from [GitHub Releases](https://github.com/flemzord/t3fleet/releases). Compare the archive's SHA-256 hash with `checksums.txt`, then extract it. The archive contains the `t3fleet` binary and example configuration files.
 
 To build from source with Go 1.27 or newer:

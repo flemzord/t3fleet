@@ -4,6 +4,8 @@ This guide starts a local daemon, creates one remote machine from a prepared tem
 
 ## 1. Install the CLI
 
+To install with Nix or run t3fleet in the background with Home Manager, see the [Nix guide](nix.md).
+
 Download an archive for your platform from [GitHub Releases](https://github.com/flemzord/t3fleet/releases), verify its SHA-256 hash against `checksums.txt`, and extract it. The archive contains `t3fleet` and the example configuration files. If you use the archive, run `./t3fleet` wherever this guide uses `./bin/t3fleet`.
 
 To build from source instead, run these commands from the repository:
