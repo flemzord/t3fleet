@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	github.com/coder/websocket v1.8.14
 	golang.org/x/crypto v0.52.0
-	golang.org/x/term v0.43.0
+	golang.org/x/term v0.48.0
 	namespacelabs.dev/integrations v0.0.11-0.20261112110900-3b5e484d4fbf
 )
 
@@ -19,7 +19,7 @@ require (
 	github.com/segmentio/ksuid v1.0.4 // indirect
 	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/grpc v1.83.1 // indirect
