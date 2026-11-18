@@ -24,5 +24,30 @@ archives:
 checksum:
   name_template: checksums.txt
 
+changelog:
+  abbrev: 7
+  format: '{{ .Message }} ({{ .SHA }})'
+  groups:
+    - title: Breaking changes
+      regexp: '^[a-z]+(\([^)]*\))?!:'
+      order: 0
+    - title: Features
+      regexp: '^feat(\([^)]*\))?:'
+      order: 10
+    - title: Dependencies
+      regexp: '^(build|chore|fix)\(deps(-dev)?\):'
+      order: 20
+    - title: Fixes and performance
+      regexp: '^(fix|perf)(\([^)]*\))?:'
+      order: 30
+    - title: Documentation
+      regexp: '^docs(\([^)]*\))?:'
+      order: 40
+    - title: Build and CI
+      regexp: '^(build|ci)(\([^)]*\))?:'
+      order: 50
+    - title: Other changes
+      order: 999
+
 release:
   prerelease: auto
