@@ -100,6 +100,22 @@ type machineHandle struct {
 	// Guarded by operation; reset only by reloading the store on restart.
 	dispatchSwitchUncertain bool
 }
+
+func (h *machineHandle) closeListener() error {
+	// Serve starts asynchronously. If it has not registered the listener yet,
+	// closing the HTTP server does not release the machine's port.
+	err := h.listener.Close()
+	if errors.Is(err, net.ErrClosed) {
+		return nil
+	}
+	return err
+}
+
+func (h *machineHandle) close() error {
+	err := h.server.Close()
+	return errors.Join(err, h.closeListener())
+}
+
 type Manager struct {
 	mu       sync.RWMutex
 	opts     Options
@@ -317,7 +333,7 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (Machine, error
 	err = m.persistLocked()
 	if err != nil {
 		delete(m.machines, id)
-		_ = h.server.Close()
+		_ = h.close()
 		m.mu.Unlock()
 		return Machine{}, err
 	}
@@ -705,7 +721,7 @@ func (m *Manager) deleteMachine(ctx context.Context, id string, reconcileAbsence
 	if err != nil {
 		return err
 	}
-	return h.server.Close()
+	return h.close()
 }
 func (m *Manager) Snapshot(ctx context.Context, id, name string) (provider.Snapshot, error) {
 	h, err := m.handle(id)
@@ -791,18 +807,19 @@ func (m *Manager) Close(ctx context.Context) error {
 	}
 	m.closed = true
 	m.cancel()
-	servers := make([]*http.Server, 0, len(m.machines))
+	handles := make([]*machineHandle, 0, len(m.machines))
 	for _, h := range m.machines {
-		servers = append(servers, h.server)
+		handles = append(handles, h)
 	}
 	m.mu.Unlock()
 	m.idleWG.Wait()
 	var result error
-	for _, s := range servers {
-		if err := s.Shutdown(ctx); err != nil {
-			_ = s.Close()
-			result = errors.Join(result, err)
+	for _, h := range handles {
+		err := h.server.Shutdown(ctx)
+		if err != nil {
+			_ = h.server.Close()
 		}
+		result = errors.Join(result, err, h.closeListener())
 	}
 	return result
 }

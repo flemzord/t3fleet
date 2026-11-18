@@ -222,6 +222,12 @@ func TestLiveIdleSubscriptionSleepsAndSameSocketWakesWithoutReplayOfWrites(t *te
 	case <-ctx.Done():
 		t.Fatal("live stream acknowledgement was not forwarded")
 	}
+	// The upstream can receive the ACK before the proxy releases its activity
+	// lease. A Pong confirms the proxy has finished handling the earlier frame.
+	send(`{"_tag":"Ping"}`)
+	if data := read(); !strings.Contains(string(data), "Pong") {
+		t.Fatal("proxy did not answer before sleep")
+	}
 	clock.Add(int64(time.Minute))
 	if err := a.Check(time.Minute, func() (bool, error) { return false, nil }, func() error { return nil }); err != nil {
 		t.Fatal(err)

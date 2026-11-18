@@ -95,7 +95,7 @@ func (m *Manager) prepareBatch(ctx context.Context, req BatchRequest, dispatchOr
 	b := batchRecord{Request: req, Names: names}
 	rollback := func() {
 		for _, id := range b.IDs {
-			_ = m.machines[id].server.Close()
+			_ = m.machines[id].close()
 			delete(m.machines, id)
 		}
 		delete(m.batches, req.ID)
