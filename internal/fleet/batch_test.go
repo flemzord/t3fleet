@@ -142,7 +142,7 @@ func useIsolatedRuntime(t *testing.T, f *fixture) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"environmentId": "env-" + id, "serverVersion": serverVersion})
 			return
 		}
-		fmt.Fprint(w, `{}`)
+		_, _ = fmt.Fprint(w, `{}`)
 	}))
 	t.Cleanup(upstream.Close)
 	f.options.Providers["mock"] = &isolatedProvider{mockProvider: f.p, endpoint: upstream.URL}

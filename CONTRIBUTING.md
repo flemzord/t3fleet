@@ -12,7 +12,7 @@ make test
 make build
 ```
 
-Go 1.27 and a working C compiler can be used without Nix. `make test` runs the race detector. `make lint` runs the pinned golangci-lint (see `.golangci.yml`), including gofmt, goimports and `go vet`; `make fmt` applies the formatters. CI runs these targets on Ubuntu and cross-compiles the release binaries for Linux and macOS.
+The Makefile uses Go from your `PATH` when available, or runs it through `nix develop`. Go 1.27 and a working C compiler can be used without Nix. `make test` runs the race detector. `make lint` validates `.golangci.yml` and runs the pinned golangci-lint, including gofmt, goimports and `go vet`; `make fmt` applies the formatters. CI runs lint and tests on Ubuntu and cross-compiles the release binaries for Linux and macOS.
 
 Tests run without cloud credentials. Keep billable cloud canaries separate from the default suite, scoped to a dedicated test resource, and include cleanup and a verified final state.
 

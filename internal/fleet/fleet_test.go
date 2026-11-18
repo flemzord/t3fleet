@@ -75,7 +75,8 @@ func newProvider(t *testing.T) *mockProvider {
 			if body == "" {
 				body = `{"threads":[],"archivedThreads":[]}`
 			}
-			fmt.Fprint(w, body)
+			// Timeout tests may close the connection before reading the reply.
+			_, _ = fmt.Fprint(w, body)
 		case "/api/probe":
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		default:

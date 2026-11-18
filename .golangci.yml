@@ -8,21 +8,19 @@ linters:
   # bodyclose is not enabled: coder/websocket.Dial closes the handshake body
   # itself, and HTTP callers here close bodies through closures it cannot follow.
   enable:
+    - durationcheck # Catch multiplication of two time.Duration values.
     - errorlint
     - gocritic
+    - makezero # Catch appends to slices created with a nonzero length.
     - misspell
     - nilerr
     - nolintlint
+    - reassign # Catch reassignment of globals such as http.DefaultClient.
     - unconvert
     - usestdlibvars
   settings:
     errcheck:
-      # Terminal and diagnostic writes have no useful recovery path.
       exclude-functions:
-        - fmt.Fprint
-        - fmt.Fprintf
-        - fmt.Fprintln
-        - (*text/tabwriter.Writer).Flush
         # Abrupt teardown of a socket that is already being abandoned.
         - (*github.com/coder/websocket.Conn).CloseNow
     govet:
@@ -36,6 +34,14 @@ linters:
 
   exclusions:
     rules:
+      # CLI terminal and diagnostic output is best effort. Keep checking the
+      # same calls in server and provider packages, where writers can fail.
+      - linters: [errcheck]
+        path: '^cmd/t3fleet/'
+        text: 'Error return value of `fmt\.Fprint(f|ln)?` is not checked'
+      - linters: [errcheck]
+        path: '^cmd/t3fleet/(batch|cli|delete|output)\.go$'
+        text: 'Error return value of `tw\.Flush` is not checked'
       # Receiving from a chan error only to wait for a goroutine is a
       # synchronisation point, not an ignored call result. Writing "_ = <-ch"
       # would instead trip staticcheck S1005.
@@ -50,3 +56,7 @@ formatters:
     goimports:
       local-prefixes:
         - github.com/flemzord/t3fleet
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
