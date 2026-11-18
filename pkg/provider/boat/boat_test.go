@@ -45,6 +45,13 @@ func respond(t *testing.T, w http.ResponseWriter, value any) {
 
 func TestCreateFromSnapshot(t *testing.T) {
 	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/sandboxes" {
+			if r.URL.Query().Get("label") != "t3fleet-id=operation-1" {
+				t.Error("missing durable ownership lookup")
+			}
+			respond(t, w, map[string]any{"ok": true, "sandboxes": []any{}})
+			return
+		}
 		if r.Method != "POST" || r.URL.Path != "/sandboxes" || r.Header.Get("Authorization") != "Bearer test-secret" || r.Header.Get("X-Boat-Org") != "test-org" || r.Header.Get("Idempotency-Key") != "operation-1" {
 			t.Errorf("unexpected request metadata: %s %s", r.Method, r.URL.Path)
 		}
@@ -81,6 +88,10 @@ func TestCreateRequiresSnapshotAndIdempotency(t *testing.T) {
 
 func TestCreateExplicitEnvironmentOptsIntoCredentials(t *testing.T) {
 	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			respond(t, w, map[string]any{"ok": true, "sandboxes": []any{}})
+			return
+		}
 		var body map[string]any
 		data, _ := io.ReadAll(r.Body)
 		if err := json.Unmarshal(data, &body); err != nil {
@@ -94,6 +105,83 @@ func TestCreateExplicitEnvironmentOptsIntoCredentials(t *testing.T) {
 	c.environment = "t3fleet-user"
 	if _, err := c.Create(t.Context(), provider.CreateRequest{Template: provider.Template{Snapshot: "golden"}, OperationID: "op"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCreateRecoversLostResponseAfterIdempotencyExpiry(t *testing.T) {
+	reads := 0
+	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/sandboxes" || r.URL.Query().Get("label") != "t3fleet-id=old-operation" {
+			t.Error("recovery attempted a new billable create")
+			w.WriteHeader(500)
+			return
+		}
+		reads++
+		if r.URL.Query().Get("cursor") == "" {
+			respond(t, w, map[string]any{"ok": true, "sandboxes": []any{}, "pageInfo": map[string]any{"hasMore": true, "nextCursor": "page-2"}})
+			return
+		}
+		respond(t, w, map[string]any{"ok": true, "sandboxes": []sandbox{{ID: "bx_original", Name: "skiff", State: "archived", Labels: map[string]string{"t3fleet-id": "old-operation"}}}, "pageInfo": map[string]any{"hasMore": false, "nextCursor": nil}})
+	})
+	m, err := c.Create(t.Context(), provider.CreateRequest{Name: "skiff", Template: provider.Template{Snapshot: "golden"}, OperationID: "old-operation"})
+	if err != nil || m.ID != "bx_original" || m.State != provider.StateStopped || reads != 2 {
+		t.Fatalf("durable recovery failed: machine=%#v reads=%d err=%v", m, reads, err)
+	}
+}
+
+func TestCreateFailsClosedOnAmbiguousOrIncompleteOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body map[string]any
+	}{
+		{"ambiguous", map[string]any{"ok": true, "sandboxes": []sandbox{{ID: "bx_one", State: "ready", Labels: map[string]string{"t3fleet-id": "op"}}, {ID: "bx_two", State: "ready", Labels: map[string]string{"t3fleet-id": "op"}}}}},
+		{"missing-list", map[string]any{"ok": true}},
+		{"missing-label", map[string]any{"ok": true, "sandboxes": []sandbox{{ID: "bx_one", State: "ready"}}}},
+		{"cancelled-result", map[string]any{"ok": true, "sandboxes": []sandbox{{ID: "bx_one", State: "cancelled", Labels: map[string]string{"t3fleet-id": "op"}}}}},
+		{"broken-pagination", map[string]any{"ok": true, "sandboxes": []any{}, "pageInfo": map[string]any{"hasMore": true, "nextCursor": nil}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "GET" {
+					t.Error("uncertain recovery created a machine")
+				}
+				respond(t, w, tc.body)
+			})
+			if _, err := c.Create(t.Context(), provider.CreateRequest{Template: provider.Template{Snapshot: "golden"}, OperationID: "op"}); err == nil {
+				t.Error("accepted ambiguous ownership")
+			}
+		})
+	}
+}
+
+func TestCreateRejectsOwnershipLookupFailureWithoutPosting(t *testing.T) {
+	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			t.Error("lookup failure triggered create")
+		}
+		w.WriteHeader(503)
+		respond(t, w, map[string]any{"ok": false})
+	})
+	if _, err := c.Create(t.Context(), provider.CreateRequest{Template: provider.Template{Snapshot: "golden"}, OperationID: "op"}); err == nil {
+		t.Error("ignored ownership lookup failure")
+	}
+}
+
+func TestExecErrorDiagnosticsNeverExposeArbitraryCause(t *testing.T) {
+	for _, cause := range []error{
+		errors.New("TOKENMARKER https://private/?_token=SECRET"),
+		&APIError{Status: 502, Code: "tokenmarker"},
+		&APIError{Status: 502, Code: "sandbox_restoring"},
+		context.Canceled,
+	} {
+		err := execPhaseError("stdout-read", cause)
+		typed, ok := errors.AsType[*ExecError](err)
+		if !ok || !strings.Contains(typed.Error(), "stdout-read") || strings.Contains(strings.ToLower(typed.Error()), "tokenmarker") || strings.Contains(typed.Error(), "SECRET") || strings.Contains(typed.Error(), "https://") {
+			t.Fatalf("unsafe typed diagnostic: %v", err)
+		}
+		if !errors.Is(err, cause) {
+			t.Error("diagnostic did not preserve error cause")
+		}
 	}
 }
 

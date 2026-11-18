@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -110,7 +111,8 @@ func (c *Client) request(ctx context.Context, method, path string, body any, hea
 	var data []byte
 	var err error
 	if body != nil {
-		data, err = json.Marshal(body)
+		// Keep map ordering stable across retries with the same idempotency key.
+		data, err = json.Marshal(body, json.Deterministic(true))
 		if err != nil {
 			return errors.New("boat: cannot encode request")
 		}
@@ -162,9 +164,10 @@ func (c *Client) request(ctx context.Context, method, path string, body any, hea
 }
 
 type sandbox struct {
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	State string `json:"state"`
+	ID     string            `json:"id"`
+	Name   string            `json:"name"`
+	State  string            `json:"state"`
+	Labels map[string]string `json:"labels,omitzero"`
 }
 
 func (s sandbox) machine() provider.Machine {
@@ -194,11 +197,29 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 	if template == "" || (req.Template.Snapshot != "" && req.Template.Image != "" && req.Template.Snapshot != req.Template.Image) {
 		return provider.Machine{}, errors.New("boat: one saved snapshot is required")
 	}
-	if req.OperationID == "" || strings.ContainsAny(req.OperationID, "\r\n\x00") {
+	if req.OperationID == "" || len(req.OperationID) > 256 || strings.ContainsAny(req.OperationID, "\r\n\x00") {
 		return provider.Machine{}, errors.New("boat: operation id is required")
 	}
 	if req.Size != "" && !slices.Contains([]string{"small", "default", "large", "xlarge"}, req.Size) {
 		return provider.Machine{}, errors.New("boat: unsupported machine size")
+	}
+	labels := maps.Clone(req.Labels)
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	if existing := labels["t3fleet-id"]; existing != "" && existing != req.OperationID {
+		return provider.Machine{}, errors.New("boat: ownership label differs from operation id")
+	}
+	labels["t3fleet-id"] = req.OperationID
+	// Boat's Idempotency-Key expires after 24 hours. Resolve durable ownership
+	// first so recovering a lost create response days later cannot bill a second
+	// machine. Refuse uncertainty rather than creating on a failed lookup.
+	existing, err := c.findOperation(ctx, req.OperationID)
+	if err != nil {
+		return provider.Machine{}, err
+	}
+	if existing != nil {
+		return existing.machine(), nil
 	}
 	body := struct {
 		From        string            `json:"from"`
@@ -208,11 +229,11 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 		Environment string            `json:"environment,omitempty"`
 		NoEnv       bool              `json:"noEnv"`
 		Labels      map[string]string `json:"labels,omitzero"`
-	}{template, req.Name, req.Size, "private", c.environment, c.environment == "", req.Labels}
+	}{template, req.Name, req.Size, "private", c.environment, c.environment == "", labels}
 	var res struct {
 		Sandbox sandbox `json:"sandbox"`
 	}
-	err := c.request(ctx, http.MethodPost, "/sandboxes", body, http.Header{"Idempotency-Key": {req.OperationID}}, &res)
+	err = c.request(ctx, http.MethodPost, "/sandboxes", body, http.Header{"Idempotency-Key": {req.OperationID}}, &res)
 	if err != nil {
 		return provider.Machine{}, err
 	}
@@ -220,6 +241,47 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 		return provider.Machine{}, errors.New("boat: create response has no sandbox id")
 	}
 	return res.Sandbox.machine(), nil
+}
+
+func (c *Client) findOperation(ctx context.Context, operationID string) (*sandbox, error) {
+	query := url.Values{"label": {"t3fleet-id=" + operationID}, "limit": {"100"}}
+	seenCursors := map[string]bool{"": true}
+	var match *sandbox
+	for {
+		var res struct {
+			Sandboxes *[]sandbox `json:"sandboxes"`
+			PageInfo  *struct {
+				NextCursor string `json:"nextCursor"`
+				HasMore    bool   `json:"hasMore"`
+			} `json:"pageInfo"`
+		}
+		if err := c.request(ctx, http.MethodGet, "/sandboxes?"+query.Encode(), nil, nil, &res); err != nil {
+			return nil, err
+		}
+		if res.Sandboxes == nil {
+			return nil, errors.New("boat: incomplete ownership lookup response")
+		}
+		for _, candidate := range *res.Sandboxes {
+			if candidate.Labels["t3fleet-id"] != operationID {
+				return nil, errors.New("boat: inconsistent ownership lookup response")
+			}
+			if candidate.ID == "" || candidate.machine().State == provider.StateDeleted {
+				return nil, errors.New("boat: owned create result is no longer usable")
+			}
+			if match != nil && match.ID != candidate.ID {
+				return nil, errors.New("boat: ambiguous ownership label; refusing duplicate create")
+			}
+			match = &candidate
+		}
+		if res.PageInfo == nil || !res.PageInfo.HasMore {
+			return match, nil
+		}
+		if res.PageInfo.NextCursor == "" || seenCursors[res.PageInfo.NextCursor] {
+			return nil, errors.New("boat: invalid ownership lookup pagination")
+		}
+		seenCursors[res.PageInfo.NextCursor] = true
+		query.Set("cursor", res.PageInfo.NextCursor)
+	}
 }
 
 func (c *Client) Get(ctx context.Context, id string) (provider.Machine, error) {
@@ -307,6 +369,53 @@ var envKey = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 
+// ExecError identifies the failed private-output transport phase without
+// exposing output, filenames, command text, or arbitrary vendor messages.
+// Callers may use errors.AsType[*ExecError] for safe diagnostic logging.
+type ExecError struct {
+	phase  string
+	reason string
+	cause  error
+}
+
+func (e *ExecError) Error() string {
+	message := "boat: private command " + e.phase + " failed"
+	if e.reason != "" {
+		message += " (" + e.reason + ")"
+	}
+	if apiErr, ok := errors.AsType[*APIError](e.cause); ok {
+		message += fmt.Sprintf(" HTTP %d", apiErr.Status)
+		// Only documented, useful transport/lifecycle codes are diagnostic data.
+		// Arbitrary vendor strings must not become an output channel for secrets.
+		if slices.Contains([]string{"sandbox_restoring", "machine_not_running", "sandbox_starting", "sandbox_not_ready", "sandbox_direct_failed", "boat_starting", "boat_direct_failed", "rate_limited", "unauthorized", "permission_denied"}, apiErr.Code) {
+			message += " " + apiErr.Code
+		}
+	} else if errors.Is(e.cause, context.Canceled) {
+		message += " context_canceled"
+	} else if errors.Is(e.cause, context.DeadlineExceeded) {
+		message += " deadline_exceeded"
+	} else if errors.Is(e.cause, provider.ErrNotFound) {
+		message += " not_found"
+	}
+	return message
+}
+
+func (e *ExecError) Unwrap() error { return e.cause }
+
+type privateOutputError struct{ reason string }
+
+func (e *privateOutputError) Error() string {
+	return "boat: invalid private command output (" + e.reason + ")"
+}
+
+func execPhaseError(phase string, err error) error {
+	reason := "provider_response"
+	if outputErr, ok := errors.AsType[*privateOutputError](err); ok {
+		reason = outputErr.reason
+	}
+	return &ExecError{phase: phase, reason: reason, cause: err}
+}
+
 // Exec uses the private files API for output. Boat retains command history, so
 // only the numeric exit status is allowed into a command's stdout/stderr.
 // Arguments and environment values remain part of Boat's retained command input
@@ -353,7 +462,7 @@ func (c *Client) Exec(ctx context.Context, id string, req provider.ExecRequest) 
 		if err != nil && !errors.Is(err, provider.ErrNotFound) {
 			// Return no partially retrieved secrets when cleanup did not succeed.
 			result = provider.ExecResult{}
-			resultErr = errors.Join(resultErr, errors.New("boat: private command output cleanup failed"))
+			resultErr = errors.Join(resultErr, execPhaseError("cleanup", err))
 		}
 	}()
 	command := "exec 2>/dev/null\numask 077\n" +
@@ -372,22 +481,35 @@ func (c *Client) Exec(ctx context.Context, id string, req provider.ExecRequest) 
 		StderrTruncated bool   `json:"stderrTruncated"`
 	}
 	if err := c.request(ctx, http.MethodPost, path+"/commands", body, nil, &res); err != nil {
-		return provider.ExecResult{}, err
+		return provider.ExecResult{}, execPhaseError("execute", err)
 	}
-	if res.ExitCode == nil || *res.ExitCode != 0 || res.Stderr != "" || res.StdoutTruncated || res.StderrTruncated || !commandStatus.MatchString(res.Stdout) {
-		return provider.ExecResult{}, errors.New("boat: invalid private command completion")
+	completionReason := ""
+	switch {
+	case res.ExitCode == nil:
+		completionReason = "missing_exit_status"
+	case *res.ExitCode != 0:
+		completionReason = "outer_exit_nonzero"
+	case res.Stderr != "":
+		completionReason = "unexpected_api_stderr"
+	case res.StdoutTruncated || res.StderrTruncated:
+		completionReason = "truncated_status"
+	case !commandStatus.MatchString(res.Stdout):
+		completionReason = "invalid_exit_status"
+	}
+	if completionReason != "" {
+		return provider.ExecResult{}, &ExecError{phase: "completion", reason: completionReason}
 	}
 	status, err := strconv.Atoi(strings.TrimSuffix(res.Stdout, "\n"))
 	if err != nil || status > 255 {
-		return provider.ExecResult{}, errors.New("boat: invalid private command exit status")
+		return provider.ExecResult{}, &ExecError{phase: "completion", reason: "out_of_range_exit_status"}
 	}
 	stdout, err := c.readPrivateOutput(ctx, path, directory+"/stdout")
 	if err != nil {
-		return provider.ExecResult{}, err
+		return provider.ExecResult{}, execPhaseError("stdout-read", err)
 	}
 	stderr, err := c.readPrivateOutput(ctx, path, directory+"/stderr")
 	if err != nil {
-		return provider.ExecResult{}, err
+		return provider.ExecResult{}, execPhaseError("stderr-read", err)
 	}
 	return provider.ExecResult{Stdout: stdout, Stderr: stderr, ExitCode: status}, nil
 }
@@ -415,9 +537,25 @@ func (c *Client) readPrivateOutput(ctx context.Context, sandbox, filename string
 	if !path.IsAbs(returnedPath) {
 		returnedPath = path.Join("/home/user", returnedPath)
 	}
-	if !res.Success || path.Clean(returnedPath) != path.Clean(filename) || res.Encoding != "utf8" || res.Size == nil || res.Content == nil ||
-		*res.Size < 0 || *res.Size > maxExecOutput || int64(len(*res.Content)) != *res.Size || !utf8.ValidString(*res.Content) {
-		return "", errors.New("boat: invalid private command output")
+	reason := ""
+	switch {
+	case !res.Success:
+		reason = "file_response_unsuccessful"
+	case path.Clean(returnedPath) != path.Clean(filename):
+		reason = "file_path_mismatch"
+	case res.Encoding != "utf8":
+		reason = "file_encoding_mismatch"
+	case res.Size == nil || res.Content == nil:
+		reason = "file_metadata_missing"
+	case *res.Size < 0 || *res.Size > maxExecOutput:
+		reason = "file_size_out_of_range"
+	case int64(len(*res.Content)) != *res.Size:
+		reason = "file_size_mismatch"
+	case !utf8.ValidString(*res.Content):
+		reason = "file_invalid_utf8"
+	}
+	if reason != "" {
+		return "", &privateOutputError{reason: reason}
 	}
 	return *res.Content, nil
 }

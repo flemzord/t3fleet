@@ -37,8 +37,13 @@ Use credential-free, versioned golden snapshots independently of this option.
 
 Create requires a non-empty operation ID. It becomes Boat's `Idempotency-Key`,
 which deduplicates create retries for 24 hours. The caller must persist and reuse
-the same operation ID after a lost response. The adapter does not automatically
-retry creates or commands.
+the same operation ID after a lost response. The adapter also owns the durable
+`t3fleet-id` label: it sets that label to the operation ID and searches all pages
+of the label-filtered sandbox list **before** posting a create. A unique match
+is reused even after the HTTP idempotency window expires. Multiple matches,
+incomplete metadata, lookup failures, and malformed pagination fail closed rather
+than creating another billable machine. The adapter does not automatically retry
+creates or commands.
 
 Boat reports a stopped sandbox as `archived`, while its CLI displays `stopped`.
 `ready`, `idle`, and `running` all map to a running machine. Starting and stopping
@@ -135,6 +140,14 @@ provider cannot access sandbox files.
 Errors expose only HTTP status and a validated error code. Vendor messages and
 response bodies are excluded because they may contain credentials, command
 output, or private URLs. A 404 maps to `provider.ErrNotFound`.
+
+Execution failures additionally implement the exported `*boat.ExecError` type.
+Its safe diagnostic identifies a static phase (`execute`, `completion`,
+`stdout-read`, `stderr-read`, or `cleanup`) and a static validation reason.
+Transport errors may add an HTTP status and an allowlisted public lifecycle code.
+The diagnostic never interpolates command output, private filenames, URLs,
+arbitrary causes, or arbitrary vendor messages. The underlying cause remains
+available through `Unwrap` for cancellation checks; do not log that raw cause.
 
 ## Validation
 
