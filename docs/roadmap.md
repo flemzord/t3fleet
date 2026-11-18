@@ -9,6 +9,7 @@ This is the first implementation of a native Go fleet daemon. A checked box in a
 - Explicit snapshot capture for Boat; snapshot restore/fork for Namespace.
 - A prepared-image runtime contract with per-machine T3 identity and credential initialization.
 - Stable per-machine loopback ports and durable client authorization.
+- Automatic desktop association handoff after `create`, with `--no-register` for headless use.
 - T3 pairing, authenticated HTTP/WebSocket relay, and scoped socket tickets.
 - Automatic readiness/start resolution when live proxy traffic needs a stopped machine.
 - Private atomic state, an exclusive ownership lock, strict configuration, and a local authenticated control API.
@@ -21,6 +22,7 @@ The [provider guides](providers-boat.md) and [protocol guide](protocol.md) defin
 - **Local operating model:** loopback-only listeners; no supported Internet-facing service or browser UI.
 - **Live proxy:** authenticated chat requests may wake a machine. Public discovery uses a persisted descriptor without waking it. There is no offline chat replay.
 - **Explicit power management:** no agent-aware automatic sleep or schedule-based wake policy. Provider auto-stop rules can still apply.
+- **Desktop association:** T3 still requires one confirmation after the automatic handoff. Zero-click registration needs a supported T3 desktop integration; t3fleet does not edit its encrypted connection catalog.
 - **Model authentication:** sign in remotely using the model vendor's flow; no login callback forwarding yet.
 - **Protocol coverage:** no OAuth MCP linked-environment sessions or URL-only attachment credential rewriting/caching.
 - **Snapshots differ:** Namespace does not expose the same explicit capture method used by Boat.

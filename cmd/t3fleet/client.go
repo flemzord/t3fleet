@@ -47,6 +47,7 @@ func runClient(ctx context.Context, cfg config.Config, command string, args []st
 	method, path := http.MethodGet, "/v1/machines"
 	var body any
 	pairing := false
+	register := false
 	switch command {
 	case "list":
 		if len(args) != 0 {
@@ -56,6 +57,7 @@ func runClient(ctx context.Context, cfg config.Config, command string, args []st
 		fs := flag.NewFlagSet("create", flag.ContinueOnError)
 		fs.SetOutput(diagnostics)
 		var request fleet.CreateRequest
+		noRegister := fs.Bool("no-register", false, "create without opening T3 Code")
 		fs.StringVar(&request.Name, "name", "", "machine name")
 		fs.StringVar(&request.Provider, "provider", "", "boat or namespace")
 		fs.StringVar(&request.Size, "size", "", "provider machine size")
@@ -69,6 +71,7 @@ func runClient(ctx context.Context, cfg config.Config, command string, args []st
 			return errors.New("create requires --name and --provider")
 		}
 		method, body = http.MethodPost, request
+		register = !*noRegister
 	case "inspect", "start", "stop", "delete", "snapshot", "pair":
 		if len(args) == 0 || args[0] == "" || strings.HasPrefix(args[0], "-") {
 			return errors.New("command requires a machine ID")
@@ -117,17 +120,11 @@ func runClient(ctx context.Context, cfg config.Config, command string, args []st
 		return err
 	}
 	if pairing {
-		var pair struct {
-			URL string `json:"url"`
+		link, err := pairingAppLink(data)
+		if err != nil {
+			return err
 		}
-		if json.Unmarshal(data, &pair) != nil {
-			return errors.New("invalid pairing response")
-		}
-		link := pair.URL
-		if !strings.HasPrefix(link, "http://127.0.0.1:") && !strings.HasPrefix(link, "http://localhost:") {
-			return errors.New("invalid pairing URL")
-		}
-		fmt.Fprintln(out, "t3code://pair?pairingUrl="+url.QueryEscape(link))
+		fmt.Fprintln(out, link)
 		return nil
 	}
 	if len(data) == 0 {
@@ -139,7 +136,10 @@ func runClient(ctx context.Context, cfg config.Config, command string, args []st
 		return errors.New("invalid daemon response")
 	}
 	_, err = fmt.Fprintln(out, pretty.String())
-	return err
+	if err != nil || !register {
+		return err
+	}
+	return registerCreatedMachine(ctx, cfg, token, data, diagnostics)
 }
 
 func callAdmin(ctx context.Context, address, token, method, path string, body any) ([]byte, error) {

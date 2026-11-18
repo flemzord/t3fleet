@@ -27,7 +27,7 @@ func usage(w io.Writer) {
 
 Commands:
   serve                       Run the local fleet daemon
-  create --name N --provider P Create from a configured prepared template
+  create --name N --provider P Create from a template and open T3 association
   list                        List managed machines
   inspect ID                  Inspect one managed machine
   start ID                    Start and wait for T3 readiness
@@ -38,6 +38,8 @@ Commands:
   version                     Print the CLI version
 
 Create overrides: --image REF, --snapshot REF, --source GOLDEN_DEVBOX, --size SIZE.
+Use create --no-register for headless scripts or to pair manually later.
+T3 Code requires confirmation before saving an association.
 Cloud credentials are loaded only by serve. See examples/config.json and docs.`)
 }
 

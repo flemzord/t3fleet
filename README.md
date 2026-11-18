@@ -66,13 +66,11 @@ In a second terminal, using the same configuration:
 ./bin/t3fleet list --config "$HOME/.config/t3fleet/config.json"
 ```
 
-Use the returned `id` for subsequent commands:
+`create` waits for readiness, prepares the association, and opens T3 Code automatically. Confirm the backend in T3 to finish saving it. You do not need a separate `pair` command or to copy a link. T3 requires this confirmation for external pairing links; launching the app alone does not prove the connection was saved.
 
-```sh
-./bin/t3fleet pair MACHINE_ID --config "$HOME/.config/t3fleet/config.json"
-```
+The returned JSON contains the machine `id` for subsequent commands. On a headless host or in scripts, use `create --no-register` to skip desktop association. Use `pair MACHINE_ID` later to print a short-lived, one-use `t3code://` link. Do not share that link or put it in logs.
 
-Open the printed `t3code://` link on the computer running T3 Code, then accept the association. The link contains a short-lived, one-use pairing credential; do not share it or put it in logs.
+If T3 cannot be opened, the machine remains created and the CLI reports its ID. Run `pair` for that ID with the same configuration to recover; do not create another VM.
 
 For Namespace, use `--provider namespace`. [The complete setup guide](docs/getting-started.md) explains credentials, template preparation, model sign-in, and troubleshooting.
 
@@ -82,8 +80,9 @@ All commands take `--config PATH`. The CLI sends authenticated requests to the l
 
 | Command | Result |
 | --- | --- |
-| `create --name NAME --provider boat` | Create from the configured Boat template and wait for T3 readiness. |
-| `create --name NAME --provider namespace` | Create from the configured Namespace template and wait for T3 readiness. |
+| `create --name NAME --provider boat` | Create from the configured Boat template, wait for readiness, and open T3 association. |
+| `create --name NAME --provider namespace` | Create from the configured Namespace template, wait for readiness, and open T3 association. |
+| `create … --no-register` | Create without opening T3; useful for headless hosts and scripts. |
 | `list` / `inspect ID` | Read the daemon's managed records. |
 | `pair ID` | Ensure readiness and print a T3 Code pairing link. |
 | `stop ID` / `start ID` | Explicitly stop or resume a machine. Authenticated proxy traffic can also wake it. |

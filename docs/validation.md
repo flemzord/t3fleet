@@ -16,6 +16,12 @@ for another desktop version, image, account, or region.
   descriptor, OAuth association, service session, WebSocket RPC, and orchestration
   shell. This is protocol evidence, not a desktop UI test.
 
+CLI tests verify that `create` requests pairing and opens T3 in order, while
+`--no-register` skips both. Failed pairing or app launch preserves the allocated
+machine identity and never logs its one-use credential. OS launch arguments are
+checked for macOS, Linux, and Windows. These tests use an injected launcher; they
+do not establish that a desktop user accepted the association.
+
 Regression tests also cover HTTP/2 TLS negotiation with private endpoint cookies,
 WebSocket redirect rejection, interrupted creation, partial allocation, durable
 recovery, cancellation, and asynchronous deletion.

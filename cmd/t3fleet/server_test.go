@@ -208,7 +208,7 @@ func TestCLIThroughAuthenticatedAdminAPI(t *testing.T) {
 	defer server.Close()
 	cfg.Listen = strings.TrimPrefix(server.URL, "http://")
 	commands := [][]string{
-		{"create", "--name", "demo", "--provider", "boat", "--snapshot", "golden"},
+		{"create", "--name", "demo", "--provider", "boat", "--snapshot", "golden", "--no-register"},
 		{"list"}, {"inspect", "machine-1"}, {"start", "machine-1"}, {"stop", "machine-1"}, {"snapshot", "machine-1", "--name", "copy"}, {"pair", "machine-1"}, {"delete", "machine-1"},
 	}
 	for _, args := range commands {
