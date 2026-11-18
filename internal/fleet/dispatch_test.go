@@ -58,7 +58,7 @@ func dispatchProviders(t *testing.T) (*fixture, *dispatchProvider, *dispatchProv
 	f.options.Providers["boat"] = boat
 	f.options.Providers["namespace"] = namespace
 	f.options.Templates["boat"] = provider.Template{Snapshot: "golden"}
-	f.options.Templates["namespace"] = provider.Template{Image: "registered:formance/max-dev"}
+	f.options.Templates["namespace"] = provider.Template{Image: "registered:example-org/t3-worker"}
 	f.restart(t)
 	return f, boat, namespace
 }
@@ -86,7 +86,7 @@ func TestDispatchFallbackRecoversSameDevboxAfterRestart(t *testing.T) {
 		t.Fatalf("fallback lost its original machine: %+v", batch)
 	}
 	if boat.attempts != 1 || boat.allocations != 0 || namespace.allocations != 1 || namespace.bootstrap != 1 ||
-		namespace.checkouts != 1 || namespace.requests[1].Template.Image != "registered:formance/max-dev" {
+		namespace.checkouts != 1 || namespace.requests[1].Template.Image != "registered:example-org/t3-worker" {
 		t.Fatalf("unexpected provider activity: Boat attempts=%d, Namespace allocations=%d", boat.attempts, namespace.allocations)
 	}
 	if _, err := f.m.LookupDispatchWorker(key); err != nil {

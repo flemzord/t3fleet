@@ -12,7 +12,7 @@
   },
   "templates": {
     "boat": { "snapshot": "YOUR_READY_BOAT_SNAPSHOT" },
-    "namespace": { "image": "registered:formance/max-dev" }
+    "namespace": { "image": "registered:YOUR_ORGANIZATION/YOUR_T3_IMAGE" }
   },
   "dispatchPOC": {
     "listen": "127.0.0.1:47733",

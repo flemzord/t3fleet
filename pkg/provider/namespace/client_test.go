@@ -444,7 +444,7 @@ func TestCreateRegisteredImageWithSlash(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 		case "Create":
 			input := body(t, r)
-			if input["imageName"] != "formance/max-dev" || input["imageRef"] != nil {
+			if input["imageName"] != "example-org/t3-worker" || input["imageRef"] != nil {
 				t.Errorf("registered image was not sent by name: %+v", input)
 			}
 			reply(t, w, map[string]any{"devbox": map[string]any{"id": "id", "name": "test"}, "instanceId": "instance-1"})
@@ -452,7 +452,7 @@ func TestCreateRegisteredImageWithSlash(t *testing.T) {
 			t.Errorf("unexpected request: %s", r.URL.Path)
 		}
 	}, nil)
-	req := provider.CreateRequest{Name: "test", OperationID: "op", Template: provider.Template{Image: "registered:formance/max-dev"}}
+	req := provider.CreateRequest{Name: "test", OperationID: "op", Template: provider.Template{Image: "registered:example-org/t3-worker"}}
 	if _, err := client.Create(t.Context(), req); err != nil {
 		t.Fatal(err)
 	}
@@ -497,7 +497,7 @@ func TestCreateFallbackRequiresConfirmedNoAllocation(t *testing.T) {
 					return "", errors.New("test token unavailable")
 				})
 			}
-			req := provider.CreateRequest{Name: "test", OperationID: "op", Template: provider.Template{Image: "registered:formance/max-dev"}}
+			req := provider.CreateRequest{Name: "test", OperationID: "op", Template: provider.Template{Image: "registered:example-org/t3-worker"}}
 			m, err := client.Create(t.Context(), req)
 			if m.ID != "" || err == nil || errors.Is(err, provider.ErrCreateRejected) != tt.tokenFails {
 				t.Fatalf("unexpected create result: %+v, %v", m, err)

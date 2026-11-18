@@ -25,7 +25,7 @@ For example:
   --snapshot SNAPSHOT_REFERENCE --size SIZE --concurrency 3
 ```
 
-A snapshot such as `formance-max-dev-t3-20261118` must be complete before use.
+Wait for the snapshot to complete before using it.
 The batch workflow does not build or publish templates. Select an actually
 available, prepared snapshot before running a paid cloud trial.
 

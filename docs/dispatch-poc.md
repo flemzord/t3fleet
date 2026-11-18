@@ -63,12 +63,13 @@ allocation.
 ### Fall back to Namespace
 
 Keep the Boat provider and snapshot. Merge these fields into the existing
-configuration to use the registered Namespace image `formance/max-dev`:
+configuration, replacing `example-org/t3-worker` with the name of your
+registered Namespace image:
 
 ```json
 {
   "providers": { "namespace": {} },
-  "templates": { "namespace": { "image": "registered:formance/max-dev" } },
+  "templates": { "namespace": { "image": "registered:example-org/t3-worker" } },
   "dispatchPOC": { "onDemand": { "providerOrder": ["boat", "namespace"] } }
 }
 ```

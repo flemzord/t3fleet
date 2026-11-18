@@ -22,7 +22,7 @@ func TestDispatchRemoteDoesNotAcceptCredentials(t *testing.T) {
 			t.Fatalf("accepted unsafe remote %q", raw)
 		}
 	}
-	if demandRemote("https://github.com/formancehq/ledger.git") == "" || demandRemote("git@github.com:formancehq/ledger.git") == "" {
+	if demandRemote("https://github.com/octocat/Hello-World.git") == "" || demandRemote("git@github.com:octocat/Hello-World.git") == "" {
 		t.Fatal("normal project remotes rejected")
 	}
 }

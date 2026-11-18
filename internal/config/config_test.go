@@ -90,7 +90,7 @@ func TestDispatchOnDemandConfiguration(t *testing.T) {
 	}
 	cfg.DispatchPOC.OnDemand.NamespaceFallback = true
 	cfg.Providers.Namespace = &Namespace{}
-	cfg.Templates["namespace"] = provider.Template{Image: "registered:formance/max-dev"}
+	cfg.Templates["namespace"] = provider.Template{Image: "registered:example-org/t3-worker"}
 	if err := cfg.Validate(); err != nil || !slices.Equal(cfg.DispatchPOC.OnDemand.OrderedProviders(), []string{"boat", "namespace"}) {
 		t.Fatalf("legacy Namespace fallback configuration rejected: %v", err)
 	}
