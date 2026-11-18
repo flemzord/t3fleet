@@ -48,6 +48,21 @@ handoffs. Multi-delete snapshots an explicit managed-ID selection, validates
 all IDs before deletion and uses the existing per-machine DELETE route.
 See [bulk lifecycle](bulk-lifecycle.md) for recovery and confirmation behavior.
 
+## On-demand provider selection
+
+For a new thread, the dispatch proxy asks the fleet manager to reserve one
+worker. The fleet saves its first choice and remaining `providerOrder` before
+calling any provider. When an adapter reports `provider.ErrCreateRejected` on
+the first creation attempt, the fleet atomically saves the next choice before
+contacting that provider. An uncertain outcome keeps the reservation on the
+same provider so a retry can reconcile it. Once a worker exists, later
+readiness, checkout, or model errors do not move the thread.
+
+A Namespace dispatch worker whose image lacks the runtime hook can install the
+pinned runtime from the daemon's bundled Nix files. Manual creation and the
+fixed pool retain their prepared-runtime requirement. See the
+[dispatch guide](dispatch-poc.md#fall-back-to-namespace) for configuration.
+
 ## Stable T3 origin
 
 Each managed machine has a separate loopback listener. T3 Code associates with that origin, not with a provider address. A resumed Namespace instance can have a new ID or gateway route without changing T3's local URL.

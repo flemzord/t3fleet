@@ -35,6 +35,11 @@ var _ provider.Provider = (*Client)(nil)
 | `Exec` | Preserve argv/environment values, bound output, return the exit code, and stop work when canceled. |
 | `Connect` | Return a private endpoint for the requested machine port and a cleanup function for owned resources. |
 
+For ordered dispatch, return `provider.ErrCreateRejected` only when the adapter
+can confirm that the attempt allocated no machine. A transport failure, an
+ambiguous response, or a failure after allocation must retain the original
+provider so that the fleet can reconcile it.
+
 Do not log `ExecResult`, `Endpoint.URL`, endpoint headers, or private keys. These can contain credentials.
 
 `Endpoint.DialContext` lets an adapter provide a private transport, such as Namespace's authenticated SSH tunnel. A successful endpoint must outlive its connection-setup context; the proxy calls `Endpoint.Close` when the request or WebSocket ends. Subsequent dials receive their own context.

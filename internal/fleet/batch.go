@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"slices"
 
 	"github.com/flemzord/t3fleet/pkg/provider"
 )
@@ -32,6 +33,12 @@ type batchRecord struct {
 // PrepareBatch atomically reserves every local name and operation identity before
 // any cloud allocation. Replaying an identical ID returns the original plan.
 func (m *Manager) PrepareBatch(ctx context.Context, req BatchRequest) (Batch, error) {
+	return m.prepareBatch(ctx, req, nil)
+}
+
+// A nonempty dispatchOrder is captured with the reservation before any
+// provider call. Manual batches have no dispatch policy or runtime bootstrap.
+func (m *Manager) prepareBatch(ctx context.Context, req BatchRequest, dispatchOrder []string) (Batch, error) {
 	if err := ctx.Err(); err != nil {
 		return Batch{}, err
 	}
@@ -100,7 +107,12 @@ func (m *Manager) PrepareBatch(ctx context.Context, req BatchRequest) (Batch, er
 			return Batch{}, err
 		}
 		id := hex.EncodeToString(raw[:])
-		h, err := m.listen(record{Machine: Machine{ID: id, Name: name, Provider: req.Provider, State: "planned"}, Template: req.Template, Size: req.Size})
+		r := record{Machine: Machine{ID: id, Name: name, Provider: req.Provider, State: "planned"}, Template: req.Template, Size: req.Size}
+		if len(dispatchOrder) > 0 {
+			r.InstallRuntime = req.Provider == "namespace"
+			r.DispatchFallbacks = slices.Clone(dispatchOrder[1:])
+		}
+		h, err := m.listen(r)
 		if err != nil {
 			rollback()
 			return Batch{}, err

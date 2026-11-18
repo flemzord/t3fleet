@@ -12,45 +12,33 @@ This mode starts with **zero worker VMs**. It starts a dedicated local T3
 controller, with a separate home and state directory, for pairing and project
 metadata only. The controller does not clone the repository or run an agent.
 
-Start from [the complete Boat example](../examples/dispatch-boat.json). All
-provider selections and templates are read from the file passed to
-`t3fleet serve --config PATH`; use the same file for CLI commands.
+Start from the complete [Boat-only](../examples/dispatch-boat.json) or
+[Boat with Namespace fallback](../examples/dispatch-boat-namespace.json)
+configuration. Use the same file for the daemon and CLI commands.
 
-1. Set `templates.boat.snapshot` to a prepared T3 snapshot. Set
-   `providers.boat.environment` if the VM needs its Boat environment's repository
-   and model credentials.
-2. Add the block below to your config and start `t3fleet serve --config PATH`.
-   Supply an absolute executable path to the T3 binary that matches
-   `expectedVersion`. Leave `idleTimeout` unset or at `"0"`. Do not include
-   `workers` in this mode.
+1. Configure each provider in `dispatchPOC.onDemand.providerOrder`. For Boat,
+   set `templates.boat.snapshot` to a prepared T3 snapshot. Set
+   `providers.boat.environment` if the VM needs that environment's repository
+   and model credentials. For Namespace, set `templates.namespace.image`.
+2. Set `dispatchPOC.onDemand.t3Binary` to an absolute executable path for T3
+   matching `expectedVersion`. Leave `idleTimeout` unset or at `"0"` and omit
+   `workers`. Start `t3fleet serve --config PATH`.
 3. Run `t3fleet pair-dispatch --config PATH` and confirm **t3fleet**
    in T3 Desktop. From a GitHub project, choose **Add to another machine** and
    select this environment. Clear any selected ignored files; copying them
    across machines is outside this proof.
 4. Choose the default Git branch and send a text message. The proxy reserves a
-   Boat VM, starts it, clones the GitHub repository using credentials already
-   available on that VM, and forwards the first message. The folder shown at
+   worker using the configured provider order, starts it, clones the GitHub
+   repository using credentials available on the worker, and forwards the first
+   message. The folder shown at
    project registration represents the virtual project; the checkout itself
    lives on the worker. A second thread gets a different VM.
-
-```json
-{
-  "dispatchPOC": {
-    "listen": "127.0.0.1:47733",
-    "onDemand": {
-      "t3Binary": "/opt/homebrew/bin/t3",
-      "maxWorkers": 8
-    }
-  }
-}
-```
 
 This mode supports one GitHub repository, text messages, and a single Codex
 model (set `dispatchPOC.onDemand.model`; the default is `gpt-5.4`). The worker
 still needs model access; the local catalog cannot verify it before allocation.
-A saved pairing
-and assignment survive daemon restarts at the same origin. A failed or
-interrupted launch retains its reservation so a retry can reconcile it
+A saved pairing and assignment survive daemon restarts at the same origin.
+A failed or interrupted launch retains its reservation so a retry can reconcile it
 without allocating a second VM. The limit counts reservations, including
 deleted or failed workers. The daemon never destroys or migrates workers
 automatically. Use `t3fleet list` and `t3fleet delete ID` to manage them.
@@ -81,7 +69,7 @@ configuration to use the registered Namespace image `formance/max-dev`:
 {
   "providers": { "namespace": {} },
   "templates": { "namespace": { "image": "registered:formance/max-dev" } },
-  "dispatchPOC": { "onDemand": { "namespaceFallback": true } }
+  "dispatchPOC": { "onDemand": { "providerOrder": ["boat", "namespace"] } }
 }
 ```
 
@@ -89,13 +77,24 @@ Use a Namespace identity that can create Devboxes and access this image. The
 `registered:` prefix selects the name registered with Namespace, even when
 the name contains a slash.
 
-Boat remains first in line. A new reservation switches to Namespace only
-when Boat explicitly refuses its first creation request for billing, limits
-or capacity. If Boat returns a sandbox ID, or if the result is uncertain
-(for example, after a timeout), retry keeps the Boat reservation. The worker
-stays on Namespace once the fallback is recorded, including after daemon
-restart. To disable new fallbacks, clear `namespaceFallback` and retain the
-Namespace provider while existing Namespace workers still use it.
+The first entry in `providerOrder` is the primary. The remaining entries are
+fallbacks, tried in order. Use `["namespace"]` for Namespace only, or
+`["namespace", "boat"]` to put Namespace first. Configure a provider and template
+for every entry. The list must be nonempty and each provider can occur once.
+If omitted, the order defaults to `["boat"]`. The legacy
+`namespaceFallback: true` still means `["boat", "namespace"]`; remove it when
+setting `providerOrder`. Every new reservation starts with the first provider.
+This setting does not apply to manual creation or the fixed worker pool.
+
+t3fleet advances only when the current provider confirms that its first attempt
+did not allocate a worker. Explicit Boat billing, limit and capacity refusals
+qualify. Namespace can confirm a local token failure before sending the create
+request. A Namespace create response can include activation failures after
+allocation, so a failed response from that API does not trigger fallback.
+A lost response, timeout, or a returned machine ID keeps the current reservation.
+The saved order and worker survive restarts. Configuration changes affect new
+reservations. Keep the provider settings, credentials and templates that saved
+reservations can still need.
 
 If the image has no t3fleet runtime, the daemon uses Nix in the Devbox to
 install the pinned T3 and agent CLIs bundled with t3fleet. The first worker

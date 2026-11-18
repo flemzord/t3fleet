@@ -457,3 +457,51 @@ func TestCreateRegisteredImageWithSlash(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+type tokenFunc func(context.Context, time.Duration, bool) (string, error)
+
+func (f tokenFunc) IssueToken(ctx context.Context, ttl time.Duration, refresh bool) (string, error) {
+	return f(ctx, ttl, refresh)
+}
+
+func TestCreateFallbackRequiresConfirmedNoAllocation(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		tokenFails bool
+	}{
+		{"token fails before create", true},
+		{"API may have allocated before reporting an activation error", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				switch strings.TrimPrefix(r.URL.Path, servicePath) {
+				case "Fetch":
+					w.WriteHeader(http.StatusNotFound)
+				case "Create":
+					if tt.tokenFails {
+						t.Error("a create request was sent despite a local token failure")
+					}
+					w.WriteHeader(http.StatusTooManyRequests)
+					reply(t, w, map[string]string{"code": "resource_exhausted"})
+				default:
+					t.Errorf("unexpected request: %s", r.URL.Path)
+				}
+			}, nil)
+			if tt.tokenFails {
+				calls := 0
+				client.config.TokenSource = tokenFunc(func(context.Context, time.Duration, bool) (string, error) {
+					calls++
+					if calls == 1 {
+						return "test-token", nil // allow the initial lookup
+					}
+					return "", errors.New("test token unavailable")
+				})
+			}
+			req := provider.CreateRequest{Name: "test", OperationID: "op", Template: provider.Template{Image: "registered:formance/max-dev"}}
+			m, err := client.Create(t.Context(), req)
+			if m.ID != "" || err == nil || errors.Is(err, provider.ErrCreateRejected) != tt.tokenFails {
+				t.Fatalf("unexpected create result: %+v, %v", m, err)
+			}
+		})
+	}
+}

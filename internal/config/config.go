@@ -39,10 +39,11 @@ type DispatchPOC struct {
 }
 
 type DispatchOnDemand struct {
-	T3Binary          string `json:"t3Binary"`
-	NamespaceFallback bool   `json:"namespaceFallback,omitempty"`
-	MaxWorkers        int    `json:"maxWorkers,omitempty"`
-	Model             string `json:"model,omitempty"`
+	T3Binary          string   `json:"t3Binary"`
+	ProviderOrder     []string `json:"providerOrder,omitempty"`
+	NamespaceFallback bool     `json:"namespaceFallback,omitempty"` // legacy spelling for ["boat", "namespace"]
+	MaxWorkers        int      `json:"maxWorkers,omitempty"`
+	Model             string   `json:"model,omitempty"`
 }
 
 func (d DispatchOnDemand) MaxWorkerCount() int {
@@ -50,6 +51,16 @@ func (d DispatchOnDemand) MaxWorkerCount() int {
 		return 8
 	}
 	return d.MaxWorkers
+}
+
+func (d DispatchOnDemand) OrderedProviders() []string {
+	if d.ProviderOrder != nil {
+		return d.ProviderOrder
+	}
+	if d.NamespaceFallback {
+		return []string{"boat", "namespace"}
+	}
+	return []string{"boat"}
 }
 
 type ProviderConfigs struct {
@@ -151,12 +162,34 @@ func (cfg Config) Validate() error {
 			return errors.New("dispatchPOC requires idleTimeout disabled")
 		}
 		if onDemand := poc.OnDemand; onDemand != nil {
-			if len(poc.Workers) != 0 || cfg.Providers.Boat == nil || cfg.Templates["boat"] == (provider.Template{}) {
-				return errors.New("dispatchPOC.onDemand requires a Boat template and no dedicated workers")
+			if len(poc.Workers) != 0 {
+				return errors.New("dispatchPOC.onDemand cannot be combined with dedicated workers")
 			}
-			if onDemand.NamespaceFallback && (cfg.Providers.Namespace == nil ||
-				strings.TrimPrefix(cfg.Templates["namespace"].Image, "registered:") == "") {
-				return errors.New("dispatchPOC.onDemand.namespaceFallback requires providers.namespace and templates.namespace.image")
+			if onDemand.NamespaceFallback && onDemand.ProviderOrder != nil {
+				return errors.New("use dispatchPOC.onDemand.providerOrder instead of namespaceFallback")
+			}
+			order := onDemand.OrderedProviders()
+			if len(order) == 0 {
+				return errors.New("dispatchPOC.onDemand.providerOrder must contain at least one provider")
+			}
+			seen := make(map[string]bool, len(order))
+			for _, name := range order {
+				if seen[name] {
+					return fmt.Errorf("dispatchPOC.onDemand.providerOrder repeats %q", name)
+				}
+				seen[name] = true
+				switch name {
+				case "boat":
+					if cfg.Providers.Boat == nil || cfg.Templates[name] == (provider.Template{}) {
+						return errors.New("dispatchPOC.onDemand requires providers.boat and a Boat template when using Boat")
+					}
+				case "namespace":
+					if cfg.Providers.Namespace == nil || strings.TrimPrefix(cfg.Templates[name].Image, "registered:") == "" {
+						return errors.New("dispatchPOC.onDemand requires providers.namespace and templates.namespace.image when using Namespace")
+					}
+				default:
+					return fmt.Errorf("unknown dispatchPOC.onDemand provider %q", name)
+				}
 			}
 			if !filepath.IsAbs(onDemand.T3Binary) || strings.ContainsAny(onDemand.T3Binary, "\x00\r\n") {
 				return errors.New("dispatchPOC.onDemand.t3Binary must be an absolute executable path")

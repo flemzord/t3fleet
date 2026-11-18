@@ -25,6 +25,7 @@ archives:
       - THIRD_PARTY_LICENSES.txt
       - examples/config.json
       - examples/dispatch-boat.json
+      - examples/dispatch-boat-namespace.json
 
 checksum:
   name_template: checksums.txt

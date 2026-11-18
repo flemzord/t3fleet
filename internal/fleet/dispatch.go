@@ -5,13 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/flemzord/t3fleet/internal/proxy"
 	"github.com/flemzord/t3fleet/pkg/provider"
 )
 
-var errDispatchSwitchUncertain = errors.New("could not confirm the Namespace fallback selection; restart the daemon and retry this thread")
+var errDispatchSwitchUncertain = errors.New("could not confirm the dispatch fallback selection; restart the daemon and retry this thread")
 
 // LookupDispatchWorker resolves a reservation without allocating a machine.
 // Deleted members stay tombstones so retrying a thread cannot fork its history.
@@ -28,7 +29,9 @@ func (m *Manager) dispatchReservation(key string) (Machine, error) {
 	if err != nil {
 		return Machine{}, err
 	}
-	if len(batch.Machines) != 1 || (batch.Machines[0].Provider != "boat" && batch.Machines[0].Provider != "namespace") || batch.Machines[0].State == "deleted" {
+	if len(key) != 32 || len(batch.Machines) != 1 ||
+		batch.Machines[0].Name != managedName("thread-"+key[:12])+"-01" ||
+		m.opts.Providers[batch.Machines[0].Provider] == nil || batch.Machines[0].State == "deleted" {
 		return Machine{}, errors.New("the reserved dispatch worker is unavailable")
 	}
 	return batch.Machines[0], nil
@@ -37,14 +40,16 @@ func (m *Manager) dispatchReservation(key string) (Machine, error) {
 // ProvisionDispatchWorker reserves a single worker per thread before talking
 // to either provider. Namespace workers install the daemon's pinned runtime
 // only if the base image doesn't already have the hook.
-func (m *Manager) ProvisionDispatchWorker(ctx context.Context, key, remote string, namespaceFallback bool) (proxy.DispatchWorker, string, error) {
+func (m *Manager) ProvisionDispatchWorker(ctx context.Context, key, remote string, providerOrder []string) (proxy.DispatchWorker, string, error) {
 	machine, err := m.dispatchReservation(key)
 	if errors.Is(err, ErrNotFound) {
-		if len(key) != 32 {
+		if len(key) != 32 || len(providerOrder) == 0 {
 			return proxy.DispatchWorker{}, "", ErrInvalid
 		}
-		_, err = m.PrepareBatch(ctx, BatchRequest{ID: key, Count: 1, CreateRequest: CreateRequest{Name: "thread-" + key[:12], Provider: "boat"}})
-		if err == nil {
+		// A concurrent launch may already have advanced this reservation to a
+		// fallback, so consult the saved identity even on a plan conflict.
+		_, err = m.prepareBatch(ctx, BatchRequest{ID: key, Count: 1, CreateRequest: CreateRequest{Name: "thread-" + key[:12], Provider: providerOrder[0]}}, providerOrder)
+		if err == nil || errors.Is(err, ErrConflict) {
 			machine, err = m.dispatchReservation(key)
 		}
 	}
@@ -60,18 +65,28 @@ func (m *Manager) ProvisionDispatchWorker(ctx context.Context, key, remote strin
 	if current, err := m.handle(machine.ID); err != nil || current != h {
 		return proxy.DispatchWorker{}, "", errors.New("the reserved dispatch worker was removed")
 	}
-	r := m.copy(h)
-	err = m.ensure(ctx, h, false)
-	// Never switch after an earlier attempt with an unknown outcome, or after
-	// Boat returned a sandbox ID. The first POST must explicitly refuse.
-	if namespaceFallback && r.Provider == "boat" && r.State == "planned" && r.RemoteID == "" &&
-		errors.Is(err, provider.ErrCreateRejected) && ctx.Err() == nil {
-		if err := m.switchDispatchToNamespace(key, h); err != nil {
+	// Reservations from before providerOrder have no saved policy. Recover
+	// the original opt-in only if the first provider has not been called.
+	if r := m.copy(h); r.DispatchFallbacks == nil && r.State == "planned" && r.RemoteID == "" &&
+		len(providerOrder) > 0 && r.Provider == providerOrder[0] {
+		if err := m.update(h, func(r *record) { r.DispatchFallbacks = slices.Clone(providerOrder[1:]) }); err != nil {
+			return proxy.DispatchWorker{}, "", errors.New("could not save the dispatch provider order")
+		}
+	}
+	for {
+		r := m.copy(h)
+		err = m.ensure(ctx, h, false)
+		// The provider must explicitly refuse its first attempt. Never switch
+		// after a lost response, an earlier attempt, or successful allocation.
+		if len(r.DispatchFallbacks) == 0 || r.State != "planned" || r.RemoteID != "" ||
+			!errors.Is(err, provider.ErrCreateRejected) || ctx.Err() != nil {
+			break
+		}
+		if err := m.advanceDispatchProvider(key, h); err != nil {
 			return proxy.DispatchWorker{}, "", err
 		}
-		err = m.ensure(ctx, h, false)
 	}
-	r = m.copy(h)
+	r := m.copy(h)
 	if err != nil {
 		if errors.Is(err, errDispatchSwitchUncertain) {
 			return proxy.DispatchWorker{}, "", err
@@ -79,7 +94,7 @@ func (m *Manager) ProvisionDispatchWorker(ctx context.Context, key, remote strin
 		if r.Provider == "namespace" {
 			return proxy.DispatchWorker{}, "", fmt.Errorf("the reserved Namespace worker is not ready; retry the same thread: %w", err)
 		}
-		return proxy.DispatchWorker{}, "", errors.New("the reserved Boat worker is not ready; retry the same thread")
+		return proxy.DispatchWorker{}, "", fmt.Errorf("the reserved %s worker is not ready; retry the same thread", r.Provider)
 	}
 	result, err := m.opts.Providers[r.Provider].Exec(ctx, r.RemoteID, provider.ExecRequest{
 		Args: []string{"/bin/bash", "-lc", dispatchCheckoutScript, "t3fleet-dispatch", key, remote},
@@ -97,24 +112,28 @@ func (m *Manager) ProvisionDispatchWorker(ctx context.Context, key, remote strin
 }
 
 // The caller holds the machine operation lock. Save the replacement in both
-// indexes before the first Namespace call so manual operations and restarts
+// indexes before calling the next provider so manual operations and restarts
 // also see the chosen provider.
-func (m *Manager) switchDispatchToNamespace(key string, h *machineHandle) error {
+func (m *Manager) advanceDispatchProvider(key string, h *machineHandle) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	template := m.opts.Templates["namespace"]
 	old := m.batches[key]
-	if m.closed || m.opts.Providers["namespace"] == nil || template.Image == "" ||
-		len(old.IDs) != 1 || old.IDs[0] != h.record.ID ||
-		h.record.Provider != "boat" || h.record.State != "creating" || h.record.RemoteID != "" {
-		return errors.New("could not select the Namespace fallback")
+	if m.closed || len(old.IDs) != 1 || old.IDs[0] != h.record.ID ||
+		h.record.State != "creating" || h.record.RemoteID != "" || len(h.record.DispatchFallbacks) == 0 {
+		return errors.New("could not select the next dispatch provider")
+	}
+	next := h.record.DispatchFallbacks[0]
+	template := m.opts.Templates[next]
+	if m.opts.Providers[next] == nil || template == (provider.Template{}) {
+		return fmt.Errorf("the reserved dispatch fallback %q is missing its provider configuration or template", next)
 	}
 	batch := old
-	batch.Request.Provider = "namespace"
+	batch.Request.Provider = next
 	batch.Request.Template = template
 	m.batches[key] = batch
 	if err := m.updateLocked(h, func(r *record) {
-		r.Provider, r.Template, r.InstallRuntime, r.State = "namespace", template, true, "planned"
+		r.Provider, r.Template, r.InstallRuntime, r.State = next, template, next == "namespace", "planned"
+		r.DispatchFallbacks = r.DispatchFallbacks[1:]
 	}); err != nil {
 		m.batches[key] = old
 		h.dispatchSwitchUncertain = true

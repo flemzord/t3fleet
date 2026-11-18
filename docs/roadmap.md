@@ -8,7 +8,8 @@ This is the first implementation of a native Go fleet daemon. A checked box in a
 - Creation from prepared images or snapshots, inspect, start, stop, and delete.
 - Durable identical batches with bounded CLI concurrency, replay/resume, and explicit multi-delete selection.
 - Explicit snapshot capture for Boat; snapshot restore/fork for Namespace.
-- A prepared-image runtime contract with per-machine T3 identity and credential initialization.
+- A runtime contract with per-machine T3 identity and credential initialization.
+- Experimental [on-demand dispatch with ordered provider fallback](dispatch-poc.md#fall-back-to-namespace).
 - Stable per-machine loopback ports and durable client authorization.
 - Automatic desktop association handoff after `create`, with `--no-register` for headless use.
 - T3 pairing, authenticated HTTP/WebSocket relay, and scoped socket tickets.
@@ -17,7 +18,7 @@ This is the first implementation of a native Go fleet daemon. A checked box in a
 - Private atomic state, an exclusive ownership lock, strict configuration, and a local authenticated control API.
 - Offline tests with the race detector, formatting checks, and `go vet`.
 
-The [provider guides](providers-boat.md) and [protocol guide](protocol.md) define the supported contracts. A prepared template remains a prerequisite; the daemon does not install T3 from the network on each boot.
+The [provider guides](providers-boat.md) and [protocol guide](protocol.md) define the supported contracts. Manual creation requires a template with the runtime hook installed. On-demand Namespace workers can install the pinned runtime on first use if the image includes Nix.
 
 ## Current limits
 

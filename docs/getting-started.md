@@ -144,6 +144,8 @@ The official Go SDK loads an existing `devbox login` or `nsc login` session. It 
 
 For unattended use, configure an appropriate scoped credential through the SDK's supported `NSC_TOKEN_FILE` or workload-identity flow. Keep it outside the repository. See [Namespace credentials](providers-namespace.md#credentials).
 
+For on-demand threads, see [provider order and Namespace fallback](dispatch-poc.md#fall-back-to-namespace). This setting does not change the provider selected by `t3fleet create --provider`.
+
 ### T3 version
 
 Set `expectedVersion` to the exact server/client version, without a leading `v`. The reference default currently matches `0.1.11-nightly.20261117.4838`. A mismatch leaves the machine managed but not ready. Rebuild the golden template and update the configuration together after a compatibility test.

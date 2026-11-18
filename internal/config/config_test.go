@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -90,13 +91,32 @@ func TestDispatchOnDemandConfiguration(t *testing.T) {
 	cfg.DispatchPOC.OnDemand.NamespaceFallback = true
 	cfg.Providers.Namespace = &Namespace{}
 	cfg.Templates["namespace"] = provider.Template{Image: "registered:formance/max-dev"}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Namespace fallback configuration rejected: %v", err)
+	if err := cfg.Validate(); err != nil || !slices.Equal(cfg.DispatchPOC.OnDemand.OrderedProviders(), []string{"boat", "namespace"}) {
+		t.Fatalf("legacy Namespace fallback configuration rejected: %v", err)
+	}
+	cfg.DispatchPOC.OnDemand.NamespaceFallback = false
+	for _, order := range [][]string{{"namespace", "boat"}, {"boat", "namespace"}, {"namespace"}} {
+		cfg.DispatchPOC.OnDemand.ProviderOrder = order
+		if len(order) == 1 {
+			cfg.Providers.Boat = nil
+			delete(cfg.Templates, "boat")
+		}
+		if err := cfg.Validate(); err != nil || !slices.Equal(cfg.DispatchPOC.OnDemand.OrderedProviders(), order) {
+			t.Fatalf("provider order %v rejected: %v", order, err)
+		}
 	}
 	tests := []struct {
 		name   string
 		modify func(*Config)
 	}{
+		{"empty provider order", func(c *Config) { c.DispatchPOC.OnDemand.ProviderOrder = []string{} }},
+		{"duplicate provider", func(c *Config) { c.DispatchPOC.OnDemand.ProviderOrder = []string{"boat", "boat"} }},
+		{"unknown provider", func(c *Config) { c.DispatchPOC.OnDemand.ProviderOrder = []string{"boat", "other"} }},
+		{"unconfigured provider", func(c *Config) { c.DispatchPOC.OnDemand.ProviderOrder = []string{"boat", "namespace"} }},
+		{"both policy formats", func(c *Config) {
+			c.DispatchPOC.OnDemand.ProviderOrder = []string{"boat"}
+			c.DispatchPOC.OnDemand.NamespaceFallback = true
+		}},
 		{"fallback without provider", func(c *Config) { c.DispatchPOC.OnDemand.NamespaceFallback = true }},
 		{"fallback without image", func(c *Config) {
 			c.DispatchPOC.OnDemand.NamespaceFallback = true

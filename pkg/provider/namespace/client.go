@@ -122,6 +122,8 @@ func (r response) machine() (provider.Machine, error) {
 	return provider.Machine{ID: r.Devbox.ID, Name: r.Devbox.Name, State: state}, nil
 }
 
+var errAccessTokenUnavailable = errors.New("namespace: could not issue access token")
+
 func (c *Client) call(ctx context.Context, method string, input, output any) error {
 	body, err := json.Marshal(input)
 	if err != nil {
@@ -129,7 +131,7 @@ func (c *Client) call(ctx context.Context, method string, input, output any) err
 	}
 	token, err := c.config.TokenSource.IssueToken(ctx, 5*time.Minute, false)
 	if err != nil {
-		return fmt.Errorf("namespace: issue access token: %w", err)
+		return fmt.Errorf("%w: %w", errAccessTokenUnavailable, err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.Endpoint+servicePath+method, bytes.NewReader(body))
 	if err != nil {
@@ -202,6 +204,15 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 	if (t.Image == "") == (t.Source == "") {
 		return provider.Machine{}, errors.New("namespace: choose either an image or a source Devbox snapshot")
 	}
+	// A token failure happens before sending a request and is the only
+	// Namespace failure that currently proves this attempt did not create a
+	// Devbox. Errors from Create itself can happen during activation.
+	creationError := func(err error) error {
+		if ctx.Err() == nil && errors.Is(err, errAccessTokenUnavailable) {
+			return fmt.Errorf("%w: %w", provider.ErrCreateRejected, err)
+		}
+		return err
+	}
 	// Namespace has no idempotency-key field. Reconcile retries by stable name
 	// and an operation label; never adopt another operation's Devbox.
 	existing, err := c.fetch(ctx, req.Name)
@@ -217,7 +228,7 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 		return provider.Machine{}, errors.New("namespace: Devbox name already belongs to another operation")
 	}
 	if !errors.Is(err, provider.ErrNotFound) {
-		return provider.Machine{}, err
+		return provider.Machine{}, creationError(err)
 	}
 	labels := make([]label, 0, len(req.Labels)+1)
 	for name, value := range req.Labels {
@@ -252,7 +263,7 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 	}
 	var out response
 	if err = c.call(ctx, method, input, &out); err != nil {
-		return provider.Machine{}, err
+		return provider.Machine{}, creationError(err)
 	}
 	machine, err := out.machine()
 	if err != nil {

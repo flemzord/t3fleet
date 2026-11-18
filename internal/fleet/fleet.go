@@ -78,7 +78,8 @@ type record struct {
 	Descriptor    map[string]any    `json:"descriptor,omitempty"`
 	Session       map[string]any    `json:"session,omitempty"`
 
-	InstallRuntime bool `json:"installRuntime,omitempty"`
+	InstallRuntime    bool     `json:"installRuntime,omitempty"`
+	DispatchFallbacks []string `json:"dispatchFallbacks,omitzero"`
 }
 type diskState struct {
 	Schema  int                    `json:"schema"`

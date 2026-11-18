@@ -81,11 +81,12 @@ func serve(ctx context.Context, cfg config.Config, diagnostics io.Writer) error 
 				return startErr
 			}
 			defer stop()
+			providerOrder := poc.OnDemand.OrderedProviders()
 			dispatch, err = proxy.NewDispatchOnDemand(origin, store, proxy.DispatchOnDemand{
 				Controller: controller, ProjectRoot: filepath.Join(cfg.StateDir, stateName, "projects"),
 				MaxWorkers: poc.OnDemand.MaxWorkerCount(), Model: poc.OnDemand.Model,
 				Provision: func(ctx context.Context, key, remote string) (proxy.DispatchWorker, string, error) {
-					return manager.ProvisionDispatchWorker(ctx, key, remote, poc.OnDemand.NamespaceFallback)
+					return manager.ProvisionDispatchWorker(ctx, key, remote, providerOrder)
 				},
 				Lookup: manager.LookupDispatchWorker,
 			})

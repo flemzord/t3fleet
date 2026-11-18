@@ -16,6 +16,7 @@
     "listen": "127.0.0.1:47733",
     "onDemand": {
       "t3Binary": "/absolute/path/to/t3",
+      "providerOrder": ["boat"],
       "maxWorkers": 8,
       "model": "gpt-5.4"
     }

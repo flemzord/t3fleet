@@ -4,15 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/flemzord/t3fleet/internal/fleet"
 	"github.com/flemzord/t3fleet/pkg/provider"
 )
 
 type dispatchProvider struct {
 	*mockProvider
 	createErrors []error
+	onCreate     func()
 	attempts     int
 	checkouts    int
 	bootstrap    int
@@ -20,6 +23,9 @@ type dispatchProvider struct {
 
 func (p *dispatchProvider) Create(ctx context.Context, req provider.CreateRequest) (provider.Machine, error) {
 	p.attempts++
+	if p.onCreate != nil {
+		p.onCreate()
+	}
 	if len(p.createErrors) > 0 {
 		err := p.createErrors[0]
 		p.createErrors = p.createErrors[1:]
@@ -63,7 +69,7 @@ func TestDispatchFallbackRecoversSameDevboxAfterRestart(t *testing.T) {
 	namespace.createFailsOnce = true // Namespace allocates, then loses its reply.
 	key := strings.Repeat("a", 32)
 	remote := "https://github.com/octocat/Hello-World.git"
-	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, true); err == nil {
+	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, []string{"boat", "namespace"}); err == nil {
 		t.Fatal("expected interrupted Namespace create")
 	}
 	first, err := f.m.Batch(key)
@@ -71,8 +77,8 @@ func TestDispatchFallbackRecoversSameDevboxAfterRestart(t *testing.T) {
 		t.Fatalf("fallback reservation was not saved: %+v, %v", first, err)
 	}
 	f.restart(t)
-	// A config change prevents new fallbacks, but can't reroute an existing thread.
-	if _, cwd, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, false); err != nil || cwd == "" {
+	// Changing the policy does not reroute an existing reservation.
+	if _, cwd, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, []string{"namespace", "boat"}); err != nil || cwd == "" {
 		t.Fatalf("Namespace worker could not recover through restart: %q, %v", cwd, err)
 	}
 	batch, _ := f.m.Batch(key)
@@ -89,7 +95,7 @@ func TestDispatchFallbackRecoversSameDevboxAfterRestart(t *testing.T) {
 	if err := f.m.Delete(t.Context(), batch.Machines[0].ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, true); err == nil || namespace.allocations != 1 {
+	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, []string{"boat", "namespace"}); err == nil || namespace.allocations != 1 {
 		t.Fatal("retry resurrected a deleted worker")
 	}
 }
@@ -99,7 +105,7 @@ func TestDispatchDoesNotSwitchAfterUncertainBoatCreate(t *testing.T) {
 	boat.createErrors = []error{errors.New("response lost"), provider.ErrCreateRejected}
 	key := strings.Repeat("b", 32)
 	for range 2 {
-		if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, "https://github.com/octocat/Hello-World.git", true); err == nil {
+		if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, "https://github.com/octocat/Hello-World.git", []string{"boat", "namespace"}); err == nil {
 			t.Fatal("expected Boat create failure")
 		}
 		f.restart(t)
@@ -114,14 +120,72 @@ func TestDispatchRemainsOnBoatAfterAllocation(t *testing.T) {
 	boat.execFails = true
 	key := strings.Repeat("c", 32)
 	remote := "https://github.com/octocat/Hello-World.git"
-	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, true); err == nil {
+	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, []string{"boat", "namespace"}); err == nil {
 		t.Fatal("expected Boat runtime failure")
 	}
 	boat.execFails = false
-	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, true); err != nil {
+	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, []string{"boat", "namespace"}); err != nil {
 		t.Fatal(err)
 	}
 	if boat.allocations != 1 || boat.checkouts != 1 || namespace.attempts != 0 {
 		t.Fatal("launch did not stay with its original Boat sandbox")
+	}
+}
+
+func TestDispatchHonorsNamespaceAsPrimary(t *testing.T) {
+	f, boat, namespace := dispatchProviders(t)
+	key := strings.Repeat("d", 32)
+	remote := "https://github.com/octocat/Hello-World.git"
+	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, []string{"namespace", "boat"}); err != nil {
+		t.Fatal(err)
+	}
+	if boat.attempts != 0 || namespace.allocations != 1 || namespace.bootstrap != 1 {
+		t.Fatal("did not reserve Namespace as the primary worker")
+	}
+}
+
+func TestDispatchTriesFallbacksInOrder(t *testing.T) {
+	f, boat, namespace := dispatchProviders(t)
+	var calls []string
+	boat.onCreate = func() { calls = append(calls, "boat") }
+	namespace.onCreate = func() { calls = append(calls, "namespace") }
+	third := &dispatchProvider{mockProvider: newProvider(t), onCreate: func() { calls = append(calls, "third") }}
+	f.options.Providers["third"] = third
+	f.options.Templates["third"] = provider.Template{Image: "third-image"}
+	f.restart(t)
+	// These providers must explicitly refuse before the third can allocate.
+	// Their counters also catch a retry of an earlier preference.
+	boat.createErrors = []error{provider.ErrCreateRejected}
+	namespace.createErrors = []error{provider.ErrCreateRejected}
+	key := strings.Repeat("e", 32)
+	remote := "https://github.com/octocat/Hello-World.git"
+	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, []string{"namespace", "boat", "third"}); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := f.m.Batch(key)
+	if err != nil || len(batch.Machines) != 1 || batch.Machines[0].Provider != "third" ||
+		!slices.Equal(calls, []string{"namespace", "boat", "third"}) || third.allocations != 1 {
+		t.Fatalf("unexpected fallback reservation: calls=%v, batch=%v, err=%v", calls, batch, err)
+	}
+}
+
+func TestDispatchUpgradesUnattemptedLegacyReservation(t *testing.T) {
+	f, boat, namespace := dispatchProviders(t)
+	boat.createErrors = []error{provider.ErrCreateRejected}
+	key := strings.Repeat("f", 32)
+	// The old dispatcher saved a normal, single-machine Boat batch.
+	legacy, err := f.m.PrepareBatch(t.Context(), fleet.BatchRequest{
+		ID: key, Count: 1, CreateRequest: fleet.CreateRequest{Name: "thread-" + key[:12], Provider: "boat"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.restart(t)
+	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, "https://github.com/octocat/Hello-World.git", []string{"boat", "namespace"}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := f.m.Batch(key)
+	if err != nil || current.Machines[0].ID != legacy.Machines[0].ID || namespace.allocations != 1 {
+		t.Fatalf("legacy planned worker did not retain its fallback: %v, %v", current, err)
 	}
 }

@@ -66,6 +66,10 @@ Namespace Devbox API exposes list, restore, and fork, but no explicit
 `provider.Snapshotter`. A capture-on-stop workflow needs live confirmation
 before an operator treats it as a guarantee.
 
+For [on-demand dispatch](dispatch-poc.md#fall-back-to-namespace), Namespace must
+use an image. If the image includes Nix but lacks the runtime hook, t3fleet can
+install the pinned runtime on first use.
+
 ## Lifecycle and retry behavior
 
 The adapter maps lifecycle operations to `Fetch`, `Activate`, `Stop`, and
