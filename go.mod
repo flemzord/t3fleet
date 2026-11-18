@@ -3,7 +3,7 @@ module github.com/flemzord/t3fleet
 go 1.27.0
 
 require (
-	github.com/coder/websocket v1.8.14
+	github.com/coder/websocket v1.8.15
 	golang.org/x/crypto v0.52.0
 	golang.org/x/term v0.43.0
 	namespacelabs.dev/integrations v0.0.11-0.20261112110900-3b5e484d4fbf
