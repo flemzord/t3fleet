@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -372,6 +373,21 @@ func TestExecKeepsSecretOutputsOutOfCommandHistory(t *testing.T) {
 	f.checkDeleted(t)
 }
 
+func TestExecAcceptsBoatWorkdirRelativeOutputPaths(t *testing.T) {
+	c, f := fixtureClient(t)
+	// Captured live 2026-11-18: GET /files?path=/tmp/<marker>&encoding=utf8
+	// returned {success:true,path:"../../tmp/<marker>",encoding:"utf8",
+	// size:15,content:<15 UTF-8 bytes>}. Content was not printed or recorded.
+	f.alterRead = func(m map[string]any) {
+		m["path"] = "../../" + strings.TrimPrefix(m["path"].(string), "/")
+	}
+	res, err := c.Exec(t.Context(), "bx_test", provider.ExecRequest{Args: []string{"printf", "t3fleet-marker\n"}})
+	if err != nil || res.Stdout != "t3fleet-marker\n" || res.Stderr != "" || res.ExitCode != 0 {
+		t.Fatalf("relative Boat file response rejected: exit=%d err=%v", res.ExitCode, err)
+	}
+	f.checkDeleted(t)
+}
+
 func TestExecRejectsInvalidInput(t *testing.T) {
 	c := clientFor(t, func(http.ResponseWriter, *http.Request) { t.Error("invalid input reached API") })
 	for _, req := range []provider.ExecRequest{{}, {Args: []string{"x\x00y"}}, {Args: []string{"true"}, Env: map[string]string{"BAD=KEY": "value"}}} {
@@ -418,6 +434,10 @@ func TestExecRejectsMalformedFileResponseAndCleansUp(t *testing.T) {
 		{"oversize", func(m map[string]any) { m["size"] = maxExecOutput + 1 }},
 		{"mismatch-size", func(m map[string]any) { m["size"] = 0 }},
 		{"path", func(m map[string]any) { m["path"] = "/etc/passwd" }},
+		{"unrelated-relative-path", func(m map[string]any) { m["path"] = "../../tmp/unrelated-file" }},
+		{"wrong-private-stream", func(m map[string]any) {
+			m["path"] = "../../" + strings.TrimPrefix(path.Dir(m["path"].(string))+"/different-output", "/")
+		}},
 		{"failure", func(m map[string]any) { m["success"] = false }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -462,7 +482,28 @@ func TestExecCleanupAfterCommandAPIFailure(t *testing.T) {
 	f.checkDeleted(t)
 }
 
-func TestConnectPreservesPrivateToken(t *testing.T) {
+func TestConnectBootstrapsPrivateCookieWithoutLeakingAuthorization(t *testing.T) {
+	requests := 0
+	grant := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Header.Get("Authorization") != "" || r.Header.Get("X-Boat-Org") != "" {
+			t.Error("account authorization reached hosted port")
+		}
+		if r.URL.Path != "/.well-known/t3/environment" {
+			t.Error("bootstrap did not request public T3 descriptor")
+		}
+		if r.URL.Query().Get("_token") == "port-secret" {
+			http.SetCookie(w, &http.Cookie{Name: "boat-port", Value: "grant-secret", Path: "/", Secure: true, HttpOnly: true})
+			http.Redirect(w, r, "/.well-known/t3/environment", http.StatusFound)
+			return
+		}
+		cookie, err := r.Cookie("boat-port")
+		if err != nil || cookie.Value != "grant-secret" {
+			t.Error("private grant cookie was not sent on same-origin redirect")
+		}
+		respond(t, w, map[string]any{"environmentId": "env-test"})
+	}))
+	t.Cleanup(grant.Close)
 	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
 		data, _ := io.ReadAll(r.Body)
 		var body map[string]any
@@ -470,11 +511,96 @@ func TestConnectPreservesPrivateToken(t *testing.T) {
 		if r.URL.Path != "/sandboxes/bx_test/host" || body["port"] != float64(3773) || body["public"] != false || body["localhost"] != true {
 			t.Errorf("invalid host request: %s", data)
 		}
-		respond(t, w, map[string]any{"ok": true, "url": "https://machine-3773.on.boat.dev/?_token=port-secret"})
+		respond(t, w, map[string]any{"ok": true, "url": grant.URL + "/?_token=port-secret"})
 	})
+	c.accessHTTP = grant.Client()
 	ep, err := c.Connect(t.Context(), "bx_test", 3773)
-	if err != nil || !strings.Contains(ep.URL, "_token=port-secret") || len(ep.Headers) != 0 {
+	if err != nil || strings.Contains(ep.URL, "_token") || ep.Headers.Get("Cookie") != "boat-port=grant-secret" || ep.Headers.Get("Authorization") != "" || requests != 2 {
 		t.Fatalf("connect failed: %v", err)
+	}
+}
+
+func TestConnectRefusesCrossOriginGrantRedirect(t *testing.T) {
+	external := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("private endpoint followed external redirect")
+	}))
+	t.Cleanup(external.Close)
+	grant := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "boat-port", Value: "grant-secret", Path: "/", Secure: true})
+		http.Redirect(w, r, external.URL+"/?_token=port-secret", http.StatusFound)
+	}))
+	t.Cleanup(grant.Close)
+	c := clientFor(t, func(w http.ResponseWriter, _ *http.Request) {
+		respond(t, w, map[string]any{"ok": true, "url": grant.URL + "/?_token=port-secret"})
+	})
+	c.accessHTTP = grant.Client()
+	_, err := c.Connect(t.Context(), "bx_test", 3773)
+	if err == nil || strings.Contains(err.Error(), "port-secret") || strings.Contains(err.Error(), "grant-secret") || strings.Contains(err.Error(), external.URL) {
+		t.Fatalf("unsafe redirect result: %v", err)
+	}
+}
+
+func TestConnectRejectsMalformedPrivateGrants(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cookie *http.Cookie
+		status int
+	}{
+		{name: "missing-cookie", status: 200},
+		{name: "expired-cookie", cookie: &http.Cookie{Name: "grant", Value: "secret", Path: "/", MaxAge: -1}, status: 200},
+		{name: "descriptor-only-cookie", cookie: &http.Cookie{Name: "grant", Value: "secret", Path: "/.well-known/t3"}, status: 200},
+		{name: "wrong-domain", cookie: &http.Cookie{Name: "grant", Value: "secret", Path: "/", Domain: "example.com"}, status: 200},
+		{name: "access-denied", cookie: &http.Cookie{Name: "grant", Value: "secret", Path: "/"}, status: 403},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			grant := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.cookie != nil {
+					http.SetCookie(w, tc.cookie)
+				}
+				w.WriteHeader(tc.status)
+			}))
+			t.Cleanup(grant.Close)
+			c := clientFor(t, func(w http.ResponseWriter, _ *http.Request) {
+				respond(t, w, map[string]any{"ok": true, "url": grant.URL + "/?_token=port-secret"})
+			})
+			c.accessHTTP = grant.Client()
+			if _, err := c.Connect(t.Context(), "bx_test", 3773); err == nil || strings.Contains(err.Error(), "secret") {
+				t.Fatalf("accepted malformed private access: %v", err)
+			}
+		})
+	}
+}
+
+func TestConnectBoundsGrantRedirects(t *testing.T) {
+	requests := 0
+	grant := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.SetCookie(w, &http.Cookie{Name: "grant", Value: "secret", Path: "/", Secure: true})
+		http.Redirect(w, r, "/loop", http.StatusFound)
+	}))
+	t.Cleanup(grant.Close)
+	c := clientFor(t, func(w http.ResponseWriter, _ *http.Request) {
+		respond(t, w, map[string]any{"ok": true, "url": grant.URL + "/?_token=port-secret"})
+	})
+	c.accessHTTP = grant.Client()
+	if _, err := c.Connect(t.Context(), "bx_test", 3773); err == nil || requests != 6 {
+		t.Fatalf("unbounded redirects: requests=%d err=%v", requests, err)
+	}
+}
+
+func TestConnectGrantHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	grant := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cancel()
+		<-r.Context().Done()
+	}))
+	t.Cleanup(grant.Close)
+	c := clientFor(t, func(w http.ResponseWriter, _ *http.Request) {
+		respond(t, w, map[string]any{"ok": true, "url": grant.URL + "/?_token=port-secret"})
+	})
+	c.accessHTTP = grant.Client()
+	if _, err := c.Connect(ctx, "bx_test", 3773); !errors.Is(err, context.Canceled) {
+		t.Fatalf("grant ignored cancellation: %v", err)
 	}
 }
 

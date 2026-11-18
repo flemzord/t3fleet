@@ -77,10 +77,26 @@ therefore bind only to loopback inside the sandbox. Boat returns an HTTPS URL
 with a `_token` query parameter. The adapter rejects ungated, non-HTTPS, and
 credential-in-userinfo URLs.
 
-The returned URL is a credential. The proxy must preserve its base query on
-every HTTP and WebSocket request, and must never expose or log it. The account
-API bearer token is not sent to the hosted port. T3's own authentication remains
-an additional, separate layer.
+The token-bearing URL is an access-grant bootstrap, not a URL to attach unchanged
+to every proxied request. The adapter requests the public T3 descriptor with that
+token and a fresh cookie jar, follows at most five HTTPS redirects within exactly
+the same origin, and requires a cookie valid for the endpoint. Boat's live grant
+flow sets `_port_auth` and redirects to the token-free URL. The adapter does not
+depend on that cookie name, but rejects missing, expired, wrongly scoped, or
+denied grants.
+
+The resulting `Endpoint.URL` has `_token` removed. `Endpoint.Headers.Cookie`
+contains the private grant for subsequent HTTP and WebSocket requests. Both are
+private connection data: the proxy must bind the cookie to this endpoint's origin
+and must never log or expose it to downstream clients. A new connection uses a
+new cookie jar, so one sandbox cannot inherit another sandbox's grant. Neither
+the account API bearer token nor a T3 bearer token is sent during this bootstrap.
+The caller attaches T3's separate service authentication after connecting.
+
+`Config.AccessHTTPClient` optionally customizes the hosted-port transport, for
+example for a trusted TLS test server. The adapter still owns the fresh cookie
+jar, redirect limit, and same-origin policy. Production uses the standard HTTPS
+transport. Application readiness is checked separately after the grant exists.
 
 ## Commands and errors
 
@@ -103,6 +119,12 @@ It validates response metadata and limits each stream to 4 MiB. Malformed status
 unexpected encoding, missing metadata, size mismatch, and oversized output fail
 closed without returning partial output.
 
+The files API reports paths relative to `/home/user`, even when the request uses
+an absolute path: `/tmp/output` is returned as `../../tmp/output`. The adapter
+resolves that relative representation using POSIX path rules and still requires
+an exact canonical match with the requested private output file. This behavior
+was checked read-only against a nonsecret marker on 2026-11-18.
+
 The temporary directory is deleted through the native recursive files API on
 success or failure, including cancellation. Cleanup has its own bounded context
 and does not retry execution. A cleanup failure returns an error and discards
@@ -123,6 +145,10 @@ Execution tests run the generated shell text against harmless local fixtures,
 verify private file permissions, keep secret markers out of the mock command
 history, and exercise file validation, nonzero exits, cancellation, and cleanup
 failures.
+TLS grant tests cover same-origin cookie redirects, token removal, account-header
+isolation, cross-origin redirect rejection, malformed grants, redirect limits,
+and context cancellation. A native API scratch-machine probe also verified the
+cookie grant without printing cookie values or token-bearing URLs.
 They do not create cloud resources.
 
 Official references:

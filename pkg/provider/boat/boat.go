@@ -12,7 +12,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
+	"path"
 	"regexp"
 	"slices"
 	"strconv"
@@ -34,6 +36,9 @@ type Config struct {
 	Environment string
 	BaseURL     string
 	HTTPClient  *http.Client
+	// AccessHTTPClient customizes the hosted-port transport (for example a
+	// trusted test TLS server). Its cookies are never reused across endpoints.
+	AccessHTTPClient *http.Client
 }
 
 type Client struct {
@@ -42,6 +47,7 @@ type Client struct {
 	organization string
 	environment  string
 	http         *http.Client
+	accessHTTP   *http.Client
 	pollInterval time.Duration
 }
 
@@ -68,7 +74,13 @@ func New(cfg Config) (*Client, error) {
 	}
 	// Never forward the account bearer token to a redirect target.
 	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Client{base: strings.TrimRight(base, "/"), key: cfg.APIKey, organization: cfg.Organization, environment: cfg.Environment, http: &hc, pollInterval: time.Second}, nil
+	access := hc
+	if cfg.AccessHTTPClient != nil {
+		access = *cfg.AccessHTTPClient
+	}
+	access.Jar = nil
+	access.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &Client{base: strings.TrimRight(base, "/"), key: cfg.APIKey, organization: cfg.Organization, environment: cfg.Environment, http: &hc, accessHTTP: &access, pollInterval: time.Second}, nil
 }
 
 func (*Client) Name() string { return "boat" }
@@ -396,7 +408,14 @@ func (c *Client) readPrivateOutput(ctx context.Context, sandbox, filename string
 	if err := c.request(ctx, http.MethodGet, sandbox+"/files?"+query.Encode(), nil, nil, &res); err != nil {
 		return "", err
 	}
-	if !res.Success || res.Path != filename || res.Encoding != "utf8" || res.Size == nil || res.Content == nil ||
+	// Boat returns file paths relative to its /home/user work directory, even
+	// for an absolute request: /tmp/file is reported as ../../tmp/file. Resolve
+	// that representation before comparing; never accept an unrelated file.
+	returnedPath := res.Path
+	if !path.IsAbs(returnedPath) {
+		returnedPath = path.Join("/home/user", returnedPath)
+	}
+	if !res.Success || path.Clean(returnedPath) != path.Clean(filename) || res.Encoding != "utf8" || res.Size == nil || res.Content == nil ||
 		*res.Size < 0 || *res.Size > maxExecOutput || int64(len(*res.Content)) != *res.Size || !utf8.ValidString(*res.Content) {
 		return "", errors.New("boat: invalid private command output")
 	}
@@ -429,7 +448,77 @@ func (c *Client) Connect(ctx context.Context, id string, port int) (provider.End
 	if u.Query().Get("_token") == "" {
 		return provider.Endpoint{}, errors.New("boat: hosted endpoint is not private")
 	}
-	return provider.Endpoint{URL: u.String()}, nil
+	return c.bootstrapPrivateAccess(ctx, u)
+}
+
+// Boat's token-bearing hosted URL grants access by setting an origin-scoped
+// cookie, then redirects to a URL without _token. Bootstrap that grant once;
+// repeatedly adding _token would turn every proxied request into another 302.
+func (c *Client) bootstrapPrivateAccess(ctx context.Context, endpoint *url.URL) (provider.Endpoint, error) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return provider.Endpoint{}, errors.New("boat: cannot prepare private endpoint access")
+	}
+	client := *c.accessHTTP
+	client.Jar = jar
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	probe := endpoint.Clone()
+	probe.Path = strings.TrimRight(probe.Path, "/") + "/.well-known/t3/environment"
+	probe.RawPath = ""
+	for redirects := 0; ; redirects++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, probe.String(), nil)
+		if err != nil {
+			return provider.Endpoint{}, errors.New("boat: invalid private endpoint access request")
+		}
+		// This client never goes through request(), and receives neither the Boat
+		// account bearer token nor a T3 service bearer token.
+		res, err := client.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return provider.Endpoint{}, ctx.Err()
+			}
+			return provider.Endpoint{}, errors.New("boat: private endpoint access failed")
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
+		res.Body.Close()
+		if slices.Contains([]int{301, 302, 303, 307, 308}, res.StatusCode) {
+			if redirects >= 5 {
+				return provider.Endpoint{}, errors.New("boat: private endpoint access redirected too often")
+			}
+			next, err := probe.Parse(res.Header.Get("Location"))
+			if err != nil || res.Header.Get("Location") == "" || !sameOrigin(endpoint, next) || next.User != nil || next.Fragment != "" {
+				return provider.Endpoint{}, errors.New("boat: private endpoint access redirected outside its origin")
+			}
+			probe = next
+			continue
+		}
+		if res.StatusCode >= 300 && res.StatusCode < 400 {
+			return provider.Endpoint{}, errors.New("boat: invalid private endpoint redirect")
+		}
+		if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
+			return provider.Endpoint{}, errors.New("boat: private endpoint denied access")
+		}
+		// Readiness is checked by the manager after connection. A valid access
+		// grant may already exist while the T3 service is still booting.
+		clean := endpoint.Clone()
+		query := clean.Query()
+		query.Del("_token")
+		clean.RawQuery = query.Encode()
+		cookies := jar.Cookies(clean)
+		if len(cookies) == 0 {
+			return provider.Endpoint{}, errors.New("boat: private endpoint did not grant cookie access")
+		}
+		cookieRequest := &http.Request{Header: make(http.Header)}
+		for _, cookie := range cookies {
+			cookieRequest.AddCookie(cookie)
+		}
+		return provider.Endpoint{URL: clean.String(), Headers: http.Header{"Cookie": {cookieRequest.Header.Get("Cookie")}}}, nil
+	}
+}
+
+func sameOrigin(a, b *url.URL) bool {
+	port := func(u *url.URL) string { return cmp.Or(u.Port(), "443") }
+	return a.Scheme == "https" && b.Scheme == "https" && strings.EqualFold(a.Hostname(), b.Hostname()) && port(a) == port(b)
 }
 
 var snapshotName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
