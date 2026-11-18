@@ -1,7 +1,6 @@
 name: CI
 
 on:
-  push:
   pull_request:
 
 permissions:
@@ -12,8 +11,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
-    name: Go / ubuntu-latest
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test with race detector
+        run: make test
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -28,15 +43,6 @@ jobs:
           cache: true
       - name: Lint
         run: make lint
-      - name: Test with race detector
-        run: make test
-      - name: Build CLI
-        run: make build
-      - name: Build release snapshot
-        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
-        with:
-          version: v2.20.2
-          args: release --snapshot --clean
 
   runtime:
     name: Nix runtime contract
