@@ -5,12 +5,14 @@
     let
       systems = [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ];
       eachSystem = nixpkgs.lib.genAttrs systems;
+      version = "0.1.0-rc.4+${self.shortRev or self.dirtyShortRev or "source"}";
     in
     {
       overlays.default = final: _: {
         t3fleet = self.packages.${final.stdenv.hostPlatform.system}.t3fleet;
       };
-      homeManagerModules.default = import ./nix/home-manager.nix self;
+      homeModules.default = import ./nix/home-manager.nix self;
+      homeManagerModules = self.homeModules;
 
       devShells = eachSystem (system:
         let pkgs = import nixpkgs { inherit system; };
@@ -29,7 +31,7 @@
           };
         in
         rec {
-          t3fleet = pkgs.callPackage ./nix/t3fleet.nix { };
+          t3fleet = pkgs.callPackage ./nix/t3fleet.nix { inherit version; };
           default = t3fleet;
         } // nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux rec {
           t3-server = pkgs.callPackage ./nix/t3-server.nix { };

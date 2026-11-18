@@ -1,7 +1,7 @@
 {
   lib,
   buildGo127Module,
-  version ? "dev",
+  version,
 }:
 
 buildGo127Module {
@@ -35,6 +35,18 @@ buildGo127Module {
     "-w"
     "-X main.version=${version}"
   ];
+
+  doInstallCheck = true;
+  installCheckPhase = ''
+    runHook preInstallCheck
+    actual="$("$out/bin/t3fleet" version)"
+    expected=${lib.escapeShellArg "t3fleet ${version}"}
+    if [ "$actual" != "$expected" ]; then
+      printf 'Expected version %s, got %s\n' "$expected" "$actual" >&2
+      exit 1
+    fi
+    runHook postInstallCheck
+  '';
 
   meta = {
     description = "Manage remote T3 Code machines";

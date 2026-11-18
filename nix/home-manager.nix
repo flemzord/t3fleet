@@ -8,6 +8,10 @@ let
   settingsFormat = pkgs.formats.json { };
   configFile = settingsFormat.generate "t3fleet-config.json" cfg.settings;
   command = [ (lib.getExe cfg.package) "serve" "--config" (toString configFile) ];
+  logFile = "${home}/Library/Logs/t3fleet.log";
+  environment = cfg.environment // lib.optionalAttrs (cfg.namespaceTokenFile != null) {
+    NSC_TOKEN_FILE = cfg.namespaceTokenFile;
+  };
   # Environment= uses systemd quoting and expands % specifiers.
   systemdEnv = value: builtins.toJSON (lib.replaceStrings [ "%" ] [ "%%" ] value);
 in
@@ -32,13 +36,24 @@ in
       '';
     };
 
+    environment = lib.mkOption {
+      type = lib.types.attrsOf lib.types.str;
+      default = { };
+      example = { PATH = "/run/current-system/sw/bin:/usr/bin:/bin"; };
+      description = ''
+        Extra non-secret environment variables for the daemon. Values are
+        stored in the Nix store. Use credential files for secrets.
+      '';
+    };
+
     namespaceTokenFile = lib.mkOption {
       type = lib.types.nullOr (lib.types.strMatching "^/[^\n\r]+$");
       default = null;
       example = "/run/user/1000/secrets/namespace-token";
       description = ''
         Absolute runtime path for the Namespace SDK's NSC_TOKEN_FILE.
-        Only the path is stored in the service definition.
+        Only the path is stored in the service definition. This option
+        takes precedence over environment.NSC_TOKEN_FILE.
       '';
     };
   };
@@ -48,6 +63,10 @@ in
       assertion = (cfg.settings.providers.boat or null) != null
         || (cfg.settings.providers.namespace or null) != null;
       message = "services.t3fleet.settings.providers must configure Boat or Namespace.";
+    } {
+      assertion = lib.all (name: builtins.match "[A-Za-z_][A-Za-z0-9_]*" name != null)
+        (builtins.attrNames cfg.environment);
+      message = "services.t3fleet.environment must contain valid environment variable names.";
     } ];
     home.packages = [ cfg.package ];
     home.file."${configHome}/t3fleet/config.json".source = configFile;
@@ -62,8 +81,9 @@ in
         ExecStart = lib.concatStringsSep " " command;
         Restart = "on-failure";
         RestartSec = "5s";
-        Environment = [ (systemdEnv "XDG_CONFIG_HOME=${configHome}") ]
-          ++ lib.optional (cfg.namespaceTokenFile != null) (systemdEnv "NSC_TOKEN_FILE=${cfg.namespaceTokenFile}");
+        UMask = "0077";
+        Environment = lib.mapAttrsToList (name: value: systemdEnv "${name}=${value}")
+          ({ XDG_CONFIG_HOME = configHome; } // environment);
       };
     };
 
@@ -75,9 +95,10 @@ in
         RunAtLoad = true;
         KeepAlive = true;
         ThrottleInterval = 10;
-        StandardErrorPath = "${home}/Library/Logs/t3fleet.log";
-      } // lib.optionalAttrs (cfg.namespaceTokenFile != null) {
-        EnvironmentVariables.NSC_TOKEN_FILE = cfg.namespaceTokenFile;
+        Umask = 63; # 0077
+        StandardOutPath = logFile;
+        StandardErrorPath = logFile;
+        EnvironmentVariables = environment;
       };
     };
     home.activation.t3fleetLogDirectory = lib.mkIf host.isDarwin (
