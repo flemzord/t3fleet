@@ -92,7 +92,7 @@ func serve(ctx context.Context, cfg config.Config, diagnostics io.Writer) error 
 				Provision: func(ctx context.Context, key, remote string) (proxy.DispatchWorker, string, error) {
 					return manager.ProvisionDispatchWorker(ctx, key, remote, providerOrder)
 				},
-				Lookup: manager.LookupDispatchWorker, Release: releaseWorker,
+				Lookup: manager.LookupDispatchWorker, Release: releaseWorker, Reclaim: manager.ReclaimDispatchWorker,
 			})
 		} else {
 			var workers []proxy.DispatchWorker
@@ -118,8 +118,8 @@ func serve(ctx context.Context, cfg config.Config, diagnostics io.Writer) error 
 		cleanupDone := make(chan struct{})
 		go func() {
 			defer close(cleanupDone)
-			dispatch.RunDispatchArchiveCleanup(pocCtx, func(err error) {
-				fmt.Fprintln(diagnostics, "t3fleet archive cleanup:", err)
+			dispatch.RunDispatchCleanup(pocCtx, func(err error) {
+				fmt.Fprintln(diagnostics, "t3fleet dispatch cleanup:", err)
 			})
 		}()
 		defer func() { cancel(); _ = srv.Close(); <-cleanupDone }()

@@ -140,18 +140,21 @@ func (d *dispatchPOC) releaseArchivedWorker(ctx context.Context, id string, sequ
 	return sequence, nil
 }
 
-// RunDispatchArchiveCleanup resumes only provider deletions already authorized
-// and persisted by an explicit archive. It never discovers new work by
-// inspecting arbitrary archived threads.
-func (p *Proxy) RunDispatchArchiveCleanup(ctx context.Context, report func(error)) {
+// RunDispatchCleanup retries archived deletes and reclaims incomplete launches.
+func (p *Proxy) RunDispatchCleanup(ctx context.Context, report func(error)) {
 	d := p.dispatch
-	if d == nil || d.onDemand == nil || d.onDemand.Release == nil {
+	if d == nil || d.onDemand == nil || (d.onDemand.Release == nil && d.onDemand.Reclaim == nil) {
 		return
 	}
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for ctx.Err() == nil {
-		d.retryDispatchArchives(ctx, report)
+		if d.onDemand.Release != nil {
+			d.retryDispatchArchives(ctx, report)
+		}
+		if d.onDemand.Reclaim != nil {
+			d.reclaimDispatchLaunches(ctx, time.Now().UTC(), report)
+		}
 		select {
 		case <-ctx.Done():
 			return

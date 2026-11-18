@@ -264,3 +264,40 @@ func TestReleaseDispatchWorkerReconcilesBoatSandboxAlreadyAbsent(t *testing.T) {
 		t.Fatalf("local dispatch tombstone missing: %+v %v", batch, err)
 	}
 }
+
+func TestReclaimDispatchWorkerDistinguishesNeverAllocatedFromUnknown(t *testing.T) {
+	t.Parallel()
+	f, boat, _ := dispatchProviders(t)
+	ctx := t.Context()
+	neverPlanned := strings.Repeat("a", 32)
+	if err := f.m.ReclaimDispatchWorker(ctx, neverPlanned); err != nil {
+		t.Fatalf("a route without a fleet batch retained capacity: %v", err)
+	}
+
+	const remote = "https://github.com/octocat/Hello-World.git"
+	rejected := strings.Repeat("b", 32)
+	boat.createErrors = []error{provider.ErrCreateRejected}
+	if _, _, err := f.m.ProvisionDispatchWorker(ctx, rejected, remote, []string{"boat"}); err == nil {
+		t.Fatal("expected the provider to refuse allocation")
+	}
+	if err := f.m.ReclaimDispatchWorker(ctx, rejected); err != nil {
+		t.Fatalf("definitively rejected allocation could not be reclaimed: %v", err)
+	}
+
+	unknown := strings.Repeat("c", 32)
+	boat.createFailsOnce = true // The provider allocates but loses the reply.
+	if _, _, err := f.m.ProvisionDispatchWorker(ctx, unknown, remote, []string{"boat"}); err == nil {
+		t.Fatal("expected lost create response")
+	}
+	boat.createErrors = []error{provider.ErrCreateRejected}
+	if _, _, err := f.m.ProvisionDispatchWorker(ctx, unknown, remote, []string{"boat"}); err == nil {
+		t.Fatal("expected the provider to refuse the retry")
+	}
+	if err := f.m.ReclaimDispatchWorker(ctx, unknown); err == nil {
+		t.Fatal("a later rejection masked an earlier unknown allocation")
+	}
+	batch, err := f.m.Batch(unknown)
+	if err != nil || len(batch.Machines) != 1 || batch.Machines[0].State == "deleted" || boat.allocations != 1 || boat.attempts != 3 {
+		t.Fatalf("reclaim unexpectedly removed or retried the ambiguous allocation: %+v, %v", batch, err)
+	}
+}
