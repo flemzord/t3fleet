@@ -51,6 +51,8 @@ For a headless host, use `create --no-register`, then `pair MACHINE_ID` to get a
 
 Run `./t3fleet --help` for commands. Use `list` to find managed machine IDs and `stop`, `start`, or `delete` to manage them. Pass the same `--config` to each command when using a non-default config path.
 
+For experimental dispatch, use `pair-dispatch` for a Desktop pairing link or `pair-dispatch --peer-access LEVEL` for a Linked Environments code.
+
 ## Guides
 
 - [Configuration, templates, and troubleshooting](https://github.com/flemzord/t3fleet/blob/main/docs/getting-started.md)
