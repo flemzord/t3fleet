@@ -39,11 +39,12 @@ type DispatchPOC struct {
 }
 
 type DispatchOnDemand struct {
-	T3Binary          string   `json:"t3Binary"`
-	ProviderOrder     []string `json:"providerOrder,omitempty"`
-	NamespaceFallback bool     `json:"namespaceFallback,omitempty"` // legacy spelling for ["boat", "namespace"]
-	MaxWorkers        int      `json:"maxWorkers,omitempty"`
-	Model             string   `json:"model,omitempty"`
+	DeleteWorkerOnArchive bool     `json:"deleteWorkerOnArchive,omitempty"`
+	T3Binary              string   `json:"t3Binary"`
+	ProviderOrder         []string `json:"providerOrder,omitempty"`
+	NamespaceFallback     bool     `json:"namespaceFallback,omitempty"` // legacy spelling for ["boat", "namespace"]
+	MaxWorkers            int      `json:"maxWorkers,omitempty"`
+	Model                 string   `json:"model,omitempty"`
 }
 
 func (d DispatchOnDemand) MaxWorkerCount() int {

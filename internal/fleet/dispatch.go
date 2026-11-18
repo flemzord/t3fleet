@@ -37,6 +37,41 @@ func (m *Manager) dispatchReservation(key string) (Machine, error) {
 	return batch.Machines[0], nil
 }
 
+// ReleaseDispatchWorker deletes exactly the machine reserved for a dispatch
+// thread. The batch keeps its deleted member so cleanup can be retried after
+// a lost response or a restart without creating another machine.
+func (m *Manager) ReleaseDispatchWorker(ctx context.Context, key string) error {
+	if len(key) != 32 {
+		return ErrInvalid
+	}
+	batch, err := m.Batch(key)
+	if err != nil {
+		return err
+	}
+	if len(batch.Machines) != 1 {
+		return errors.New("the dispatch reservation must contain one worker")
+	}
+	worker := batch.Machines[0]
+	if worker.Name != managedName("thread-"+key[:12])+"-01" {
+		return errors.New("the reservation does not identify a dedicated dispatch worker")
+	}
+	if worker.State == "deleted" {
+		return nil
+	}
+	if m.opts.Providers[worker.Provider] == nil {
+		return errors.New("the reserved dispatch provider is unavailable")
+	}
+	err = m.deleteMachine(ctx, worker.ID, true)
+	if errors.Is(err, ErrNotFound) {
+		// A concurrent operator deletion may have completed first.
+		batch, lookupErr := m.Batch(key)
+		if lookupErr == nil && len(batch.Machines) == 1 && batch.Machines[0].State == "deleted" {
+			return nil
+		}
+	}
+	return err
+}
+
 // ProvisionDispatchWorker reserves a single worker per thread before talking
 // to either provider. Namespace workers install the daemon's pinned runtime
 // only if the base image doesn't already have the hook.

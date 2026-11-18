@@ -189,3 +189,78 @@ func TestDispatchUpgradesUnattemptedLegacyReservation(t *testing.T) {
 		t.Fatalf("legacy planned worker did not retain its fallback: %v, %v", current, err)
 	}
 }
+
+func TestReleaseDispatchWorkerOnBothProviders(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"boat", "namespace"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f, boat, ns := dispatchProviders(t)
+			host := boat
+			if name == "namespace" {
+				boat.createErrors = []error{provider.ErrCreateRejected}
+				host = ns
+			}
+			key := strings.Repeat("a", 32)
+			remote := "https://github.com/octocat/Hello-World.git"
+			if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, []string{"boat", "namespace"}); err != nil {
+				t.Fatal(err)
+			}
+			batch, err := f.m.Batch(key)
+			if err != nil || len(batch.Machines) != 1 || batch.Machines[0].Provider != name {
+				t.Fatalf("worker not in expected provider: %+v %v", batch, err)
+			}
+			worker := batch.Machines[0]
+			host.deleteFails = true
+			if err := f.m.ReleaseDispatchWorker(t.Context(), key); err == nil {
+				t.Fatal("unconfirmed delete was treated as success")
+			}
+			if _, err := host.Get(t.Context(), worker.RemoteID); err != nil {
+				t.Fatalf("provider lost the worker despite failing deletion: %v", err)
+			}
+			f.restart(t)
+			host.deleteFails = false
+			if err := f.m.ReleaseDispatchWorker(t.Context(), key); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := host.Get(t.Context(), worker.RemoteID); !errors.Is(err, provider.ErrNotFound) {
+				t.Fatalf("provider still has the archived worker: %v", err)
+			}
+			f.restart(t)
+			if err := f.m.ReleaseDispatchWorker(t.Context(), key); err != nil {
+				t.Fatalf("delete replay failed: %v", err)
+			}
+			if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, []string{"boat", "namespace"}); err == nil || host.allocations != 1 {
+				t.Fatal("archived worker could be resurrected")
+			}
+		})
+	}
+}
+
+func TestReleaseDispatchWorkerReconcilesBoatSandboxAlreadyAbsent(t *testing.T) {
+	t.Parallel()
+	f, boat, _ := dispatchProviders(t)
+	key := strings.Repeat("d", 32)
+	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, "https://github.com/octocat/Hello-World.git", []string{"boat"}); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := f.m.Batch(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := batch.Machines[0]
+	// Boat removed the sandbox, but its asynchronous deletion request
+	// could still fail or stall if reissued.
+	if err := boat.mockProvider.Delete(t.Context(), worker.RemoteID); err != nil {
+		t.Fatal(err)
+	}
+	boat.deleteFails = true
+	f.restart(t)
+	if err := f.m.ReleaseDispatchWorker(t.Context(), key); err != nil {
+		t.Fatalf("confirmed absent sandbox retained its reservation: %v", err)
+	}
+	batch, err = f.m.Batch(key)
+	if err != nil || len(batch.Machines) != 1 || batch.Machines[0].State != "deleted" {
+		t.Fatalf("local dispatch tombstone missing: %+v %v", batch, err)
+	}
+}

@@ -85,6 +85,7 @@ func TestLiveLinkedDispatch(t *testing.T) {
 	var mu sync.Mutex
 	routes := map[string]prepared{}
 	attempts := 0
+	var releases []string
 	opts := DispatchOnDemand{
 		Controller: controller, ProjectRoot: t.TempDir(), MaxWorkers: len(workers), Model: "multi-turn",
 		Provision: func(_ context.Context, key, _ string) (DispatchWorker, string, error) {
@@ -108,6 +109,13 @@ func TestLiveLinkedDispatch(t *testing.T) {
 				return worker.worker, nil
 			}
 			return DispatchWorker{}, fmt.Errorf("unknown fixture reservation")
+		},
+		Release: func(_ context.Context, key string) error {
+			mu.Lock()
+			defer mu.Unlock()
+			releases = append(releases, key)
+			delete(routes, key)
+			return nil
 		},
 	}
 	server := httptest.NewUnstartedServer(nil)
@@ -311,8 +319,29 @@ func TestLiveLinkedDispatch(t *testing.T) {
 	if _, err := gateway.dispatch.callWorkerPeer(ctx, public, desktop, nil, []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)); err == nil {
 		t.Fatal("gateway accepted a Desktop credential at /mcp")
 	}
+	// First archive without going through cleanup, simulating a lost result
+	// between the native archive and the dispatcher's durable acknowledgement.
+	route := gateway.dispatch.demandRoute(first)
+	worker, err := gateway.dispatch.threadWorker(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, failure := tool(worker, route.Peer.WorkerToken, "t3_thread_organize",
+		map[string]any{"threadId": first, "action": "archive"}); failure != "" || result["sequence"] == nil {
+		t.Fatalf("native archive failed: %s %#v", failure, result)
+	}
+	for range 2 {
+		result := remote("t3_thread_organize", map[string]any{"threadId": first, "action": "archive"})
+		if result["sequence"] == nil {
+			t.Fatalf("archive did not confirm release: %#v", result)
+		}
+	}
+	remote("t3_thread_read", map[string]any{"threadId": second})
 	mu.Lock()
 	defer mu.Unlock()
+	if len(releases) != 1 || releases[0] != route.Key {
+		t.Fatalf("wrong or repeated worker release: %v", releases)
+	}
 	if attempts != 2 {
 		t.Fatalf("expected exactly two provisioner calls, got %d", attempts)
 	}

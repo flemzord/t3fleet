@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
@@ -37,7 +38,7 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 		workspace string
 	}
 	var backends []prepared
-	for range 2 {
+	for range 3 {
 		origin, token, _ := startLiveT3(t, setup)
 		up := Upstream{Endpoint: provider.Endpoint{URL: origin}, Token: token}
 		workspace := t.TempDir()
@@ -49,6 +50,7 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 	var mu sync.Mutex
 	exp := map[string]prepared{}
 	var attempts []string
+	var deletions []string
 	calls := func() int { mu.Lock(); defer mu.Unlock(); return len(attempts) }
 	opts := DispatchOnDemand{Controller: controller, ProjectRoot: t.TempDir(), MaxWorkers: 2, Model: "gpt-6.1-sol", Provision: func(_ context.Context, key, remote string) (DispatchWorker, string, error) {
 		mu.Lock()
@@ -62,7 +64,7 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 		}
 		p, ok := exp[key]
 		if !ok {
-			p = backends[len(exp)]
+			p = backends[len(attempts)-2]
 			exp[key] = p
 		}
 		return p.worker, p.workspace, nil
@@ -74,6 +76,15 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 			return DispatchWorker{}, errors.New("worker absent")
 		}
 		return p.worker, nil
+	}, Release: func(_ context.Context, key string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		deletions = append(deletions, key)
+		if len(deletions) == 1 {
+			return errors.New("unconfirmed deletion")
+		}
+		delete(exp, key)
+		return nil
 	}}
 	dir := t.TempDir()
 	restart := func() (*Proxy, func()) {
@@ -183,6 +194,78 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 	client.waitReply("on-demand-b", "second fixture turn complete")
 	if calls() != 3 {
 		t.Fatal("routing an existing thread provisioned again")
+	}
+	archive := func(req int) map[string]any {
+		client.send(req, "orchestration.dispatchCommand", map[string]any{
+			"type": "thread.archive", "threadId": "on-demand-a", "commandId": "archive-a",
+		})
+		return client.next(req)["exit"].(map[string]any)
+	}
+	if exit := archive(14); exit["_tag"] != "Failure" {
+		t.Fatalf("unconfirmed deletion should not acknowledge archive: %#v", exit)
+	}
+	launch(client, 15, "on-demand-c")
+	if exit := client.next(15)["exit"].(map[string]any); exit["_tag"] != "Failure" || calls() != 3 {
+		t.Fatalf("a slot was freed before deletion was confirmed: %#v", exit)
+	}
+	_ = client.conn.CloseNow()
+	stop()
+	stop = func() {}
+	p, stop = restart()
+	server.handler.Store(p)
+	client = newDispatchTestClient(t, ctx, server.URL, token)
+	p.dispatch.retryDispatchArchives(ctx, func(err error) { t.Error(err) })
+	if route := p.dispatch.demandRoute("on-demand-a"); route.Archive == nil || !route.Archive.Released {
+		t.Fatal("daemon recovery did not finish the deletion pending at restart")
+	}
+	for _, req := range []int{16, 17} {
+		exit := archive(req)
+		value, _ := exit["value"].(map[string]any)
+		seq, ok := archiveSequence(value)
+		if exit["_tag"] != "Success" || !ok || seq == 0 {
+			t.Fatalf("archive replay did not preserve the native sequence: %#v", exit)
+		}
+	}
+	mu.Lock()
+	correct := len(deletions) == 2 && deletions[0] == attempts[0] && deletions[1] == attempts[0]
+	mu.Unlock()
+	if !correct {
+		t.Fatal("archive retry did not delete exactly the original worker")
+	}
+	launch(client, 18, "on-demand-a")
+	if exit := client.next(18)["exit"].(map[string]any); exit["_tag"] != "Failure" || calls() != 3 {
+		t.Fatalf("archived launch recreated its worker: %#v", exit)
+	}
+	launch(client, 19, "on-demand-c")
+	client.result(client.next(19))
+	if calls() != 4 {
+		t.Fatal("new thread did not get exactly one worker after capacity release")
+	}
+	client.rpc("orchestration.getThreadProjection", map[string]any{"threadId": "on-demand-b"})
+	worker, err := p.dispatch.threadWorker("on-demand-c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream, err := worker.Resolve(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := newDispatchTestClient(t, ctx, upstream.Endpoint.URL, upstream.Token)
+	defer raw.conn.CloseNow()
+	for req := 20; req <= 21; req++ {
+		raw.send(req, "orchestration.dispatchCommand", map[string]any{
+			"type": "thread.archive", "threadId": "on-demand-c", "commandId": fmt.Sprintf("native-%d", req),
+		})
+		exit := raw.next(req)["exit"].(map[string]any)
+		if req == 20 && exit["_tag"] != "Success" || req == 21 && !desktopAlreadyArchived(exit, "on-demand-c", "native-21") {
+			t.Fatalf("unexpected native archive result: %#v", exit)
+		}
+	}
+	client.rpc("orchestration.dispatchCommand", map[string]any{
+		"type": "thread.archive", "threadId": "on-demand-c", "commandId": "recover-native-archive",
+	})
+	if route := p.dispatch.demandRoute("on-demand-c"); route.Archive == nil || !route.Archive.Released {
+		t.Fatal("previously archived desktop worker was not recovered")
 	}
 }
 

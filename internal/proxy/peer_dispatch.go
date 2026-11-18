@@ -325,8 +325,10 @@ func (d *dispatchPOC) launchPeerThread(w http.ResponseWriter, r *http.Request, r
 	if id == "" {
 		id = slot
 	}
-	route := d.disk.OnDemand.Routes[id]
 	d.mu.Unlock()
+	unlock := d.lockDemandWrite(id)
+	defer unlock()
+	route := d.demandRoute(id)
 	if route.ProjectID != "" && (route.ProjectID != projectID || (route.Peer != nil && route.Peer.Grant != key)) {
 		failTool("invalid_request", "A launch retry must use the original project and link.")
 		return
@@ -400,6 +402,10 @@ func (d *dispatchPOC) publishPeerThread(slot, id, nativeID string) error {
 
 func (d *dispatchPOC) callPeerThread(w http.ResponseWriter, r *http.Request, request peerRequest, tool peerTool, key string, grant peerGrant) {
 	id, _ := tool.Arguments["threadId"].(string)
+	if tool.Name != "t3_thread_read" && tool.Name != "t3_thread_wait" {
+		unlock := d.lockDemandWrite(id)
+		defer unlock()
+	}
 	d.mu.Lock()
 	route := d.disk.OnDemand.Routes[id]
 	d.mu.Unlock()
@@ -409,6 +415,10 @@ func (d *dispatchPOC) callPeerThread(w http.ResponseWriter, r *http.Request, req
 	}
 	if grant.Access == "read-only" && tool.Name != "t3_thread_read" && tool.Name != "t3_thread_wait" {
 		peerToolError(w, request.ID, "capability_denied", "This link is read-only.")
+		return
+	}
+	if tool.Name == "t3_thread_organize" && tool.Arguments["action"] == "archive" && d.handlesDemandArchive(id) {
+		d.archiveDemandPeer(w, r, request, tool, id, route)
 		return
 	}
 	worker, err := d.threadWorker(id)

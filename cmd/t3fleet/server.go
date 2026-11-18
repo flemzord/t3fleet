@@ -82,13 +82,17 @@ func serve(ctx context.Context, cfg config.Config, diagnostics io.Writer) error 
 			}
 			defer stop()
 			providerOrder := poc.OnDemand.OrderedProviders()
+			var releaseWorker func(context.Context, string) error
+			if poc.OnDemand.DeleteWorkerOnArchive {
+				releaseWorker = manager.ReleaseDispatchWorker
+			}
 			dispatch, err = proxy.NewDispatchOnDemand(origin, store, proxy.DispatchOnDemand{
 				Controller: controller, ProjectRoot: filepath.Join(cfg.StateDir, stateName, "projects"),
 				MaxWorkers: poc.OnDemand.MaxWorkerCount(), Model: poc.OnDemand.Model,
 				Provision: func(ctx context.Context, key, remote string) (proxy.DispatchWorker, string, error) {
 					return manager.ProvisionDispatchWorker(ctx, key, remote, providerOrder)
 				},
-				Lookup: manager.LookupDispatchWorker,
+				Lookup: manager.LookupDispatchWorker, Release: releaseWorker,
 			})
 		} else {
 			var workers []proxy.DispatchWorker
@@ -111,7 +115,14 @@ func serve(ctx context.Context, cfg config.Config, diagnostics io.Writer) error 
 		pocCtx, cancel := context.WithCancel(ctx)
 		srv := &http.Server{Handler: dispatch, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second,
 			MaxHeaderBytes: 64 << 10, BaseContext: func(net.Listener) context.Context { return pocCtx }}
-		defer func() { cancel(); _ = srv.Close() }()
+		cleanupDone := make(chan struct{})
+		go func() {
+			defer close(cleanupDone)
+			dispatch.RunDispatchArchiveCleanup(pocCtx, func(err error) {
+				fmt.Fprintln(diagnostics, "t3fleet archive cleanup:", err)
+			})
+		}()
+		defer func() { cancel(); _ = srv.Close(); <-cleanupDone }()
 		go func() { _ = srv.Serve(ln) }()
 		fmt.Fprintln(diagnostics, "t3fleet dispatch POC listening on", ln.Addr().String())
 	}

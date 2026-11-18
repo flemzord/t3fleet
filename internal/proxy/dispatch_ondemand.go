@@ -28,6 +28,7 @@ type DispatchOnDemand struct {
 	Model       string
 	Provision   func(context.Context, string, string) (DispatchWorker, string, error)
 	Lookup      func(string) (DispatchWorker, error)
+	Release     func(context.Context, string) error // nil keeps archived workers
 }
 
 type demandProject struct {
@@ -40,7 +41,8 @@ type demandRoute struct {
 	Key       string
 	ProjectID string
 	Ready     bool
-	Peer      *peerRoute `json:",omitempty"`
+	Peer      *peerRoute     `json:",omitempty"`
+	Archive   *demandArchive `json:",omitempty"`
 }
 
 type onDemandDisk struct {
@@ -175,7 +177,7 @@ func (d *dispatchPOC) threadWorker(threadID string) (DispatchWorker, error) {
 	d.mu.Lock()
 	r, ok := d.disk.OnDemand.Routes[threadID]
 	d.mu.Unlock()
-	if !ok || !r.Ready {
+	if !ok || !r.Ready || r.Archive != nil {
 		return DispatchWorker{}, errors.New("thread has no ready dispatch worker")
 	}
 	return d.onDemand.Lookup(r.Key)
@@ -190,6 +192,10 @@ func (d *dispatchPOC) prepareDemandWorker(ctx context.Context, id, projectID str
 			return DispatchWorker{}, errors.New("register the GitHub project before launching a thread")
 		}
 		route, exists := d.disk.OnDemand.Routes[id]
+		if route.Archive != nil {
+			d.mu.Unlock()
+			return DispatchWorker{}, errors.New("the dispatch thread was archived")
+		}
 		if exists && route.Ready {
 			d.mu.Unlock()
 			return d.onDemand.Lookup(route.Key)
@@ -204,7 +210,13 @@ func (d *dispatchPOC) prepareDemandWorker(ctx context.Context, id, projectID str
 			}
 		}
 		if !exists {
-			if len(d.disk.OnDemand.Routes) >= d.onDemand.MaxWorkers {
+			used := 0
+			for _, reserved := range d.disk.OnDemand.Routes {
+				if reserved.Archive == nil || !reserved.Archive.Released {
+					used++
+				}
+			}
+			if used >= d.onDemand.MaxWorkers {
 				d.mu.Unlock()
 				return DispatchWorker{}, errors.New("the dispatch worker limit has been reached")
 			}
@@ -261,7 +273,7 @@ func (d *dispatchPOC) onDemandShell(ctx context.Context) (map[string]any, error)
 	routes := map[string]int{}
 	for _, id := range slices.Sorted(maps.Keys(saved)) {
 		r := saved[id]
-		if !r.Ready {
+		if !r.Ready || (r.Archive != nil && r.Archive.Released) {
 			continue
 		}
 		worker, err := d.onDemand.Lookup(r.Key)
@@ -312,6 +324,8 @@ func (d *dispatchPOC) callOnDemand(ctx context.Context, tag string, frame, paylo
 			d.mu.Unlock()
 			payload["threadId"] = threadID
 		}
+		unlock := d.lockDemandWrite(threadID)
+		defer unlock()
 		if payload["reuseExistingThread"] == true {
 			worker, err := d.threadWorker(threadID)
 			if err != nil {
@@ -336,7 +350,16 @@ func (d *dispatchPOC) callOnDemand(ctx context.Context, tag string, frame, paylo
 			"thread.model-selection.set", "thread.stop", "thread.archive", "thread.unarchive", "thread.settle", "thread.pin", "thread.unpin"}, cmd) {
 			return errors.New("this command is outside on-demand dispatch")
 		}
-		fallthrough
+		unlock := d.lockDemandWrite(threadID)
+		defer unlock()
+		if cmd == "thread.archive" && d.handlesDemandArchive(threadID) {
+			return d.archiveDemandRPC(ctx, threadID, frame, send)
+		}
+		worker, err := d.threadWorker(threadID)
+		if err != nil {
+			return err
+		}
+		return d.rpcTo(ctx, worker, frame, acks, send)
 	case "orchestration.subscribeThread", "orchestration.getThreadProjection", "orchestration.subscribePromptSuggestion",
 		"orchestration.subscribeCommandOutput", "orchestration.getTurnItem", "orchestration.getFullThreadDiff",
 		"orchestration.getNativeChildWork", "orchestration.getThreadFamily":

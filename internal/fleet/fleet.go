@@ -656,6 +656,10 @@ func (m *Manager) stopLocked(ctx context.Context, h *machineHandle, reason strin
 	})
 }
 func (m *Manager) Delete(ctx context.Context, id string) error {
+	return m.deleteMachine(ctx, id, false)
+}
+
+func (m *Manager) deleteMachine(ctx context.Context, id string, reconcileAbsence bool) error {
 	h, err := m.handle(id)
 	if err != nil {
 		return err
@@ -673,8 +677,22 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 		return errors.New("fleet: creation is unresolved; run start to reconcile before deleting")
 	}
 	if r.RemoteID != "" {
-		if err = m.opts.Providers[r.Provider].Delete(ctx, r.RemoteID); err != nil && !errors.Is(err, provider.ErrNotFound) {
-			return errors.New("fleet: provider deletion failed; local state retained")
+		host := m.opts.Providers[r.Provider]
+		var absent bool
+		if reconcileAbsence {
+			// A previous attempt may remove the machine before its
+			// operation is acknowledged. Verify absence before retrying
+			// deletion so the dispatch slot cannot get stranded.
+			_, lookupErr := host.Get(ctx, r.RemoteID)
+			absent = errors.Is(lookupErr, provider.ErrNotFound)
+			if !absent && lookupErr != nil {
+				return errors.New("fleet: provider absence could not be checked; local state retained")
+			}
+		}
+		if !absent {
+			if err = host.Delete(ctx, r.RemoteID); err != nil && !errors.Is(err, provider.ErrNotFound) {
+				return errors.New("fleet: provider deletion failed; local state retained")
+			}
 		}
 	}
 	m.mu.Lock()

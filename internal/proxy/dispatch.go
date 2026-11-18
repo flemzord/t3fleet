@@ -50,6 +50,7 @@ type dispatchPOC struct {
 	onDemand     *DispatchOnDemand
 	preparing    map[string]chan struct{}
 	peerLaunches sync.Map
+	demandWrites [32]sync.Mutex
 }
 
 const dispatchLabel = "t3fleet"

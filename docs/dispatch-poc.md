@@ -132,6 +132,32 @@ that scope. Scratch launches, attachments, fleet-wide operations, and links
 to the fixed worker pool are unsupported. Re-linking creates a new grant;
 existing threads stay in the Desktop history under their original grant.
 
+### Delete dedicated workers on archive
+
+Set `dispatchPOC.onDemand.deleteWorkerOnArchive` to `true` and restart the
+daemon to opt in. The setting is off by default. It applies to dedicated
+on-demand workers, whether they were provisioned on Boat or Namespace. It
+does not change archiving on directly paired machines or in a fixed pool.
+
+Archive from Desktop or from the linked environment that owns the thread.
+The dispatcher first confirms the archive on the worker, persists the
+pending cleanup, then deletes that exact provider machine. Deletion is
+permanent: the thread history and worktree stored only on the worker are
+lost. Push or export anything you need before archiving. The archived
+thread is no longer available to read or unarchive through the dispatcher.
+
+A worker counts toward `maxWorkers` until provider deletion is confirmed and
+the dispatcher records the release. If provider cleanup fails, the daemon
+keeps the reservation and retries the saved deletion at startup and on its
+minute sweep. For Boat, an explicit not-found response from sandbox
+inspection also confirms the machine is gone, even if the asynchronous
+deletion operation has not completed. An authorized archive retry can also
+resume cleanup. Repeating a completed archive returns success without another
+provider request. Retrying
+the original launch cannot recreate the worker. The sweep handles only
+deletions already saved by an explicit archive under this setting; it does
+not touch previously archived threads that have no saved deletion.
+
 The linked dispatch canary runs a genuine T3 source, controller and two
 workers locally using the ACP replay agent. It checks worker separation,
 follow-up, retry after proxy restart, and access isolation without Boat costs:
