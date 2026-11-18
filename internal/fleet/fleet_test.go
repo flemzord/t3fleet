@@ -30,6 +30,12 @@ type mockProvider struct {
 	requests        []provider.CreateRequest
 	allocations     int
 	starts          int
+	stops           int
+	stopFails       bool
+	shell           string
+	shellReplies    []string
+	shellReads      int
+	shellStatus     int
 	execs           int
 	createFailsOnce bool
 	execFails       bool
@@ -53,6 +59,23 @@ func newProvider(t *testing.T) *mockProvider {
 			_ = json.NewEncoder(w).Encode(map[string]any{"environmentId": "env-test", "label": "upstream", "orchestrationProtocolVersion": 2, "serverVersion": serverVersion, "directEndpoints": []string{"https://private.invalid"}})
 		case "/api/auth/session":
 			_ = json.NewEncoder(w).Encode(map[string]any{"scopes": []string{"orchestration:read", "orchestration:write"}, "permissions": map[string]any{"filesystem": "read-write"}})
+		case "/api/orchestration/shell":
+			p.mu.Lock()
+			body := p.shell
+			status := p.shellStatus
+			p.shellReads++
+			if len(p.shellReplies) > 0 {
+				body = p.shellReplies[0]
+				p.shellReplies = p.shellReplies[1:]
+			}
+			p.mu.Unlock()
+			if status != 0 {
+				w.WriteHeader(status)
+			}
+			if body == "" {
+				body = `{"threads":[],"archivedThreads":[]}`
+			}
+			fmt.Fprint(w, body)
 		case "/api/probe":
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		default:
@@ -117,6 +140,10 @@ func (p *mockProvider) Stop(ctx context.Context, id string) error {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.stops++
+	if p.stopFails {
+		return errors.New("provider stop unavailable")
+	}
 	m, ok := p.machines[id]
 	if !ok {
 		return provider.ErrNotFound

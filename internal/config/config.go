@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/flemzord/t3fleet/pkg/provider"
 	"github.com/flemzord/t3fleet/pkg/provider/boat"
@@ -21,6 +22,7 @@ import (
 const DefaultVersion = "0.1.11-nightly.20261117.4838"
 
 type Config struct {
+	IdleTimeout     string                       `json:"idleTimeout,omitempty"`
 	Listen          string                       `json:"listen"`
 	StateDir        string                       `json:"stateDir"`
 	MachineHost     string                       `json:"machineHost"`
@@ -94,7 +96,21 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+func (cfg Config) IdleDuration() (time.Duration, error) {
+	if cfg.IdleTimeout == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(cfg.IdleTimeout)
+	if err != nil || d < 0 || d > 0 && d < time.Minute {
+		return 0, errors.New("idleTimeout must be 0 or a duration of at least 1m")
+	}
+	return d, nil
+}
+
 func (cfg Config) Validate() error {
+	if _, err := cfg.IdleDuration(); err != nil {
+		return err
+	}
 	host, port, err := net.SplitHostPort(cfg.Listen)
 	portNumber, portErr := strconv.Atoi(port)
 	if err != nil || portErr != nil || portNumber < 1 || portNumber > 65535 {

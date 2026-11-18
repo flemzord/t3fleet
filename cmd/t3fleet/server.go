@@ -50,7 +50,11 @@ func serve(ctx context.Context, cfg config.Config, diagnostics io.Writer) error 
 	if err != nil {
 		return errors.New("cannot initialize private daemon token")
 	}
-	manager, err := fleet.New(fleet.Options{Providers: providers, Templates: cfg.Templates, Store: disk, ExpectedVersion: cfg.ExpectedVersion, ListenHost: cfg.MachineHost})
+	idleTimeout, err := cfg.IdleDuration()
+	if err != nil {
+		return err
+	}
+	manager, err := fleet.New(fleet.Options{IdleTimeout: idleTimeout, Providers: providers, Templates: cfg.Templates, Store: disk, ExpectedVersion: cfg.ExpectedVersion, ListenHost: cfg.MachineHost})
 	if err != nil {
 		return errors.New("cannot initialize fleet; check configuration and state")
 	}

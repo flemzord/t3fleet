@@ -36,13 +36,15 @@ type Storage interface {
 	Save(any) error
 }
 type Options struct {
-	Providers       map[string]provider.Provider
-	Templates       map[string]provider.Template
-	Store           Storage
-	ExpectedVersion string
-	ListenHost      string
-	ReadyTimeout    time.Duration
-	Now             func() time.Time
+	IdleTimeout       time.Duration
+	IdleCheckInterval time.Duration
+	Providers         map[string]provider.Provider
+	Templates         map[string]provider.Template
+	Store             Storage
+	ExpectedVersion   string
+	ListenHost        string
+	ReadyTimeout      time.Duration
+	Now               func() time.Time
 }
 type CreateRequest struct {
 	Name     string            `json:"name"`
@@ -51,12 +53,14 @@ type CreateRequest struct {
 	Template provider.Template `json:"template"`
 }
 type Machine struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Provider string `json:"provider"`
-	RemoteID string `json:"remoteId,omitempty"`
-	State    string `json:"state"`
-	URL      string `json:"url"`
+	LastStopReason string    `json:"lastStopReason,omitempty"`
+	LastStoppedAt  time.Time `json:"lastStoppedAt,omitzero"`
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	Provider       string    `json:"provider"`
+	RemoteID       string    `json:"remoteId,omitempty"`
+	State          string    `json:"state"`
+	URL            string    `json:"url"`
 }
 type clientToken struct {
 	Value     string    `json:"value"`
@@ -71,6 +75,7 @@ type record struct {
 	EnvironmentID string            `json:"environmentId,omitempty"`
 	Clients       []clientToken     `json:"clients,omitempty"`
 	Descriptor    map[string]any    `json:"descriptor,omitempty"`
+	Session       map[string]any    `json:"session,omitempty"`
 }
 type diskState struct {
 	Schema  int                    `json:"schema"`
@@ -78,6 +83,7 @@ type diskState struct {
 	Batches map[string]batchRecord `json:"batches,omitempty"`
 }
 type machineHandle struct {
+	activity    *proxy.Activity
 	operation   sync.Mutex
 	record      record // protected by Manager.mu
 	proxy       *proxy.Proxy
@@ -94,6 +100,7 @@ type Manager struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	closed   bool
+	idleWG   sync.WaitGroup
 }
 
 func New(opts Options) (*Manager, error) {
@@ -114,6 +121,15 @@ func New(opts Options) (*Manager, error) {
 	}
 	if opts.ReadyTimeout < time.Second {
 		return nil, errors.New("fleet: readiness timeout must be at least one second")
+	}
+	if opts.IdleTimeout < 0 || opts.IdleTimeout > 0 && opts.IdleTimeout < time.Minute {
+		return nil, errors.New("fleet: idle timeout must be zero or at least one minute")
+	}
+	if opts.IdleCheckInterval == 0 {
+		opts.IdleCheckInterval = 15 * time.Second
+	}
+	if opts.IdleCheckInterval < time.Millisecond {
+		return nil, errors.New("fleet: idle check interval is too short")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{opts: opts, machines: map[string]*machineHandle{}, ctx: ctx, cancel: cancel}
@@ -148,6 +164,9 @@ func New(opts Options) (*Manager, error) {
 		m.machines[r.ID] = h
 		m.mu.Unlock()
 	}
+	if opts.IdleTimeout > 0 {
+		m.idleWG.Go(m.idleLoop)
+	}
 	return m, nil
 }
 
@@ -159,8 +178,12 @@ func (m *Manager) listen(r record) (*machineHandle, error) {
 	r.Port = listener.Addr().(*net.TCPAddr).Port
 	r.URL = "http://" + net.JoinHostPort(m.opts.ListenHost, strconv.Itoa(r.Port))
 	h := &machineHandle{record: r, listener: listener}
+	if m.opts.IdleTimeout > 0 {
+		h.activity = proxy.NewActivity(m.opts.Now, r.State == "stopped")
+	}
 	p, err := proxy.New(proxy.Config{
-		Label: r.Name, Origin: r.URL,
+		Label: r.Name, Origin: r.URL, Activity: h.activity,
+		Session:        func(context.Context) (map[string]any, error) { return m.copy(h).Session, nil },
 		Descriptor:     func(ctx context.Context) (map[string]any, error) { return m.descriptor(ctx, r.ID) },
 		Resolve:        func(ctx context.Context) (proxy.Upstream, error) { return m.resolve(ctx, r.ID) },
 		Authorize:      func(token string) bool { return m.authorize(r.ID, token) },
@@ -310,6 +333,9 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (Machine, error
 		_ = m.update(h, func(r *record) { r.State = "not-ready" })
 		return m.copy(h).Machine, err
 	}
+	if h.activity != nil {
+		h.activity.Awake()
+	}
 	return m.copy(h).Machine, nil
 }
 
@@ -388,6 +414,13 @@ func (m *Manager) initialize(ctx context.Context, h *machineHandle, p provider.P
 	if authResponse.StatusCode != http.StatusOK {
 		return errors.New("fleet: T3 service authorization was rejected")
 	}
+	var session map[string]any
+	sessionBytes, readErr := io.ReadAll(io.LimitReader(authResponse.Body, (1<<20)+1))
+	if readErr != nil || len(sessionBytes) > 1<<20 || json.Unmarshal(sessionBytes, &session) != nil || session == nil {
+		return errors.New("fleet: invalid T3 service session")
+	}
+	// Only authorization metadata is cached, never a remote token or arbitrary response fields.
+	cachedSession := map[string]any{"scopes": session["scopes"], "permissions": session["permissions"]}
 	// A reused authenticated backup is not a safe golden template. Check under
 	// the persistence lock so concurrent workers cannot commit a shared identity.
 	m.mu.Lock()
@@ -400,6 +433,7 @@ func (m *Manager) initialize(ctx context.Context, h *machineHandle, p provider.P
 	h.checked = m.opts.Now()
 	h.initialized = m.opts.Now()
 	return m.updateLocked(h, func(r *record) {
+		r.Session = cachedSession
 		r.Token = info.Token
 		r.EnvironmentID = info.EnvironmentID
 		r.Descriptor = descriptor
@@ -463,6 +497,9 @@ func (m *Manager) Start(ctx context.Context, id string) error {
 			}
 		})
 	}
+	if err == nil && h.activity != nil {
+		h.activity.Awake()
+	}
 	return err
 }
 func (m *Manager) ensure(ctx context.Context, h *machineHandle, force bool) error {
@@ -517,6 +554,7 @@ func (m *Manager) resolve(ctx context.Context, id string) (proxy.Upstream, error
 	}
 	h.operation.Lock()
 	defer h.operation.Unlock()
+	wasSleeping := h.activity != nil && h.activity.Sleeping()
 	if err = m.ensure(ctx, h, false); err != nil {
 		return proxy.Upstream{}, err
 	}
@@ -524,6 +562,9 @@ func (m *Manager) resolve(ctx context.Context, id string) (proxy.Upstream, error
 	endpoint, err := m.opts.Providers[r.Provider].Connect(ctx, r.RemoteID, 3773)
 	if err != nil {
 		return proxy.Upstream{}, errors.New("fleet: private T3 connection failed")
+	}
+	if wasSleeping {
+		h.activity.Awake()
 	}
 	return proxy.Upstream{Endpoint: endpoint, Token: r.Token}, nil
 }
@@ -534,6 +575,15 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 	}
 	h.operation.Lock()
 	defer h.operation.Unlock()
+	err = m.stopLocked(ctx, h, "manual")
+	if err == nil && h.activity != nil {
+		h.activity.Suspend()
+	}
+	return err
+}
+
+func (m *Manager) stopLocked(ctx context.Context, h *machineHandle, reason string) error {
+	var err error
 	r := m.copy(h)
 	if r.RemoteID == "" {
 		return errors.New("fleet: incomplete creation has no remote machine to stop")
@@ -559,7 +609,11 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 		case <-timer.C:
 		}
 	}
-	return m.update(h, func(r *record) { r.State = "stopped" })
+	return m.update(h, func(r *record) {
+		r.State = "stopped"
+		r.LastStopReason = reason
+		r.LastStoppedAt = m.opts.Now()
+	})
 }
 func (m *Manager) Delete(ctx context.Context, id string) error {
 	h, err := m.handle(id)
@@ -684,6 +738,7 @@ func (m *Manager) Close(ctx context.Context) error {
 		servers = append(servers, h.server)
 	}
 	m.mu.Unlock()
+	m.idleWG.Wait()
 	var result error
 	for _, s := range servers {
 		if err := s.Shutdown(ctx); err != nil {

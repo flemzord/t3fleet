@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeConfig(t *testing.T, content string) string {
@@ -130,5 +131,35 @@ func TestBuildProvidersWithoutCredentialsOrSecrets(t *testing.T) {
 	_, err = c.BuildProviders()
 	if err == nil || strings.Contains(err.Error(), "test-key") {
 		t.Fatal("bad endpoint accepted or leaked")
+	}
+}
+
+func TestIdleTimeoutConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		valid bool
+		want  time.Duration
+	}{
+		{"", true, 0}, {"0", true, 0}, {"0s", true, 0}, {"30m", true, 30 * time.Minute}, {"1m", true, time.Minute},
+		{"-1m", false, 0}, {"59s", false, 0}, {"forever", false, 0}, {"999999999999999999h", false, 0},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			cfg := Default()
+			cfg.IdleTimeout = tc.value
+			d, err := cfg.IdleDuration()
+			if (err == nil) != tc.valid || err == nil && d != tc.want {
+				t.Fatal(d, err)
+			}
+			if (cfg.Validate() == nil) != tc.valid {
+				t.Fatal("validation disagrees")
+			}
+		})
+	}
+	cfg, err := Load(writeConfig(t, `{"idleTimeout":"30m"}`))
+	if err != nil || cfg.IdleTimeout != "30m" {
+		t.Fatal(cfg, err)
+	}
+	if _, err := Load(writeConfig(t, `{"idleTimeout":1800}`)); err == nil {
+		t.Fatal("accepted numeric duration")
 	}
 }
