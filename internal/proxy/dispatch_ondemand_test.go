@@ -288,3 +288,39 @@ func newDispatchRestartTestServer(t *testing.T, p *Proxy) *dispatchRestartTestSe
 	rs.URL = s.URL
 	return rs
 }
+
+func TestOnDemandDispatchHonorsConfiguredCapacity(t *testing.T) {
+	t.Parallel()
+	store, err := state.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	const limit, projectID = 100, "project"
+	reachedProvisioner := errors.New("provisioner reached")
+	p, err := NewDispatchOnDemand("http://127.0.0.1:38881", store, DispatchOnDemand{
+		Controller:  DispatchWorker{Resolve: func(context.Context) (Upstream, error) { return Upstream{}, nil }},
+		ProjectRoot: t.TempDir(),
+		MaxWorkers:  limit,
+		Provision: func(context.Context, string, string) (DispatchWorker, string, error) {
+			return DispatchWorker{}, "", reachedProvisioner
+		},
+		Lookup: func(string) (DispatchWorker, error) { t.Fatal("unexpected lookup"); return DispatchWorker{}, nil },
+	})
+	if err != nil {
+		t.Fatalf("dispatcher rejected a capacity of %d: %v", limit, err)
+	}
+	d := p.dispatch
+	d.disk.OnDemand.Project = &demandProject{ID: projectID}
+	for i := range limit - 1 {
+		id := fmt.Sprintf("reserved-%d", i)
+		d.disk.OnDemand.Routes[id] = demandRoute{Key: id, ProjectID: projectID, Ready: true}
+	}
+
+	if _, err := d.prepareDemandWorker(t.Context(), "last-slot", projectID); !errors.Is(err, reachedProvisioner) {
+		t.Fatalf("the final configured slot should admit a launch: %v", err)
+	}
+	if _, err := d.prepareDemandWorker(t.Context(), "over-capacity", projectID); err == nil || errors.Is(err, reachedProvisioner) {
+		t.Fatalf("a launch above the configured capacity should be rejected: %v", err)
+	}
+}

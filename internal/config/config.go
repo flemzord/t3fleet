@@ -195,8 +195,8 @@ func (cfg Config) Validate() error {
 			if !filepath.IsAbs(onDemand.T3Binary) || strings.ContainsAny(onDemand.T3Binary, "\x00\r\n") {
 				return errors.New("dispatchPOC.onDemand.t3Binary must be an absolute executable path")
 			}
-			if onDemand.MaxWorkerCount() < 1 || onDemand.MaxWorkerCount() > 8 {
-				return errors.New("dispatchPOC.onDemand.maxWorkers must be between 1 and 8")
+			if onDemand.MaxWorkers < 0 {
+				return errors.New("dispatchPOC.onDemand.maxWorkers must be positive or zero for the default")
 			}
 			if len(onDemand.Model) > 128 || strings.ContainsAny(onDemand.Model, " \t\r\n\x00") {
 				return errors.New("dispatchPOC.onDemand.model must be a Codex model identifier")
