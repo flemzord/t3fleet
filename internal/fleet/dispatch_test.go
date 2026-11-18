@@ -301,3 +301,47 @@ func TestReclaimDispatchWorkerDistinguishesNeverAllocatedFromUnknown(t *testing.
 		t.Fatalf("reclaim unexpectedly removed or retried the ambiguous allocation: %+v, %v", batch, err)
 	}
 }
+
+func TestDispatchWorkerLostRequiresConfirmedAbsence(t *testing.T) {
+	t.Parallel()
+	f, boat, _ := dispatchProviders(t)
+	ctx := t.Context()
+	if lost, err := f.m.DispatchWorkerLost(ctx, strings.Repeat("f", 32)); lost || err != nil {
+		t.Fatalf("an unknown reservation was reported lost: %v %v", lost, err)
+	}
+	key := strings.Repeat("e", 32)
+	if _, _, err := f.m.ProvisionDispatchWorker(ctx, key, "https://github.com/octocat/Hello-World.git", []string{"boat"}); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := f.m.Batch(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := batch.Machines[0]
+	if lost, err := f.m.DispatchWorkerLost(ctx, key); lost || err != nil {
+		t.Fatalf("a running worker was reported lost: %v %v", lost, err)
+	}
+	if err := f.m.Stop(ctx, worker.ID); err != nil {
+		t.Fatal(err)
+	}
+	if lost, err := f.m.DispatchWorkerLost(ctx, key); lost || err != nil {
+		t.Fatalf("a stopped worker was reported lost: %v %v", lost, err)
+	}
+	// Removed outside t3fleet, for example from the provider console.
+	if err := boat.mockProvider.Delete(ctx, worker.RemoteID); err != nil {
+		t.Fatal(err)
+	}
+	if lost, err := f.m.DispatchWorkerLost(ctx, key); !lost || err != nil {
+		t.Fatalf("a removed worker was not reported lost: %v %v", lost, err)
+	}
+	boat.deleteFails = true
+	if err := f.m.ReleaseDispatchWorker(ctx, key); err != nil {
+		t.Fatalf("a lost worker could not be released: %v", err)
+	}
+	if lost, err := f.m.DispatchWorkerLost(ctx, key); !lost || err != nil {
+		t.Fatalf("a released worker was not reported lost: %v %v", lost, err)
+	}
+	if allocations := boat.allocations; allocations != 1 {
+		t.Fatalf("checking a lost worker allocated a machine: %d", allocations)
+	}
+}

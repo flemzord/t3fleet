@@ -93,6 +93,7 @@ func serve(ctx context.Context, cfg config.Config, diagnostics io.Writer) error 
 					return manager.ProvisionDispatchWorker(ctx, key, remote, providerOrder)
 				},
 				Lookup: manager.LookupDispatchWorker, Release: releaseWorker, Reclaim: manager.ReclaimDispatchWorker,
+				Lost: manager.DispatchWorkerLost,
 			})
 		} else {
 			var workers []proxy.DispatchWorker

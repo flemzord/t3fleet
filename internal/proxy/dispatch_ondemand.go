@@ -30,6 +30,9 @@ type DispatchOnDemand struct {
 	Lookup      func(string) (DispatchWorker, error)
 	Release     func(context.Context, string) error // nil keeps archived workers
 	Reclaim     func(context.Context, string) error // releases an incomplete launch, including one without a fleet batch
+	// Lost reports true only when the provider confirms that a ready worker no
+	// longer exists. Errors and stopped workers keep the reservation.
+	Lost func(context.Context, string) (bool, error)
 }
 
 type demandProject struct {
@@ -46,6 +49,7 @@ type demandRoute struct {
 	Archive    *demandArchive     `json:",omitempty"`
 	RetryUntil time.Time          `json:",omitzero"`
 	Abandoned  *demandAbandonment `json:",omitempty"`
+	Lost       *demandLoss        `json:",omitempty"`
 }
 
 type onDemandDisk struct {
@@ -183,6 +187,9 @@ func (d *dispatchPOC) threadWorker(threadID string) (DispatchWorker, error) {
 	d.mu.Lock()
 	r, ok := d.disk.OnDemand.Routes[threadID]
 	d.mu.Unlock()
+	if r.Lost != nil {
+		return DispatchWorker{}, errWorkerLost
+	}
 	if !ok || !r.Ready || r.Archive != nil {
 		return DispatchWorker{}, errors.New("thread has no ready dispatch worker")
 	}
@@ -206,6 +213,10 @@ func (d *dispatchPOC) prepareDemandWorker(ctx context.Context, id, projectID str
 			d.mu.Unlock()
 			return DispatchWorker{}, errors.New("the dispatch thread was archived")
 		}
+		if route.Lost != nil {
+			d.mu.Unlock()
+			return DispatchWorker{}, errWorkerLost
+		}
 		if exists && route.Ready {
 			d.mu.Unlock()
 			return d.onDemand.Lookup(route.Key)
@@ -223,7 +234,8 @@ func (d *dispatchPOC) prepareDemandWorker(ctx context.Context, id, projectID str
 			used := 0
 			for _, reserved := range d.disk.OnDemand.Routes {
 				if (reserved.Archive == nil || !reserved.Archive.Released) &&
-					(reserved.Abandoned == nil || !reserved.Abandoned.Released) {
+					(reserved.Abandoned == nil || !reserved.Abandoned.Released) &&
+					(reserved.Lost == nil || !reserved.Lost.Released) {
 					used++
 				}
 			}
@@ -290,7 +302,7 @@ func (d *dispatchPOC) onDemandShell(ctx context.Context) (map[string]any, error)
 	routes := map[string]int{}
 	for _, id := range slices.Sorted(maps.Keys(saved)) {
 		r := saved[id]
-		if !r.Ready || (r.Archive != nil && r.Archive.Released) {
+		if !r.Ready || (r.Archive != nil && r.Archive.Released) || r.Lost != nil {
 			continue
 		}
 		worker, err := d.onDemand.Lookup(r.Key)
