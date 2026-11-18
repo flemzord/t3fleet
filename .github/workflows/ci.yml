@@ -72,10 +72,6 @@ jobs:
             system: x86_64-linux
           - runner: ubuntu-24.04-arm
             system: aarch64-linux
-          - runner: macos-15
-            system: aarch64-darwin
-          - runner: macos-15-intel
-            system: x86_64-darwin
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
@@ -89,3 +85,10 @@ jobs:
         run: nix run .#packages.${{ matrix.system }}.t3fleet -- version
       - name: Build the Home Manager service definition
         run: nix build --no-link --impure --expr '(import ./nix/tests/home-manager.nix {}).service'
+      - name: Evaluate the macOS Home Manager services
+        if: matrix.system == 'x86_64-linux'
+        run: |
+          nix eval --impure --json --expr '
+            let evaluate = system: (import ./nix/tests/home-manager.nix { inherit system; }).service.drvPath;
+            in { arm64 = evaluate "aarch64-darwin"; intel = evaluate "x86_64-darwin"; }
+          '
