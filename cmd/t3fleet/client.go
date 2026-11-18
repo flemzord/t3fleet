@@ -115,7 +115,9 @@ func runClient(ctx context.Context, cfg config.Config, command string, args []st
 	if err != nil {
 		return errors.New("daemon credentials unavailable; start t3fleet serve with the same configuration")
 	}
+	finish := startProgress(diagnostics, operationProgress(cfg, command, body), interactiveProgress(diagnostics))
 	data, err := callAdmin(ctx, cfg.Listen, token, method, path, body)
+	finish(err)
 	if err != nil {
 		return err
 	}

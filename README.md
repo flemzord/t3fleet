@@ -66,7 +66,9 @@ In a second terminal, using the same configuration:
 ./bin/t3fleet list --config "$HOME/.config/t3fleet/config.json"
 ```
 
-`create` waits for readiness, prepares the association, and opens T3 Code automatically. Confirm the backend in T3 to finish saving it. You do not need a separate `pair` command or to copy a link. T3 requires this confirmation for external pairing links; launching the app alone does not prove the connection was saved.
+`create` displays an activity spinner and elapsed time while it waits for the machine and T3 to become ready, then prepares the association and opens T3 Code automatically. Confirm the backend in T3 to finish saving it. You do not need a separate `pair` command or to copy a link. T3 requires this confirmation for external pairing links; launching the app alone does not prove the connection was saved.
+
+Progress appears on standard error, leaving standard output as machine JSON. When output is redirected or `TERM=dumb`, progress uses plain start/completion messages instead of animation.
 
 The returned JSON contains the machine `id` for subsequent commands. On a headless host or in scripts, use `create --no-register` to skip desktop association. Use `pair MACHINE_ID` later to print a short-lived, one-use `t3code://` link. Do not share that link or put it in logs.
 

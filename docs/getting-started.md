@@ -85,7 +85,11 @@ Use a completed, versioned saved-snapshot name:
 }
 ```
 
-A snapshot must be `ready`, not `saving` or `failed`.
+A snapshot must be `ready`, not `saving` or `failed`. The `create` command uses the provider template from your configuration by default. To select another prepared Boat base explicitly:
+
+```sh
+./bin/t3fleet create --name my-agent --provider boat --snapshot SAVED_SNAPSHOT_NAME --config /absolute/path/to/config.json
+```
 
 ### Namespace template
 
@@ -163,7 +167,7 @@ In another terminal:
 
 Use `--provider namespace` for a Namespace machine. The create response includes the managed machine's `id`, `remoteId`, `state`, and stable local `url`. Use the managed `id` for CLI commands.
 
-`create` prepares a one-use pairing link and opens it in T3 Code on the computer running the CLI. Confirm the backend in T3 to finish saving it. There is no separate `pair` step or manual link to copy in the normal flow. The machine JSON remains on standard output; handoff instructions go to standard error.
+`create` prepares a one-use pairing link and opens it in T3 Code on the computer running the CLI. Confirm the backend in T3 to finish saving it. There is no separate `pair` step or manual link to copy in the normal flow. The machine JSON remains on standard output; progress and handoff instructions go to standard error. An interactive terminal shows an activity spinner and elapsed time during creation and readiness checks. Redirected output uses plain messages without terminal escape sequences. The indicator reports activity, not a completion percentage.
 
 T3 deliberately [confirms an external pairing link](https://github.com/pingdotgg/t3code/blob/main/apps/web/src/components/desktop/DesktopWebLinkCoordinator.tsx) before saving the connection. t3fleet cannot currently remove this final click through a supported desktop API. A successful OS launch only means the link was handed off, not that the environment was registered.
 
