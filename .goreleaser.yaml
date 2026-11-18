@@ -1,0 +1,28 @@
+version: 2
+
+builds:
+  - main: ./cmd/t3fleet
+    binary: t3fleet
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - THIRD_PARTY_NOTICES.md
+      - examples/config.json
+      - examples/dispatch-boat.json
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  prerelease: auto

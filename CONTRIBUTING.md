@@ -16,6 +16,19 @@ Go 1.27 and a working C compiler can be used without Nix. `make test` runs the r
 
 Tests run without cloud credentials. Keep billable cloud canaries separate from the default suite, scoped to a dedicated test resource, and include cleanup and a verified final state.
 
+## Releases
+
+CI builds a GoReleaser snapshot without publishing it. To build the same archives locally, install the GoReleaser version pinned in [the release workflow](.github/workflows/release.yml), then run `goreleaser release --snapshot --clean` in the Go development environment. The archives and `checksums.txt` appear in `dist/`.
+
+To publish a release, check out the commit you want to release and confirm its CI passed. Then create and push an annotated `v`-prefixed SemVer tag. For example, for the first alpha release:
+
+```sh
+git tag -a v0.1.0-alpha.1 -m 'v0.1.0-alpha.1'
+git push origin v0.1.0-alpha.1
+```
+
+The Release workflow runs the Go checks, then publishes the archives, checksums, and changelog to GitHub Releases. Tags with a SemVer prerelease suffix produce GitHub prereleases. Check the workflow result and confirm that the release has all four archives and `checksums.txt`.
+
 ## Optional live validation
 
 A genuine local T3 compatibility test uses a disposable home and no cloud account. Set an absolute path to an installed T3 executable:

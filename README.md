@@ -29,9 +29,10 @@ You need:
 - T3 Code desktop and a matching T3 server version in a prepared Linux template.
 - A Boat account, a Namespace account, or both, with permission to create machines.
 - A credential-free template containing T3 and the [t3fleet runtime hook](docs/getting-started.md#2-prepare-a-template). Self-contained Nix inputs and a [reference image recipe](images/README.md) are included.
-- Go 1.27 with a working C compiler for race tests, or Nix.
 
-Build from source:
+Download the archive for your system from [GitHub Releases](https://github.com/flemzord/t3fleet/releases). Choose `darwin` for macOS or `linux` for Linux, and `arm64` for Apple Silicon or ARM Linux or `amd64` for Intel/AMD. Compare the archive's SHA-256 hash with `checksums.txt` from the same release. After extracting the archive, run `./t3fleet version` to confirm the version. Use `./t3fleet` in place of `./bin/t3fleet` in the commands below.
+
+To build from source, use Nix or install Go 1.27 and a working C compiler for race tests:
 
 ```sh
 git clone https://github.com/flemzord/t3fleet.git
