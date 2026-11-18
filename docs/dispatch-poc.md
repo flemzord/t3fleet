@@ -38,10 +38,10 @@ This mode supports one GitHub repository, text messages, and a single Codex
 model (set `dispatchPOC.onDemand.model`; the default is `gpt-5.4`). The worker
 still needs model access; the local catalog cannot verify it before allocation.
 A saved pairing and assignment survive daemon restarts at the same origin.
-A failed or interrupted launch retains its reservation so a retry can reconcile it
-without allocating a second VM. The limit counts reservations, including
-deleted or failed workers. The daemon never destroys or migrates workers
-automatically. Use `t3fleet list` and `t3fleet delete ID` to manage them.
+A failed or interrupted launch retains its reservation during the retry window
+so the same request can reconcile it without allocating a second VM. It still
+counts toward the limit until cleanup is confirmed. Use `t3fleet list` to inspect
+the managed machines.
 
 The cold path waits for cloud allocation and checkout. Large repositories can
 exceed Boat's private command deadline. Paste only a credential-free GitHub
@@ -132,6 +132,23 @@ the native thread fence. Other links and Desktop-created threads are outside
 that scope. Scratch launches, attachments, fleet-wide operations, and links
 to the fixed worker pool are unsupported. Re-linking creates a new grant;
 existing threads stay in the Desktop history under their original grant.
+
+### Recover abandoned launches
+
+An incomplete launch reserves a slot while its worker is being prepared.
+Retry the same launch within 30 minutes of the last attempt to reuse the
+reservation. After that grace period, a sweep runs once a minute and reclaims
+incomplete launches that are no longer being prepared. Existing incomplete
+reservations with no timestamp get 30 minutes from their first sweep.
+
+The dispatcher refuses further retries after it records a launch as abandoned.
+It frees the slot only after the provider confirms deletion or absence, or
+when the fleet never recorded an allocation intent. If a provider never
+returned a machine ID and the allocation outcome is unknown, the slot remains
+reserved. An operator can reconcile that managed machine with `t3fleet start ID`
+and then delete it; the next sweep completes the release. The sweep never
+deletes a worker whose dispatch route was already ready: a native T3 launch
+may have succeeded even if the reply was lost.
 
 ### Delete dedicated workers on archive
 

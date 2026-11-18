@@ -29,6 +29,7 @@ type DispatchOnDemand struct {
 	Provision   func(context.Context, string, string) (DispatchWorker, string, error)
 	Lookup      func(string) (DispatchWorker, error)
 	Release     func(context.Context, string) error // nil keeps archived workers
+	Reclaim     func(context.Context, string) error // releases an incomplete launch, including one without a fleet batch
 }
 
 type demandProject struct {
@@ -38,11 +39,13 @@ type demandProject struct {
 }
 
 type demandRoute struct {
-	Key       string
-	ProjectID string
-	Ready     bool
-	Peer      *peerRoute     `json:",omitempty"`
-	Archive   *demandArchive `json:",omitempty"`
+	Key        string
+	ProjectID  string
+	Ready      bool
+	Peer       *peerRoute         `json:",omitempty"`
+	Archive    *demandArchive     `json:",omitempty"`
+	RetryUntil time.Time          `json:",omitzero"`
+	Abandoned  *demandAbandonment `json:",omitempty"`
 }
 
 type onDemandDisk struct {
@@ -192,6 +195,10 @@ func (d *dispatchPOC) prepareDemandWorker(ctx context.Context, id, projectID str
 			return DispatchWorker{}, errors.New("register the GitHub project before launching a thread")
 		}
 		route, exists := d.disk.OnDemand.Routes[id]
+		if route.Abandoned != nil {
+			d.mu.Unlock()
+			return DispatchWorker{}, errors.New("the incomplete dispatch launch expired; start a new thread")
+		}
 		if route.Archive != nil {
 			d.mu.Unlock()
 			return DispatchWorker{}, errors.New("the dispatch thread was archived")
@@ -212,7 +219,8 @@ func (d *dispatchPOC) prepareDemandWorker(ctx context.Context, id, projectID str
 		if !exists {
 			used := 0
 			for _, reserved := range d.disk.OnDemand.Routes {
-				if reserved.Archive == nil || !reserved.Archive.Released {
+				if (reserved.Archive == nil || !reserved.Archive.Released) &&
+					(reserved.Abandoned == nil || !reserved.Abandoned.Released) {
 					used++
 				}
 			}
@@ -221,6 +229,11 @@ func (d *dispatchPOC) prepareDemandWorker(ctx context.Context, id, projectID str
 				return DispatchWorker{}, errors.New("the dispatch worker limit has been reached")
 			}
 			route = demandRoute{Key: demandKey(d.disk.EnvironmentID, "thread", id), ProjectID: projectID}
+		}
+		if d.onDemand.Reclaim != nil {
+			route.RetryUntil = time.Now().UTC().Add(dispatchLaunchGrace)
+		}
+		if !exists || d.onDemand.Reclaim != nil {
 			if err := d.saveDemandRouteLocked(id, route); err != nil {
 				d.mu.Unlock()
 				return DispatchWorker{}, err
@@ -244,6 +257,7 @@ func (d *dispatchPOC) prepareDemandWorker(ctx context.Context, id, projectID str
 		}
 		d.mu.Lock()
 		route.Ready = true
+		route.RetryUntil = time.Time{}
 		err = d.saveDemandRouteLocked(id, route)
 		d.mu.Unlock()
 		return worker, err

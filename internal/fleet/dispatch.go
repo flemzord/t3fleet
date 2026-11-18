@@ -37,14 +37,28 @@ func (m *Manager) dispatchReservation(key string) (Machine, error) {
 	return batch.Machines[0], nil
 }
 
+// ReclaimDispatchWorker also accepts a missing batch: the dispatcher records
+// its route before the fleet persists an intent, and the fleet never calls a
+// provider before persisting that intent.
+func (m *Manager) ReclaimDispatchWorker(ctx context.Context, key string) error {
+	return m.releaseDispatchWorker(ctx, key, true)
+}
+
 // ReleaseDispatchWorker deletes exactly the machine reserved for a dispatch
 // thread. The batch keeps its deleted member so cleanup can be retried after
 // a lost response or a restart without creating another machine.
 func (m *Manager) ReleaseDispatchWorker(ctx context.Context, key string) error {
+	return m.releaseDispatchWorker(ctx, key, false)
+}
+
+func (m *Manager) releaseDispatchWorker(ctx context.Context, key string, allowMissingBatch bool) error {
 	if len(key) != 32 {
 		return ErrInvalid
 	}
 	batch, err := m.Batch(key)
+	if allowMissingBatch && errors.Is(err, ErrNotFound) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -113,8 +127,15 @@ func (m *Manager) ProvisionDispatchWorker(ctx context.Context, key, remote strin
 		err = m.ensure(ctx, h, false)
 		// The provider must explicitly refuse its first attempt. Never switch
 		// after a lost response, an earlier attempt, or successful allocation.
-		if len(r.DispatchFallbacks) == 0 || r.State != "planned" || r.RemoteID != "" ||
-			!errors.Is(err, provider.ErrCreateRejected) || ctx.Err() != nil {
+		if r.State != "planned" || r.RemoteID != "" || !errors.Is(err, provider.ErrCreateRejected) {
+			break
+		}
+		if len(r.DispatchFallbacks) == 0 || ctx.Err() != nil {
+			// Only the first attempt can establish that there was no earlier
+			// allocation with a lost response.
+			if saveErr := m.update(h, func(current *record) { current.State = "planned" }); saveErr != nil {
+				return proxy.DispatchWorker{}, "", errors.New("could not save the dispatch provider rejection")
+			}
 			break
 		}
 		if err := m.advanceDispatchProvider(key, h); err != nil {
