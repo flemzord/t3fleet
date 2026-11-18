@@ -51,8 +51,10 @@ wait until the provider reports the requested final state. Every wait honors the
 caller's context.
 
 Delete sends `X-Ascii-Confirm-Delete` with the exact sandbox ID. It waits for the
-returned deletion operation to complete. A sandbox that is already absent counts
-as deleted. Deleting a sandbox is irreversible; saved snapshots are separate
+returned deletion operation to complete for at most 10 minutes, and fails at
+once if the operation reports `failed`, `error` or `cancelled`. A failed or
+unfinished deletion keeps the local machine record, and the caller can retry.
+A sandbox that is already absent counts as deleted. Deleting a sandbox is irreversible; saved snapshots are separate
 resources and remain available.
 
 ## Snapshots and readiness
