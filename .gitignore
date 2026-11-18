@@ -1,0 +1,5 @@
+/bin/
+/coverage.out
+/.t3fleet/
+*.test
+.env

@@ -1,0 +1,6 @@
+github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
+github.com/coder/websocket v1.8.14/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
+golang.org/x/crypto v0.44.0 h1:A97SsFvM3AIwEEmTBiaxPPTYpDC47w720rdiiUvgoAU=
+golang.org/x/crypto v0.44.0/go.mod h1:013i+Nw79BMiQiMsOPcVCB5ZIJbYkerPrGnOa00tvmc=
+namespacelabs.dev/integrations v0.0.11-0.20261112110900-3b5e484d4fbf h1:whh8zq6hMHHs4iXf/essoWWBqVzpRsmN2dIrgO0ccZw=
+namespacelabs.dev/integrations v0.0.11-0.20261112110900-3b5e484d4fbf/go.mod h1:aLNzBF7lgl10PCEKjwJRfZ81c+yqtyKYxKaKcniGpdM=
