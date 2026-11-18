@@ -25,6 +25,8 @@ import (
 
 type fleetAPI interface {
 	Create(context.Context, fleet.CreateRequest) (fleet.Machine, error)
+	PrepareBatch(context.Context, fleet.BatchRequest) (fleet.Batch, error)
+	Batch(string) (fleet.Batch, error)
 	List() []fleet.Machine
 	Get(string) (fleet.Machine, error)
 	Start(context.Context, string) error
@@ -48,7 +50,11 @@ func serve(ctx context.Context, cfg config.Config, diagnostics io.Writer) error 
 	if err != nil {
 		return errors.New("cannot initialize private daemon token")
 	}
-	manager, err := fleet.New(fleet.Options{Providers: providers, Templates: cfg.Templates, Store: disk, ExpectedVersion: cfg.ExpectedVersion, ListenHost: cfg.MachineHost})
+	idleTimeout, err := cfg.IdleDuration()
+	if err != nil {
+		return err
+	}
+	manager, err := fleet.New(fleet.Options{IdleTimeout: idleTimeout, Providers: providers, Templates: cfg.Templates, Store: disk, ExpectedVersion: cfg.ExpectedVersion, ListenHost: cfg.MachineHost})
 	if err != nil {
 		return errors.New("cannot initialize fleet; check configuration and state")
 	}
@@ -113,6 +119,30 @@ func newAdminHandler(manager fleetAPI, token string) http.Handler {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 		defer cancel()
+
+		if r.URL.Path == "/v1/batches" || strings.HasPrefix(r.URL.Path, "/v1/batches/") {
+			var batch fleet.Batch
+			var err error
+			switch {
+			case r.URL.Path == "/v1/batches" && r.Method == http.MethodPost:
+				var request fleet.BatchRequest
+				if !decodeRequest(w, r, &request) {
+					return
+				}
+				batch, err = manager.PrepareBatch(ctx, request)
+			case strings.HasPrefix(r.URL.Path, "/v1/batches/") && r.Method == http.MethodGet:
+				batch, err = manager.Batch(strings.TrimPrefix(r.URL.Path, "/v1/batches/"))
+			default:
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			if err != nil {
+				operationError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, batch)
+			return
+		}
 		if r.URL.Path == "/v1/machines" {
 			switch r.Method {
 			case http.MethodGet:

@@ -30,6 +30,24 @@ The public extension surface is `pkg/provider`. Storage records, CLI wire types,
 
 A failed initialization does not erase the remote ID. The machine remains visible for diagnosis, restart, or explicit deletion. An incomplete creation retains its operation ID so `start` can reconcile it. Deletion does not discard local recovery state until provider deletion succeeds.
 
+## Batch lifecycle
+
+`PrepareBatch` reserves deterministic names, distinct machine IDs and stable
+listeners in one durable state transaction before cloud allocation. Batch plans
+persist the resolved template and size plus member IDs. CLI workers use the
+existing authenticated `start` operation with bounded concurrency; provider
+adapters do not know about batches. Replaying an identical batch ID returns its
+original plan. Deleted members remain tombstones and cannot be recreated by
+resume. Planned members can be deleted locally before any allocation attempt;
+ambiguous allocations require provider reconciliation before cleanup.
+
+The admin API exposes authenticated `POST /v1/batches` (prepare/replay) and
+`GET /v1/batches/ID` (read current member states). Preparation does not allocate
+cloud machines. The CLI owns individual progress, concurrency and desktop
+handoffs. Multi-delete snapshots an explicit managed-ID selection, validates
+all IDs before deletion and uses the existing per-machine DELETE route.
+See [bulk lifecycle](bulk-lifecycle.md) for recovery and confirmation behavior.
+
 ## Stable T3 origin
 
 Each managed machine has a separate loopback listener. T3 Code associates with that origin, not with a provider address. A resumed Namespace instance can have a new ID or gateway route without changing T3's local URL.
@@ -61,6 +79,23 @@ One daemon owns a state directory under an exclusive process lock. State writes 
 
 The daemon restores saved listeners at startup. A saved port conflict causes startup failure rather than silently changing an address already paired with T3. State contains secrets and is not a diagnostics artifact or a reusable image input.
 
+## Idle lifecycle policy
+
+When `idleTimeout` is positive, the manager runs a cancellable sweep. Per-machine
+operation locks and a proxy activity gate serialize useful requests with the
+final T3 workload check and provider stop. Agent checks connect privately to
+already-running machines without using the wake resolver. Unknown status keeps
+them awake indefinitely. Stop reason/time are persisted with the machine state.
+
+The opt-in proxy path holds background RPC subscriptions locally while asleep,
+then opens a fresh upstream on useful work. It bounds pending requests and tracks
+finite useful RPCs through their terminal response. It never acknowledges an
+agent dispatch before the upstream does. Session authorization metadata is
+cached separately from the service credential so authenticated health checks do
+not wake stopped machines. See [idle lifecycle](idle-lifecycle.md) for the
+read-to-stop race with work started outside this proxy and the absence of offline
+chat, scheduled wakes and a remote watchdog.
+
 ## First-release operating model
 
 The control API and machine listeners bind loopback. Linux and macOS hosts are the initial daemon targets. A daemon can run on an always-on host with carefully configured SSH forwarding to the T3 desktop computer, but this release does not provide public hosting, TLS certificate management, a browser UI, or autonomous phone wake access.
@@ -69,6 +104,6 @@ Forward the control port and every paired machine port to the same local port if
 
 ## Scope deliberately deferred
 
-The proxy currently relays a live server. It does not replay cached chats while asleep, classify every T3 request for wake behavior, or decide whether agents are idle. Provider auto-stop behavior remains separate from t3fleet's explicit stop/start controls.
+The proxy does not replay cached chats while asleep. The opt-in idle policy classifies explicit background RPC shapes and checks T3 workload snapshots; unknown work or activity errors prevent sleep. Provider auto-stop behavior remains independent.
 
 Snapshot capture is optional. Boat has an explicit capture API; Namespace's inspected Devbox API supports restore and fork from existing snapshots. The common provider interface does not pretend these are identical capabilities.

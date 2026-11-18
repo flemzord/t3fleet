@@ -6,7 +6,9 @@ The T3 pairing, gateway, and lifecycle design was studied from
 [t3boat](https://github.com/paukraft/t3boat), by Pau Kraft. t3fleet is an
 independent Go implementation. The upstream MIT notice is reproduced below to
 preserve attribution for any protocol implementation material derived from that
-work.
+work. The idle workload markers and RPC background classification were studied
+from `machine/watchdog.mjs` and `proxy/classify.rs` at commit
+`bd488c87c88b1b467709afaa3080d837483aafbb`.
 
 ```text
 MIT License

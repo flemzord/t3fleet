@@ -33,6 +33,10 @@ func (f *fakeFleet) Create(_ context.Context, r fleet.CreateRequest) (fleet.Mach
 	f.created = r
 	return fleet.Machine{ID: "machine-1"}, f.err
 }
+func (f *fakeFleet) PrepareBatch(_ context.Context, r fleet.BatchRequest) (fleet.Batch, error) {
+	return fleet.Batch{ID: r.ID}, f.err
+}
+func (f *fakeFleet) Batch(id string) (fleet.Batch, error) { return fleet.Batch{ID: id}, f.err }
 func (f *fakeFleet) List() []fleet.Machine                { return []fleet.Machine{{ID: "machine-1"}} }
 func (f *fakeFleet) Get(id string) (fleet.Machine, error) { return fleet.Machine{ID: id}, f.err }
 func (f *fakeFleet) Start(_ context.Context, id string) error {
@@ -414,5 +418,37 @@ func TestClientRejectsRedirectsAndMalformedResponses(t *testing.T) {
 	defer invalid.Close()
 	if _, err := callAdmin(t.Context(), strings.TrimPrefix(invalid.URL, "http://"), "token", "GET", "/v1/machines", nil); err == nil {
 		t.Fatal("oversized response accepted")
+	}
+}
+
+// Batch preparation is an admin-only operation, just like cloud allocation.
+type fakeBatchFleet struct {
+	fakeFleet
+	preparations int
+}
+
+func (f *fakeBatchFleet) PrepareBatch(_ context.Context, r fleet.BatchRequest) (fleet.Batch, error) {
+	f.preparations++
+	return fleet.Batch{ID: r.ID}, nil
+}
+func (f *fakeBatchFleet) Batch(id string) (fleet.Batch, error) { return fleet.Batch{ID: id}, nil }
+func TestBatchAdminAuthAndStrictInput(t *testing.T) {
+	f := &fakeBatchFleet{}
+	h := newAdminHandler(f, "token")
+	for _, path := range []string{"/v1/batches", "/v1/batches/abc", "/v1/machines/one"} {
+		for _, method := range []string{"POST", "GET", "DELETE"} {
+			if w := adminRequest(h, method, path, "", `{}`); w.Code != 401 {
+				t.Fatal("missing auth accepted", path, w.Code)
+			}
+		}
+	}
+	if f.preparations != 0 || len(f.calls) != 0 {
+		t.Fatal("unauthorized mutation")
+	}
+	if w := adminRequest(h, "POST", "/v1/batches", "token", `{"id":"x","unknown":true}`); w.Code != 400 {
+		t.Fatal("unknown batch field accepted")
+	}
+	if w := adminRequest(h, "POST", "/v1/batches", "token", `{"id":"x","name":"test","provider":"mock","count":10}`); w.Code != 200 || f.preparations != 1 {
+		t.Fatal("batch route failed")
 	}
 }

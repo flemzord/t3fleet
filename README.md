@@ -4,7 +4,7 @@ Run T3 Code agents on persistent **Boat** and **Namespace** machines from one lo
 
 `t3fleet` creates machines from prepared images or snapshots, waits for their T3 server, and gives T3 Code a stable, authenticated local endpoint. Provider adapters use native APIs; the Boat and Namespace CLIs are not needed while the daemon runs.
 
-**Status: early alpha.** The CLI, lifecycle, private state, and live HTTP/WebSocket gateway are implemented. This is a loopback-only first release, with explicit stop/start controls. It does not yet reproduce t3boat's offline chat cache or agent-aware automatic sleep. Read the [current limits](docs/roadmap.md) before using it for unattended work.
+**Status: early alpha.** The CLI, lifecycle, private state, and live HTTP/WebSocket gateway are implemented. This is a loopback-only first release, with explicit stop/start controls. An optional agent-aware idle timeout is available; offline chat replay is not implemented. Read the [current limits](docs/roadmap.md) before using it for unattended work.
 
 ## How it fits together
 
@@ -42,7 +42,7 @@ make test
 make build
 ```
 
-Without Nix, run the same `make` commands with Go 1.27 installed. Nix pins Go 1.27.3; CI also checks the minimum Go version declared in `go.mod`.
+Without Nix, run the same `make` commands with Go 1.27 installed. The Nix shell selects Go 1.27.3 through Go's verified toolchain download (network access is needed on first use); CI also checks the minimum Go version declared in `go.mod`.
 
 Copy and edit the example configuration:
 
@@ -70,11 +70,46 @@ In a second terminal, using the same configuration:
 
 Progress appears on standard error, leaving standard output as machine JSON. When output is redirected or `TERM=dumb`, progress uses plain start/completion messages instead of animation.
 
+New machine names receive the `t3fleet-` prefix automatically, without doubling
+an existing prefix. `--name my-agent` creates `t3fleet-my-agent`. Existing machines
+and saved batches retain their original names. The final name must fit 32 characters.
+
 The returned JSON contains the machine `id` for subsequent commands. On a headless host or in scripts, use `create --no-register` to skip desktop association. Use `pair MACHINE_ID` later to print a short-lived, one-use `t3code://` link. Do not share that link or put it in logs.
 
 If T3 cannot be opened, the machine remains created and the CLI reports its ID. Run `pair` for that ID with the same configuration to recover; do not create another VM.
 
 For Namespace, use `--provider namespace`. [The complete setup guide](docs/getting-started.md) explains credentials, template preparation, model sign-in, and troubleshooting.
+
+## Stop idle machines automatically
+
+Add `"idleTimeout": "30m"` to your configuration and restart `serve` with the
+new binary. The daemon stops a VM only after its idle window and fresh T3 checks
+show no agent run, subagent, pending approval or background task. Failed or
+unknown activity checks keep it running. Useful authenticated requests wake the
+same VM with its existing T3 pairing.
+
+This is disabled by default (`"0"`). Known background RPC subscriptions and
+pings do not keep a VM awake or wake it again. The policy needs `serve` running;
+it does not protect detached non-T3 jobs or schedule future wakes. Read
+[idle lifecycle and safety limits](docs/idle-lifecycle.md) before enabling it.
+
+## Create and delete in bulk
+
+```sh
+./bin/t3fleet create --name workers --provider boat --count 10 --concurrency 3
+./bin/t3fleet create --resume BATCH_ID --no-register
+./bin/t3fleet delete
+# Explicit scriptable selection:
+./bin/t3fleet delete --ids MACHINE_ID_1,MACHINE_ID_2 --yes
+```
+
+Bulk create uses `t3fleet-workers-01` through `t3fleet-workers-10` with the same template and
+size. It saves the full plan before allocation, reports each outcome and retains
+failed members for safe recovery. Use `--no-register` for scripts. Interactive
+association opens each ready VM in T3 and waits before the next handoff; T3 still
+requires confirmation for every backend. `delete` lists only managed machines,
+accepts multiple row numbers and confirms the exact selection before deletion.
+Read [bulk lifecycle and recovery](docs/bulk-lifecycle.md) before running a batch.
 
 ## Everyday commands
 
@@ -89,6 +124,10 @@ All commands take `--config PATH`. The CLI sends authenticated requests to the l
 | `pair ID` | Ensure readiness and print a T3 Code pairing link. |
 | `stop ID` / `start ID` | Explicitly stop or resume a machine. Authenticated proxy traffic can also wake it. |
 | `snapshot ID --name NAME` | Create a private backup where the provider supports explicit capture. |
+| `create … --count 10` | Create an identical batch with bounded concurrency and a durable recovery ID. |
+| `create --resume BATCH_ID` | Resume incomplete batch members and reopen ready members for association. |
+| `delete` | Select managed machines interactively and confirm permanent deletion. |
+| `delete --ids ID,ID --yes` | Delete exactly the listed managed IDs in scripts. |
 | `delete ID` | Permanently delete the remote machine and then its local record. |
 
 A snapshot of a used machine can contain code, credentials, and sessions. Treat it as a private backup, not as a shared golden template. Namespace currently supports creating from existing snapshots but does not implement the explicit `snapshot` command. See the [Boat](docs/providers-boat.md) and [Namespace](docs/providers-namespace.md) adapter notes.
@@ -97,6 +136,8 @@ A snapshot of a used machine can contain code, credentials, and sessions. Treat 
 
 - [Getting started and troubleshooting](docs/getting-started.md)
 - [Validation evidence and limits](docs/validation.md)
+- [Automatic idle stop and wake](docs/idle-lifecycle.md)
+- [Bulk lifecycle and recovery](docs/bulk-lifecycle.md)
 - [Architecture and lifecycle](docs/architecture.md)
 - [T3 protocol gateway](docs/protocol.md)
 - [Adding a provider](docs/adding-a-provider.md)

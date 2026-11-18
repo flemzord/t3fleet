@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -44,6 +45,9 @@ func extractConfig(args []string) (string, []string, error) {
 }
 
 func runClient(ctx context.Context, cfg config.Config, command string, args []string, out, diagnostics io.Writer) error {
+	if command == "delete" && (len(args) == 0 || strings.HasPrefix(args[0], "-")) {
+		return runDelete(ctx, cfg, args, os.Stdin, interactiveInput(), out, diagnostics)
+	}
 	method, path := http.MethodGet, "/v1/machines"
 	var body any
 	pairing := false
@@ -57,6 +61,10 @@ func runClient(ctx context.Context, cfg config.Config, command string, args []st
 		fs := flag.NewFlagSet("create", flag.ContinueOnError)
 		fs.SetOutput(diagnostics)
 		var request fleet.CreateRequest
+		count := fs.Int("count", 1, "number of identical machines (1-100)")
+		concurrency := fs.Int("concurrency", 3, "maximum concurrent starts (1-10)")
+		batchID := fs.String("batch-id", "", "stable batch operation ID for request replay")
+		resume := fs.String("resume", "", "resume an existing batch ID")
 		noRegister := fs.Bool("no-register", false, "create without opening T3 Code")
 		fs.StringVar(&request.Name, "name", "", "machine name")
 		fs.StringVar(&request.Provider, "provider", "", "boat or namespace")
@@ -67,8 +75,20 @@ func runClient(ctx context.Context, cfg config.Config, command string, args []st
 		if err := fs.Parse(args); err != nil {
 			return err
 		}
+		if *resume != "" {
+			if fs.NArg() != 0 || request.Name != "" || request.Provider != "" || *batchID != "" || *count != 1 || request.Size != "" || request.Template != (fleet.CreateRequest{}).Template {
+				return errors.New("--resume accepts only --concurrency and --no-register")
+			}
+			return runBatch(ctx, cfg, fleet.BatchRequest{ID: *resume}, *concurrency, true, !*noRegister, out, diagnostics)
+		}
 		if fs.NArg() != 0 || request.Name == "" || request.Provider == "" {
 			return errors.New("create requires --name and --provider")
+		}
+		if *count != 1 || *batchID != "" {
+			return runBatch(ctx, cfg, fleet.BatchRequest{ID: *batchID, CreateRequest: request, Count: *count}, *concurrency, false, !*noRegister, out, diagnostics)
+		}
+		if *concurrency < 1 || *concurrency > fleet.MaxConcurrency {
+			return errors.New("--concurrency must be between 1 and 10")
 		}
 		method, body = http.MethodPost, request
 		register = !*noRegister

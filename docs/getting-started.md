@@ -11,7 +11,7 @@ make test
 make build
 ```
 
-Alternatively, install Go 1.27 and a C compiler, then run the same Make targets. The binary is `bin/t3fleet`.
+Alternatively, install Go 1.27 and a C compiler, then run the same Make targets. The binary is `bin/t3fleet`. The Nix shell selects Go 1.27.3 with `GOTOOLCHAIN`; its first use may download the verified toolchain into the normal Go cache.
 
 ## 2. Prepare a template
 
@@ -165,7 +165,7 @@ In another terminal:
 ./bin/t3fleet list --config /absolute/path/to/config.json
 ```
 
-Use `--provider namespace` for a Namespace machine. The create response includes the managed machine's `id`, `remoteId`, `state`, and stable local `url`. Use the managed `id` for CLI commands.
+Use `--provider namespace` for a Namespace machine. New names are automatically prefixed once with `t3fleet-`: `--name my-agent` creates `t3fleet-my-agent`. The full name must fit 32 characters. Existing records retain their names. The create response includes the managed machine's `id`, `remoteId`, `state`, and stable local `url`. Use the managed `id` for CLI commands.
 
 `create` prepares a one-use pairing link and opens it in T3 Code on the computer running the CLI. Confirm the backend in T3 to finish saving it. There is no separate `pair` step or manual link to copy in the normal flow. The machine JSON remains on standard output; progress and handoff instructions go to standard error. An interactive terminal shows an activity spinner and elapsed time during creation and readiness checks. Redirected output uses plain messages without terminal escape sequences. The indicator reports activity, not a completion percentage.
 
@@ -208,7 +208,7 @@ Add or clone your project using T3's supported project workflow or the remote te
 
 `delete` is an explicit permanent deletion. Saved snapshots are separate provider resources and may remain after the VM is deleted. Remove unneeded snapshots through the provider when appropriate.
 
-Authenticated requests for live T3 data can wake a stopped machine. Public discovery reads use the persisted descriptor and never wake the machine. There is no offline chat cache or agent-aware automatic sleep yet.
+Authenticated requests for live T3 data can wake a stopped machine. Public discovery reads use the persisted descriptor and never wake the machine. There is no offline chat cache. An opt-in `idleTimeout` can stop idle VMs while `serve` runs; its background traffic rules avoid waking them for known passive requests. See [idle lifecycle and safety limits](idle-lifecycle.md).
 
 ## Troubleshooting
 
@@ -244,3 +244,23 @@ After rebuilding the daemon, restart `t3fleet serve` with the same configuration
 to use updated API errors. Replacing the CLI binary alone does not update an
 already running daemon. Machine records and client authorization persist across
 a normal daemon restart; cloud VMs are not stopped by that restart.
+
+## Create or delete several machines
+
+Use `create --name workers --provider boat --count 10 --concurrency 3` to reserve
+and start an identical batch. The daemon records the plan before allocation.
+Use `create --resume BATCH_ID` after interruption, or `--no-register` for headless
+work. Each T3 backend still requires confirmation in T3.
+
+Run `delete` in a terminal to select managed machines by row number and confirm
+the exact selection. Scripts must use `delete --ids ID,ID --yes` or the existing
+`delete ID`. See [bulk lifecycle and recovery](bulk-lifecycle.md).
+
+## Enable automatic idle stop
+
+Add `"idleTimeout": "30m"` at the top level of your existing configuration,
+then restart `serve` with the new binary. Omission or `"0"` disables it.
+Fresh authenticated T3 workload checks protect active agents, subagents,
+approvals and background tasks. Unknown activity keeps the VM running.
+`inspect ID` reports the last stop reason and time. See
+[idle lifecycle](idle-lifecycle.md) for passive traffic, wake behavior and limits.

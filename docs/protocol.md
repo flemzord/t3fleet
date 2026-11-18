@@ -2,7 +2,8 @@
 
 `t3fleet` exposes one stable HTTP origin per machine. T3 Code pairs with that
 origin rather than the provider's hostname. The first implementation relays a
-live T3 server; it does not impersonate a sleeping server or replay old chats.
+live T3 server; it does not replay old chats. With idle management enabled it holds passive
+subscriptions while asleep and waits for useful work to open the upstream.
 
 The gateway follows the T3 orchestration protocol version 2 used by the pinned
 T3 server. The HTTP routes and Effect RPC frame conventions were studied in
@@ -74,13 +75,14 @@ certificates or expose an unauthenticated management interface.
 
 ## Current scope
 
-- Descriptor and authenticated API reads require a running T3 server. They can
-  wake a stopped VM; the gateway does not yet provide the offline cache used by
-  t3boat.
+- Public discovery uses the persisted descriptor. With idle management enabled,
+  session metadata can be served to authorized clients while asleep, and passive
+  shell reads return 503. Useful authenticated requests wake the VM. There is no
+  offline chat cache.
 - Pairing, bearer authentication, RPC/media tickets, live HTTP, live WebSockets,
   startup cancellation, and endpoint cleanup have focused tests.
-- Browser/device streams work while their machine is live. This first version
-  does not distinguish passive stream retries from requests that should wake it.
+- Browser/device streams work while their machine is live. With idle management enabled, passive stream retries do not wake a sleeping
+  VM; an already-open live device/preview stream conservatively prevents idle stop.
 - URL-only attachment download/upload credentials are not rewritten or cached.
   Routes requiring those flows need a T3 compatibility test before being claimed
   as supported. Normal bearer-authenticated API traffic is relayed.
@@ -89,3 +91,13 @@ certificates or expose an unauthenticated management interface.
 
 Use an image whose T3 version matches the client used in the compatibility test.
 Do not copy an authenticated T3 database or provider login into a reusable image.
+
+## Optional idle-aware RPC sessions
+
+`idleTimeout` enables a separate proxy session policy. Pings terminate locally;
+explicit background subscriptions wait while the VM sleeps. Useful RPCs wake it,
+then pending requests are forwarded in order with normal upstream responses.
+Finite useful calls hold an activity lease until `Exit` or disconnect. Stream
+`Ack` frames remain transparent and `directEndpoints` sanitization still applies.
+Queues are bounded; overflow or unknown control frames close the connection.
+No mutation receives an invented early success. See [idle lifecycle](idle-lifecycle.md).

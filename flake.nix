@@ -9,7 +9,13 @@
     {
       devShells = eachSystem (system:
         let pkgs = import nixpkgs { inherit system; };
-        in { default = pkgs.mkShell { packages = [ pkgs.go pkgs.gnumake pkgs.git ]; }; });
+        in {
+          default = pkgs.mkShell {
+            packages = [ pkgs.go pkgs.gnumake pkgs.git ];
+            # The locked nixpkgs Go bootstraps the exact supported toolchain.
+            GOTOOLCHAIN = "go1.27.3";
+          };
+        });
       packages = eachSystem (system:
         let
           pkgs = import nixpkgs {

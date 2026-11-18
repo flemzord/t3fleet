@@ -73,7 +73,7 @@ snapshot does not reinstall T3; boot services in the prepared image must start i
 
 Boat's default auto-stop policy applies because the create request does not
 override `ttlSeconds`. Keep this provider policy separate from any future
-agent-aware t3fleet idle policy.
+t3fleet's opt-in agent-aware [idle policy](idle-lifecycle.md).
 
 ## Private transport
 
