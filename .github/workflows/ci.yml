@@ -42,12 +42,32 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Go
+        id: go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: true
+      - name: Read pinned linter version
+        id: linter
+        run: echo "version=$(make -s lint-version)" >> "$GITHUB_OUTPUT"
+      - name: Cache linter binary
+        id: lint-cache
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ runner.temp }}/lint-bin/golangci-lint
+          key: golangci-lint-bin-v1-${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-${{ steps.linter.outputs.version }}
+      - name: Build pinned linter
+        if: steps.lint-cache.outputs.cache-hit != 'true'
+        # Keep the linter's build inputs out of the shared application cache.
+        env:
+          CGO_ENABLED: '0'
+          GOTOOLCHAIN: local
+          GOBIN: ${{ runner.temp }}/lint-bin
+          GOMODCACHE: ${{ runner.temp }}/lint-modules
+          GOCACHE: ${{ runner.temp }}/lint-build
+        run: make install-lint
       - name: Lint
-        run: make lint
+        run: make lint GOLANGCI_LINT="$RUNNER_TEMP/lint-bin/golangci-lint"
 
   runtime:
     name: Nix runtime contract
