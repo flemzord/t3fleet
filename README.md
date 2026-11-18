@@ -163,7 +163,7 @@ make test   # run all tests with the race detector
 make build  # write bin/t3fleet
 ```
 
-CI runs the same lint, test, and build commands on Linux and macOS, plus the Nix runtime contract on Linux. Offline tests do not need cloud credentials or create billable resources. Optional genuine-T3 and paid cloud validation commands are documented in [Contributing](CONTRIBUTING.md#optional-live-validation).
+CI runs the same lint, test, and build commands on Ubuntu, verifies the Nix runtime contract, and cross-compiles the release binaries for Linux and macOS. Offline tests do not need cloud credentials or create billable resources. Optional genuine-T3 and paid cloud validation commands are documented in [Contributing](CONTRIBUTING.md#optional-live-validation).
 
 ## License and inspiration
 

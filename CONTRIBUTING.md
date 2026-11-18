@@ -12,7 +12,7 @@ make test
 make build
 ```
 
-Go 1.27 and a working C compiler can be used without Nix. `make test` runs the race detector. `make lint` requires formatted source and runs `go vet`. CI uses the same targets on Linux and macOS.
+Go 1.27 and a working C compiler can be used without Nix. `make test` runs the race detector. `make lint` requires formatted source and runs `go vet`. CI runs these targets on Ubuntu and cross-compiles the release binaries for Linux and macOS.
 
 Tests run without cloud credentials. Keep billable cloud canaries separate from the default suite, scoped to a dedicated test resource, and include cleanup and a verified final state.
 
