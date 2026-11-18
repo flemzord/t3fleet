@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -43,9 +44,12 @@ type Upstream struct {
 // A successful SaveToken must make Authorize accept that token immediately.
 // Persisted tokens must expire one year after issuance, matching the T3 lease.
 type Config struct {
-	Label          string
-	Origin         string
-	Resolve        func(context.Context) (Upstream, error)
+	Label   string
+	Origin  string
+	Resolve func(context.Context) (Upstream, error)
+	// Descriptor returns a cached public descriptor without waking the machine.
+	// If absent, the standalone handler resolves the live upstream.
+	Descriptor     func(context.Context) (map[string]any, error)
 	Authorize      func(string) bool
 	SaveToken      func(context.Context, string) error
 	RequestTimeout time.Duration
@@ -377,11 +381,18 @@ func (p *Proxy) requestJSON(r *http.Request, path string) (map[string]any, error
 	return result, nil
 }
 func (p *Proxy) descriptor(w http.ResponseWriter, r *http.Request) {
-	descriptor, err := p.requestJSON(r, "/.well-known/t3/environment")
-	if err != nil {
+	var descriptor map[string]any
+	var err error
+	if p.cfg.Descriptor != nil {
+		descriptor, err = p.cfg.Descriptor(r.Context())
+	} else {
+		descriptor, err = p.requestJSON(r, "/.well-known/t3/environment")
+	}
+	if err != nil || descriptor == nil {
 		fail(w, http.StatusServiceUnavailable, "machine is not ready")
 		return
 	}
+	descriptor = maps.Clone(descriptor)
 	descriptor["label"] = p.cfg.Label
 	delete(descriptor, "directEndpoints")
 	writeJSON(w, descriptor)

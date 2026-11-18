@@ -487,3 +487,25 @@ func TestRedirectDoesNotExposeProviderEndpointCredential(t *testing.T) {
 		t.Fatalf("redirect leaks private endpoint: %v", res.Header)
 	}
 }
+
+func TestPublicDescriptorUsesCacheWithoutWaking(t *testing.T) {
+	var resolves atomic.Int32
+	cached := map[string]any{"environmentId": "stable-id", "label": "remote", "directEndpoints": []string{"http://private"}}
+	_, s := proxyServer(t, "http://127.0.0.1:1", func(cfg *Config) {
+		cfg.Resolve = func(context.Context) (Upstream, error) {
+			resolves.Add(1)
+			return Upstream{}, errors.New("unexpected wake")
+		}
+		cfg.Descriptor = func(context.Context) (map[string]any, error) { return cached, nil }
+	})
+	res, body := request(t, http.MethodGet, s.URL+"/.well-known/t3/environment", "")
+	if res.StatusCode != http.StatusOK || resolves.Load() != 0 {
+		t.Fatalf("public descriptor woke machine: status=%d resolves=%d", res.StatusCode, resolves.Load())
+	}
+	if strings.Contains(string(body), "directEndpoints") || !strings.Contains(string(body), "workbench") {
+		t.Fatalf("cache was not sanitized: %s", body)
+	}
+	if cached["label"] != "remote" || cached["directEndpoints"] == nil {
+		t.Fatal("shared cached descriptor was modified")
+	}
+}
