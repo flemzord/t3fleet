@@ -32,11 +32,14 @@ Commands:
   inspect ID                  Inspect one managed machine
   start ID                    Start and wait for T3 readiness
   stop ID                     Stop one machine
-  delete ID                   Delete one remote machine and its local record
+  delete [ID]                 Delete one machine, or interactively select several
   snapshot ID --name NAME     Capture a provider-supported snapshot
   pair ID                     Print the T3 Code pairing deep link
   version                     Print the CLI version
 
+Bulk create: --count 10 --concurrency 3; names become NAME-01 through NAME-10.
+Resume a batch: create --resume BATCH_ID [--no-register].
+Scripted multi-delete: delete --ids ID,ID --yes (managed IDs only).
 Create overrides: --image REF, --snapshot REF, --source GOLDEN_DEVBOX, --size SIZE.
 Use create --no-register for headless scripts or to pair manually later.
 T3 Code requires confirmation before saving an association.
