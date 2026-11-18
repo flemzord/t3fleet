@@ -82,3 +82,33 @@ jobs:
         uses: cachix/install-nix-action@08dcb3a5e62fa31e2da3d490afc4176ef55ecd72 # v30
       - name: Verify runtime initialization and credential isolation
         run: nix build .#checks.x86_64-linux.runtime --no-link
+
+  nix-cli:
+    name: Nix CLI and service / ${{ matrix.system }}
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            system: x86_64-linux
+          - runner: ubuntu-24.04-arm
+            system: aarch64-linux
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install Nix
+        uses: cachix/install-nix-action@08dcb3a5e62fa31e2da3d490afc4176ef55ecd72 # v30
+      - name: Build and run the packaged CLI
+        run: nix run .#packages.${{ matrix.system }}.t3fleet -- version
+      - name: Build the Home Manager service definition
+        run: nix build --no-link --impure --expr '(import ./nix/tests/home-manager.nix {}).service'
+      - name: Evaluate the macOS Home Manager services
+        if: matrix.system == 'x86_64-linux'
+        run: |
+          nix eval --impure --json --expr '
+            let evaluate = system: (import ./nix/tests/home-manager.nix { inherit system; }).service.drvPath;
+            in { arm64 = evaluate "aarch64-darwin"; intel = evaluate "x86_64-darwin"; }
+          '
