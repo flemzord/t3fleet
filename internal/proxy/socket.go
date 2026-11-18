@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -13,6 +15,14 @@ import (
 )
 
 func (p *Proxy) socket(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Activity != nil {
+		p.idleSocket(w, r)
+		return
+	}
+	p.liveSocket(w, r)
+}
+
+func (p *Proxy) liveSocket(w http.ResponseWriter, r *http.Request) {
 	up, ctx, cancel, err := p.resolve(r)
 	if err != nil {
 		fail(w, http.StatusServiceUnavailable, "machine is not ready")
@@ -122,7 +132,13 @@ type rpcRequests struct {
 
 func messages(data []byte) ([]map[string]any, bool, bool) {
 	var value any
-	if json.Unmarshal(data, &value) != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if decoder.Decode(&value) != nil {
+		return nil, false, false
+	}
+	var trailing any
+	if decoder.Decode(&trailing) != io.EOF {
 		return nil, false, false
 	}
 	if values, ok := value.([]any); ok {

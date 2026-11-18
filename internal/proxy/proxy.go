@@ -44,9 +44,11 @@ type Upstream struct {
 // A successful SaveToken must make Authorize accept that token immediately.
 // Persisted tokens must expire one year after issuance, matching the T3 lease.
 type Config struct {
-	Label   string
-	Origin  string
-	Resolve func(context.Context) (Upstream, error)
+	Activity *Activity
+	Session  func(context.Context) (map[string]any, error)
+	Label    string
+	Origin   string
+	Resolve  func(context.Context) (Upstream, error)
 	// Descriptor returns a cached public descriptor without waking the machine.
 	// If absent, the standalone handler resolves the live upstream.
 	Descriptor     func(context.Context) (map[string]any, error)
@@ -174,6 +176,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 			p.socket(w, r)
 			return
+		}
+		if p.cfg.Activity != nil {
+			if passiveHTTP(r.URL.Path) {
+				done, ok := p.cfg.Activity.BeginPassive()
+				if !ok {
+					fail(w, http.StatusServiceUnavailable, "machine is asleep")
+					return
+				}
+				defer done()
+			} else {
+				done := p.cfg.Activity.Begin()
+				defer done()
+			}
 		}
 		p.relay(w, r)
 	}
@@ -400,7 +415,28 @@ func (p *Proxy) descriptor(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, descriptor)
 }
 func (p *Proxy) session(w http.ResponseWriter, r *http.Request) {
-	session, err := p.requestJSON(r, "/api/auth/session")
+	var session map[string]any
+	var err error
+	running := true
+	if p.cfg.Activity != nil {
+		var done func()
+		done, running = p.cfg.Activity.BeginPassive()
+		if running {
+			defer done()
+		}
+	}
+	if !running {
+		if p.cfg.Session != nil {
+			session, err = p.cfg.Session(r.Context())
+		}
+		session = maps.Clone(session)
+		if session == nil {
+			err = errors.New("session unavailable")
+		}
+	} else {
+		session, err = p.requestJSON(r, "/api/auth/session")
+	}
+
 	if err != nil {
 		fail(w, http.StatusServiceUnavailable, "machine is not ready")
 		return
@@ -417,6 +453,10 @@ func (p *Proxy) exchange(w http.ResponseWriter, r *http.Request) {
 	if !p.consumeCode(r.PostForm.Get("subject_token")) {
 		fail(w, http.StatusBadRequest, "invalid_grant")
 		return
+	}
+	if p.cfg.Activity != nil {
+		done := p.cfg.Activity.Begin()
+		defer done()
 	}
 	session, err := p.requestJSON(r, "/api/auth/session")
 	if err != nil {
