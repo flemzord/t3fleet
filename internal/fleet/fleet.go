@@ -73,8 +73,9 @@ type record struct {
 	Descriptor    map[string]any    `json:"descriptor,omitempty"`
 }
 type diskState struct {
-	Schema  int      `json:"schema"`
-	Records []record `json:"machines"`
+	Schema  int                    `json:"schema"`
+	Records []record               `json:"machines"`
+	Batches map[string]batchRecord `json:"batches,omitempty"`
 }
 type machineHandle struct {
 	operation   sync.Mutex
@@ -89,6 +90,7 @@ type Manager struct {
 	mu       sync.RWMutex
 	opts     Options
 	machines map[string]*machineHandle
+	batches  map[string]batchRecord
 	ctx      context.Context
 	cancel   context.CancelFunc
 	closed   bool
@@ -123,6 +125,10 @@ func New(opts Options) (*Manager, error) {
 	if disk.Schema != 0 && disk.Schema != 1 {
 		cancel()
 		return nil, errors.New("fleet: unsupported state schema")
+	}
+	m.batches = disk.Batches
+	if m.batches == nil {
+		m.batches = make(map[string]batchRecord)
 	}
 	for _, r := range disk.Records {
 		if !validName.MatchString(r.Name) || len(r.ID) != 32 || opts.Providers[r.Provider] == nil || r.Port < 1 || r.Port > 65535 {
@@ -174,7 +180,7 @@ func (m *Manager) listen(r record) (*machineHandle, error) {
 // persistLocked serializes a complete snapshot while holding mu. No caller can
 // observe a half-applied state mutation or interleave durable writes.
 func (m *Manager) persistLocked() error {
-	disk := diskState{Schema: 1, Records: make([]record, 0, len(m.machines))}
+	disk := diskState{Schema: 1, Batches: m.batches, Records: make([]record, 0, len(m.machines))}
 	for _, h := range m.machines {
 		disk.Records = append(disk.Records, h.record)
 	}
@@ -206,6 +212,10 @@ func (m *Manager) copy(h *machineHandle) record {
 func (m *Manager) update(h *machineHandle, fn func(*record)) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.updateLocked(h, fn)
+}
+
+func (m *Manager) updateLocked(h *machineHandle, fn func(*record)) error {
 	old := h.record
 	fn(&h.record)
 	if err := m.persistLocked(); err != nil {
@@ -374,9 +384,18 @@ func (m *Manager) initialize(ctx context.Context, h *machineHandle, p provider.P
 	if authResponse.StatusCode != http.StatusOK {
 		return errors.New("fleet: T3 service authorization was rejected")
 	}
+	// A reused authenticated backup is not a safe golden template. Check under
+	// the persistence lock so concurrent workers cannot commit a shared identity.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, other := range m.machines {
+		if other != h && (other.record.Token == info.Token || other.record.EnvironmentID == info.EnvironmentID) {
+			return errors.New("fleet: runtime identity or service credential is shared with another managed machine; use a credential-free golden template")
+		}
+	}
 	h.checked = m.opts.Now()
 	h.initialized = m.opts.Now()
-	return m.update(h, func(r *record) {
+	return m.updateLocked(h, func(r *record) {
 		r.Token = info.Token
 		r.EnvironmentID = info.EnvironmentID
 		r.Descriptor = descriptor
@@ -422,12 +441,38 @@ func (m *Manager) Start(ctx context.Context, id string) error {
 	}
 	h.operation.Lock()
 	defer h.operation.Unlock()
-	return m.ensure(ctx, h, true)
+	// A planned intent can be deleted while this caller waits for its lock.
+	// Never allocate through a stale handle after its durable record was removed.
+	if current, err := m.handle(id); err != nil || current != h {
+		return ErrNotFound
+	}
+	err = m.ensure(ctx, h, true)
+	if err != nil {
+		_ = m.update(h, func(r *record) {
+			if r.State == "planned" {
+				return
+			}
+			if r.RemoteID == "" {
+				r.State = "create-failed"
+			} else {
+				r.State = "not-ready"
+			}
+		})
+	}
+	return err
 }
 func (m *Manager) ensure(ctx context.Context, h *machineHandle, force bool) error {
 	r := m.copy(h)
 	p := m.opts.Providers[r.Provider]
 	if r.RemoteID == "" {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if r.State == "planned" {
+			if err := m.update(h, func(r *record) { r.State = "creating" }); err != nil {
+				return err
+			}
+		}
 		remote, createErr := p.Create(ctx, provider.CreateRequest{Name: r.Name, Template: r.Template, Size: r.Size, OperationID: r.ID, Labels: map[string]string{"t3fleet-id": r.ID}})
 		if remote.ID != "" {
 			if err := m.update(h, func(r *record) { r.RemoteID = remote.ID; r.State = "starting" }); err != nil {
@@ -519,8 +564,14 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 	}
 	h.operation.Lock()
 	defer h.operation.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if current, err := m.handle(id); err != nil || current != h {
+		return ErrNotFound
+	}
 	r := m.copy(h)
-	if r.RemoteID == "" {
+	if r.RemoteID == "" && r.State != "planned" {
 		return errors.New("fleet: creation is unresolved; run start to reconcile before deleting")
 	}
 	if r.RemoteID != "" {
