@@ -6,13 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"os"
-	"strings"
 	"time"
 
 	"github.com/flemzord/t3fleet/internal/config"
@@ -21,169 +17,51 @@ import (
 
 var loadConfig = config.Load
 
-func extractConfig(args []string) (string, []string, error) {
-	path := config.DefaultPath()
-	var out []string
-	for i := 0; i < len(args); i++ {
-		switch {
-		case args[i] == "--config":
-			if i+1 == len(args) || strings.HasPrefix(args[i+1], "--") {
-				return "", nil, errors.New("--config requires a path")
-			}
-			i++
-			path = args[i]
-		case strings.HasPrefix(args[i], "--config="):
-			path = strings.TrimPrefix(args[i], "--config=")
-			if path == "" {
-				return "", nil, errors.New("--config requires a path")
-			}
-		default:
-			out = append(out, args[i])
-		}
-	}
-	return path, out, nil
+// daemonClient is an authenticated handle on the local control API.
+type daemonClient struct {
+	cfg   config.Config
+	token string
 }
 
-func runClient(ctx context.Context, cfg config.Config, command string, args []string, out, diagnostics io.Writer) error {
-	if command == "delete" && (len(args) == 0 || strings.HasPrefix(args[0], "-")) {
-		return runDelete(ctx, cfg, args, os.Stdin, interactiveInput(), out, diagnostics)
-	}
-	method, path := http.MethodGet, "/v1/machines"
-	var body any
-	pairing := false
-	peerPairing := false
-	register := false
-	switch command {
-	case "pair-dispatch":
-		fs := flag.NewFlagSet("pair-dispatch", flag.ContinueOnError)
-		fs.SetOutput(diagnostics)
-		peerAccess := fs.String("peer-access", "", "issue a Linked Environments code at this access level")
-		if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
-			return errors.New("usage: pair-dispatch [--peer-access LEVEL]")
-		}
-		if *peerAccess == "" {
-			method, path, pairing = http.MethodPost, "/v1/dispatch-poc/pair", true
-		} else {
-			method, path, peerPairing = http.MethodPost, "/v1/dispatch-poc/pair-peer", true
-			body = map[string]string{"access": *peerAccess}
-		}
-	case "list":
-		if len(args) != 0 {
-			return errors.New("list takes no arguments")
-		}
-	case "create":
-		fs := flag.NewFlagSet("create", flag.ContinueOnError)
-		fs.SetOutput(diagnostics)
-		var request fleet.CreateRequest
-		count := fs.Int("count", 1, "number of identical machines (1-100)")
-		concurrency := fs.Int("concurrency", 3, "maximum concurrent starts (1-10)")
-		batchID := fs.String("batch-id", "", "stable batch operation ID for request replay")
-		resume := fs.String("resume", "", "resume an existing batch ID")
-		noRegister := fs.Bool("no-register", false, "create without opening T3 Code")
-		fs.StringVar(&request.Name, "name", "", "machine name")
-		fs.StringVar(&request.Provider, "provider", "", "boat or namespace")
-		fs.StringVar(&request.Size, "size", "", "provider machine size")
-		fs.StringVar(&request.Template.Image, "image", "", "prepared image reference")
-		fs.StringVar(&request.Template.Snapshot, "snapshot", "", "prepared snapshot reference")
-		fs.StringVar(&request.Template.Source, "source", "", "golden Namespace Devbox")
-		if err := fs.Parse(args); err != nil {
-			return err
-		}
-		if *resume != "" {
-			if fs.NArg() != 0 || request.Name != "" || request.Provider != "" || *batchID != "" || *count != 1 || request.Size != "" || request.Template != (fleet.CreateRequest{}).Template {
-				return errors.New("--resume accepts only --concurrency and --no-register")
-			}
-			return runBatch(ctx, cfg, fleet.BatchRequest{ID: *resume}, *concurrency, true, !*noRegister, out, diagnostics)
-		}
-		if fs.NArg() != 0 || request.Name == "" || request.Provider == "" {
-			return errors.New("create requires --name and --provider")
-		}
-		if *count != 1 || *batchID != "" {
-			return runBatch(ctx, cfg, fleet.BatchRequest{ID: *batchID, CreateRequest: request, Count: *count}, *concurrency, false, !*noRegister, out, diagnostics)
-		}
-		if *concurrency < 1 || *concurrency > fleet.MaxConcurrency {
-			return errors.New("--concurrency must be between 1 and 10")
-		}
-		method, body = http.MethodPost, request
-		register = !*noRegister
-	case "inspect", "start", "stop", "delete", "snapshot", "pair":
-		if len(args) == 0 || args[0] == "" || strings.HasPrefix(args[0], "-") {
-			return errors.New("command requires a machine ID")
-		}
-		id := args[0]
-		args = args[1:]
-		if strings.ContainsAny(id, "/\\?#\x00\r\n") {
-			return errors.New("invalid machine ID")
-		}
-		path += "/" + url.PathEscape(id)
-		switch command {
-		case "inspect":
-		case "delete":
-			method = http.MethodDelete
-		case "snapshot":
-			fs := flag.NewFlagSet("snapshot", flag.ContinueOnError)
-			fs.SetOutput(diagnostics)
-			name := fs.String("name", "", "snapshot name")
-			if err := fs.Parse(args); err != nil {
-				return err
-			}
-			if fs.NArg() != 0 || *name == "" {
-				return errors.New("snapshot requires --name")
-			}
-			args = nil
-			method = http.MethodPost
-			path += "/snapshot"
-			body = map[string]string{"name": *name}
-		default:
-			method = http.MethodPost
-			path += "/" + command
-			pairing = command == "pair"
-		}
-		if len(args) != 0 {
-			return errors.New("unexpected arguments")
-		}
-	default:
-		return errors.New("unknown command; run t3fleet help")
-	}
-	token, err := readAdminToken(cfg.StateDir)
+func (d daemonClient) call(ctx context.Context, method, path string, body any) ([]byte, error) {
+	return callAdmin(ctx, d.cfg.Listen, d.token, method, path, body)
+}
+
+func (d daemonClient) machines(ctx context.Context) ([]fleet.Machine, error) {
+	data, err := d.call(ctx, http.MethodGet, "/v1/machines", nil)
 	if err != nil {
-		return errors.New("daemon credentials unavailable; start t3fleet serve with the same configuration")
+		return nil, err
 	}
-	finish := startProgress(diagnostics, operationProgress(cfg, command, body), interactiveProgress(diagnostics))
-	data, err := callAdmin(ctx, cfg.Listen, token, method, path, body)
-	finish(err)
+	var machines []fleet.Machine
+	if json.Unmarshal(data, &machines) != nil {
+		return nil, errors.New("invalid daemon response")
+	}
+	return machines, nil
+}
+
+func (d daemonClient) resolve(ctx context.Context, ref string, allowPrefix bool) (fleet.Machine, error) {
+	if err := validateMachineRef(ref); err != nil {
+		return fleet.Machine{}, err
+	}
+	machines, err := d.machines(ctx)
 	if err != nil {
-		return err
+		return fleet.Machine{}, err
 	}
-	if pairing {
-		link, err := pairingAppLink(data)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintln(out, link)
-		return nil
-	}
-	if peerPairing {
-		var reply struct{ Credential string }
-		if json.Unmarshal(data, &reply) != nil || reply.Credential == "" {
-			return errors.New("invalid peer pairing response")
-		}
-		_, err := fmt.Fprintln(out, reply.Credential)
-		return err
-	}
-	if len(data) == 0 {
-		fmt.Fprintln(out, "ok")
-		return nil
-	}
-	var pretty bytes.Buffer
-	if json.Indent(&pretty, data, "", "  ") != nil {
-		return errors.New("invalid daemon response")
-	}
-	_, err = fmt.Fprintln(out, pretty.String())
-	if err != nil || !register {
-		return err
-	}
-	return registerCreatedMachine(ctx, cfg, token, data, diagnostics)
+	return resolveMachine(machines, ref, allowPrefix)
+}
+
+func validMachineID(id string) bool {
+	raw, err := hex.DecodeString(id)
+	return err == nil && len(raw) == 16
+}
+
+var errorDescriptions = map[string]string{
+	"not_found":        "the machine or operation was not found",
+	"unsupported":      "the provider does not support this operation",
+	"invalid_request":  "the daemon rejected the request",
+	"conflict":         "the machine is busy or in a conflicting state",
+	"operation_failed": "the provider operation failed",
+	"unauthorized":     "the daemon rejected the CLI credentials",
 }
 
 func callAdmin(ctx context.Context, address, token, method, path string, body any) ([]byte, error) {
@@ -209,42 +87,60 @@ func callAdmin(ctx context.Context, address, token, method, path string, body an
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, errors.New("cannot reach the fleet daemon; check t3fleet serve")
+		return nil, hinted("start it with 't3fleet serve' using the same --config", "cannot reach the fleet daemon on %s", address)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	data, err = io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
 	if err != nil || len(data) > 1<<20 {
 		return nil, errors.New("invalid daemon response")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		// The daemon emits a closed set of safe error codes, never vendor bodies.
-		var failure struct {
-			Error   string `json:"error"`
-			Machine struct {
-				ID string `json:"id"`
-			} `json:"machine"`
-		}
-		_ = json.Unmarshal(data, &failure)
-		switch failure.Error {
-		case "runtime_unavailable":
-			if raw, err := hex.DecodeString(failure.Machine.ID); err == nil && len(raw) == 16 {
-				return nil, fmt.Errorf("daemon: image is missing t3fleet-runtime-info or its required executables (HTTP %d); machine %s remains allocated; prepare its T3 runtime before running start, or delete it and use a prepared t3fleet snapshot", response.StatusCode, failure.Machine.ID)
-			}
-			return nil, fmt.Errorf("daemon: image is missing t3fleet-runtime-info or its required executables (HTTP %d); use a prepared t3fleet snapshot or prepare the existing machine's T3 runtime before retrying start", response.StatusCode)
-		case "not_found", "unsupported", "invalid_request", "conflict", "operation_failed", "unauthorized":
-			if failure.Error == "conflict" && method == http.MethodPost && path == "/v1/machines" {
-				if raw, err := hex.DecodeString(failure.Machine.ID); err == nil && len(raw) == 16 {
-					return nil, fmt.Errorf("daemon: machine name already exists (HTTP %d); existing machine %s; use another --name to create a new VM, or inspect %s", response.StatusCode, failure.Machine.ID, failure.Machine.ID)
-				}
-				return nil, fmt.Errorf("daemon: machine name already exists (HTTP %d); use another --name to create a new VM, or run list to inspect the existing record", response.StatusCode)
-			}
-			if raw, err := hex.DecodeString(failure.Machine.ID); err == nil && len(raw) == 16 {
-				return nil, fmt.Errorf("daemon: %s (HTTP %d); machine %s remains managed; inspect it or run start to recover", failure.Error, response.StatusCode, failure.Machine.ID)
-			}
-			return nil, fmt.Errorf("daemon: %s (HTTP %d)", failure.Error, response.StatusCode)
-		default:
-			return nil, fmt.Errorf("daemon request failed (HTTP %d)", response.StatusCode)
-		}
+		return nil, daemonError(response.StatusCode, method, path, data)
 	}
 	return data, nil
+}
+
+// daemonError maps the daemon's closed set of safe error codes to guidance.
+// It never renders vendor bodies or unknown codes.
+func daemonError(status int, method, path string, data []byte) error {
+	var failure struct {
+		Error   string `json:"error"`
+		Machine struct {
+			ID string `json:"id"`
+		} `json:"machine"`
+	}
+	_ = json.Unmarshal(data, &failure)
+	id := failure.Machine.ID
+	if !validMachineID(id) {
+		id = ""
+	}
+	switch failure.Error {
+	case "runtime_unavailable":
+		if id != "" {
+			return hinted(fmt.Sprintf("prepare its T3 runtime, then run 't3fleet start %s'; or delete it and use a prepared t3fleet snapshot", id),
+				"the image is missing t3fleet-runtime-info or its required executables; machine %s remains allocated", id)
+		}
+		return hinted("use a prepared t3fleet snapshot, or prepare the machine's T3 runtime before retrying start",
+			"the image is missing t3fleet-runtime-info or its required executables")
+	case "not_found", "unsupported", "invalid_request", "conflict", "operation_failed", "unauthorized":
+		if failure.Error == "conflict" && method == http.MethodPost && path == "/v1/machines" {
+			if id != "" {
+				return hinted(fmt.Sprintf("use another --name to create a new machine, or run 't3fleet inspect %s'", id),
+					"machine name already exists (existing machine %s)", id)
+			}
+			return hinted("use another --name to create a new machine, or run 't3fleet list' to find the existing one",
+				"machine name already exists")
+		}
+		description := errorDescriptions[failure.Error] + " (" + failure.Error + ")"
+		if id != "" {
+			return hinted(fmt.Sprintf("run 't3fleet inspect %s', or 't3fleet start %s' to recover", id, id),
+				"%s; machine %s remains managed", description, id)
+		}
+		if failure.Error == "unauthorized" {
+			return &hintError{msg: description, hint: "restart 't3fleet serve' with the same configuration", code: failure.Error}
+		}
+		return &hintError{msg: description, code: failure.Error}
+	default:
+		return fmt.Errorf("daemon request failed (HTTP %d)", status)
+	}
 }

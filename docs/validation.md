@@ -6,7 +6,7 @@ for another desktop version, image, account, or region.
 
 ## Local checks
 
-- `make lint`: formatted Go source and `go vet`.
+- `make lint`: golangci-lint with the repository configuration, including formatting and `go vet`.
 - `make test`: all packages with the race detector; no cloud credentials.
 - `make build`: CLI compilation.
 - `nix build .#checks.aarch64-darwin.runtime`: the real generated runtime wrappers

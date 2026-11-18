@@ -216,7 +216,7 @@ func (d *dispatchPOC) archiveDemandRPC(ctx context.Context, id string, frame map
 		}
 		payload, _ := frame["payload"].(map[string]any)
 		commandID, _ := payload["commandId"].(string)
-		if !confirmed && !(err == nil && desktopAlreadyArchived(exit, id, commandID) && d.demandNativeArchived(ctx, worker, id)) {
+		if !confirmed && (err != nil || !desktopAlreadyArchived(exit, id, commandID) || !d.demandNativeArchived(ctx, worker, id)) {
 			if err != nil {
 				return err
 			}

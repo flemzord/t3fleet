@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
 	"github.com/flemzord/t3fleet/internal/state"
 	"github.com/flemzord/t3fleet/pkg/provider"
 )
@@ -50,7 +51,7 @@ func TestDispatchAssignmentPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer disk.Close()
+	defer func() { _ = disk.Close() }()
 	second, err := NewDispatchPOC("http://127.0.0.1:44321", disk, workers)
 	if err != nil {
 		t.Fatal(err)
@@ -124,14 +125,14 @@ func TestLiveDispatchPOC(t *testing.T) {
 		}
 		disk, err := state.Open(dir)
 		if err != nil {
-			ln.Close()
+			_ = ln.Close()
 			t.Fatal(err)
 		}
 		origin := "http://" + ln.Addr().String()
 		p, err := NewDispatchPOC(origin, disk, workers)
 		if err != nil {
-			disk.Close()
-			ln.Close()
+			_ = disk.Close()
+			_ = ln.Close()
 			t.Fatal(err)
 		}
 		ctx, cancel := context.WithCancel(t.Context())
@@ -384,7 +385,7 @@ func dispatchHTTP(t *testing.T, origin, token, path string) map[string]any {
 
 func decodeDispatchResponse(t *testing.T, res *http.Response) map[string]any {
 	t.Helper()
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	var out map[string]any
 	if res.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(res.Body, maxJSON)).Decode(&out) != nil {
 		t.Fatalf("invalid dispatch HTTP response: status=%d", res.StatusCode)

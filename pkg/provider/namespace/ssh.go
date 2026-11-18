@@ -13,10 +13,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/flemzord/t3fleet/pkg/provider"
 	"golang.org/x/crypto/ssh"
 	"namespacelabs.dev/integrations/api"
 	"namespacelabs.dev/integrations/nsc/ingress"
+
+	"github.com/flemzord/t3fleet/pkg/provider"
 )
 
 // SSHAuth is delivered by the authenticated Activate RPC. The key is transient
@@ -150,7 +151,7 @@ func (c *sshConnection) Exec(ctx context.Context, req provider.ExecRequest) (pro
 		}
 		return provider.ExecResult{}, fmt.Errorf("namespace: open SSH session: %w", err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 	var stdout, stderr outputBuffer
 	session.Stdout = &stdout
 	session.Stderr = &stderr

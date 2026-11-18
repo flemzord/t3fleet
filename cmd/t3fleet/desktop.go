@@ -30,7 +30,8 @@ func registerCreatedMachine(ctx context.Context, cfg config.Config, token string
 	}
 	// A failed desktop handoff must never turn into a second billable Create.
 	recover := func(reason string) error {
-		return fmt.Errorf("machine %s is ready, but %s; run t3fleet pair %s with the same --config to retry association without creating another VM", machine.ID, reason, machine.ID)
+		return hinted(fmt.Sprintf("run 't3fleet open %s' to retry the association without creating another machine, or 't3fleet pair %s' to print the link", machine.ID, machine.ID),
+			"machine %s is ready, but %s", machine.ID, reason)
 	}
 	pair, err := callAdmin(ctx, cfg.Listen, token, http.MethodPost, "/v1/machines/"+url.PathEscape(machine.ID)+"/pair", nil)
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/coder/websocket"
+
 	"github.com/flemzord/t3fleet/pkg/provider"
 )
 

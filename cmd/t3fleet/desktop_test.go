@@ -47,9 +47,9 @@ func TestCreateDesktopHandoff(t *testing.T) {
 			var calls []string
 			record := func(call string) { mu.Lock(); defer mu.Unlock(); calls = append(calls, call) }
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != "POST" || r.Header.Get("Authorization") != "Bearer "+token {
+				if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer "+token {
 					t.Error("handoff did not use the authenticated admin API")
-					w.WriteHeader(401)
+					w.WriteHeader(http.StatusUnauthorized)
 					return
 				}
 				switch r.URL.Path {
@@ -57,15 +57,15 @@ func TestCreateDesktopHandoff(t *testing.T) {
 					record("create")
 					if tc.createStatus != 0 {
 						w.WriteHeader(tc.createStatus)
-						io.WriteString(w, `{"error":"operation_failed"}`)
+						_, _ = io.WriteString(w, `{"error":"operation_failed"}`)
 						return
 					}
-					io.WriteString(w, `{"id":"machine-1","state":"ready"}`)
+					_, _ = io.WriteString(w, `{"id":"machine-1","state":"ready"}`)
 				case "/v1/machines/machine-1/pair":
 					record("pair")
 					if tc.pairStatus != 0 {
 						w.WriteHeader(tc.pairStatus)
-						io.WriteString(w, `{"error":"operation_failed"}`)
+						_, _ = io.WriteString(w, `{"error":"operation_failed"}`)
 						return
 					}
 					link := tc.pairURL
@@ -76,7 +76,7 @@ func TestCreateDesktopHandoff(t *testing.T) {
 					_, _ = w.Write(data)
 				default:
 					t.Error("unexpected handoff endpoint")
-					w.WriteHeader(404)
+					w.WriteHeader(http.StatusNotFound)
 				}
 			}))
 			defer server.Close()
@@ -94,7 +94,7 @@ func TestCreateDesktopHandoff(t *testing.T) {
 				}
 				return nil
 			}
-			args := []string{"--name", "demo", "--provider", "boat"}
+			args := []string{"--name", "demo", "--provider", "boat", "--json"}
 			if tc.noRegister {
 				args = append(args, "--no-register")
 			}

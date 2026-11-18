@@ -169,9 +169,9 @@ In another terminal:
 ./bin/t3fleet list --config /absolute/path/to/config.json
 ```
 
-Use `--provider namespace` for a Namespace machine. New names are automatically prefixed once with `t3fleet-`: `--name my-agent` creates `t3fleet-my-agent`. The full name must fit 32 characters. Existing records retain their names. The create response includes the managed machine's `id`, `remoteId`, `state`, and stable local `url`. Use the managed `id` for CLI commands.
+Use `--provider namespace` for a Namespace machine. New names are automatically prefixed once with `t3fleet-`: `--name my-agent` creates `t3fleet-my-agent`. The full name must fit 32 characters. Existing records retain their names. `create` prints the new machine's name and managed ID; `create --json` prints the full record with its `id`, `remoteId`, `state`, and stable local `url`. Other commands accept the machine name, its full ID, or a unique ID prefix.
 
-`create` prepares a one-use pairing link and opens it in T3 Code on the computer running the CLI. Confirm the backend in T3 to finish saving it. There is no separate `pair` step or manual link to copy in the normal flow. The machine JSON remains on standard output; progress and handoff instructions go to standard error. An interactive terminal shows an activity spinner and elapsed time during creation and readiness checks. Redirected output uses plain messages without terminal escape sequences. The indicator reports activity, not a completion percentage.
+`create` prepares a one-use pairing link and opens it in T3 Code on the computer running the CLI. Confirm the backend in T3 to finish saving it. There is no separate `pair` step or manual link to copy in the normal flow. The creation result goes to standard output; progress and handoff instructions go to standard error. An interactive terminal shows an activity spinner and elapsed time during creation and readiness checks. Redirected output uses plain messages without terminal escape sequences. The indicator reports activity, not a completion percentage.
 
 T3 deliberately [confirms an external pairing link](https://github.com/pingdotgg/t3code/blob/main/apps/web/src/components/desktop/DesktopWebLinkCoordinator.tsx) before saving the connection. t3fleet cannot currently remove this final click through a supported desktop API. A successful OS launch only means the link was handed off, not that the environment was registered.
 
@@ -179,12 +179,12 @@ For a headless host or a script, skip the desktop handoff:
 
 ```sh
 ./bin/t3fleet create --name my-agent --provider boat --no-register --config /absolute/path/to/config.json
-./bin/t3fleet pair MACHINE_ID --config /absolute/path/to/config.json
+./bin/t3fleet pair my-agent --config /absolute/path/to/config.json
 ```
 
 The explicit `pair` command prints a `t3code://pair?...` link for manual use. Pairing codes expire after 15 minutes and can be redeemed once. Generating another link invalidates the previous unused link.
 
-If creation succeeds but pairing or desktop launch fails, the CLI exits with an error and preserves the created machine ID in its JSON output and recovery message. Retry with `pair MACHINE_ID` and the same `--config`; do not rerun `create`. On Linux the automatic handoff requires `xdg-open` and a registered T3 Code URL handler. macOS uses `open`; Windows uses the OS URL handler.
+If creation succeeds but pairing or desktop launch fails, the CLI exits with an error and preserves the created machine ID in its output and recovery hint. Retry with `open my-agent` (or `pair my-agent` to print the link) and the same `--config`; do not rerun `create`. On Linux the automatic handoff requires `xdg-open` and a registered T3 Code URL handler. macOS uses `open`; Windows uses the OS URL handler.
 
 The daemon persists the resulting T3 client authorization, so a normal daemon restart does not require pairing again. It must be able to reclaim the saved local port.
 

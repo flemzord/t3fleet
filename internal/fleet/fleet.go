@@ -421,7 +421,7 @@ func (m *Manager) initialize(ctx context.Context, h *machineHandle, p provider.P
 	if err != nil {
 		return errors.New("fleet: T3 readiness request failed")
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		return errors.New("fleet: T3 endpoint did not become ready")
 	}
@@ -441,7 +441,7 @@ func (m *Manager) initialize(ctx context.Context, h *machineHandle, p provider.P
 	if err != nil {
 		return errors.New("fleet: T3 service authorization check failed")
 	}
-	defer authResponse.Body.Close()
+	defer func() { _ = authResponse.Body.Close() }()
 	if authResponse.StatusCode != http.StatusOK {
 		return errors.New("fleet: T3 service authorization was rejected")
 	}

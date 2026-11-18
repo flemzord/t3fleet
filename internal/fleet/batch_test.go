@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/flemzord/t3fleet/pkg/provider"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/flemzord/t3fleet/pkg/provider"
 
 	"github.com/flemzord/t3fleet/internal/fleet"
 )
@@ -134,11 +135,11 @@ func useIsolatedRuntime(t *testing.T, f *fixture) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("machine")
 		if id == "" || r.Header.Get("Authorization") != "Bearer service-"+id {
-			w.WriteHeader(401)
+			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
 		if r.URL.Path == "/.well-known/t3/environment" {
-			json.NewEncoder(w).Encode(map[string]any{"environmentId": "env-" + id, "serverVersion": serverVersion})
+			_ = json.NewEncoder(w).Encode(map[string]any{"environmentId": "env-" + id, "serverVersion": serverVersion})
 			return
 		}
 		fmt.Fprint(w, `{}`)
@@ -189,7 +190,7 @@ func (failingBatchStore) Save(any) error { return errors.New("disk unavailable")
 func TestBatchPersistenceFailureDoesNotAllocate(t *testing.T) {
 	f := newFleet(t)
 	f.options.Store = failingBatchStore{f.store}
-	f.m.Close(t.Context())
+	_ = f.m.Close(t.Context())
 	var err error
 	f.m, err = fleet.New(f.options)
 	if err != nil {

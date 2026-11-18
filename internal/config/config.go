@@ -109,7 +109,7 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, errors.New("cannot open configuration; create a config file and pass --config PATH")
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	data, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
 	if err != nil || len(data) > 1<<20 || !bytes.HasPrefix(bytes.TrimSpace(data), []byte("{")) {
 		return Config{}, errors.New("configuration must be a JSON object smaller than 1 MiB")
@@ -327,7 +327,7 @@ func privateRead(path string) ([]byte, error) {
 	if err != nil {
 		return nil, errors.New("cannot read secret file")
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(info, opened) || !opened.Mode().IsRegular() || opened.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("secret file changed while opening")

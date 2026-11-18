@@ -302,7 +302,7 @@ func requestPeerOAuth(p *Proxy, r *http.Request, body []byte, admin bool) (int, 
 	if err != nil {
 		return 0, nil, err
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(res.Body, maxPeerOAuthBody+1))
 	if err != nil || len(data) > maxPeerOAuthBody || (res.StatusCode >= 300 && res.StatusCode < 400) {
 		return 0, nil, errors.New("invalid native OAuth response")

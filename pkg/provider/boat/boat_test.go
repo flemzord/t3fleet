@@ -45,14 +45,14 @@ func respond(t *testing.T, w http.ResponseWriter, value any) {
 
 func TestCreateFromSnapshot(t *testing.T) {
 	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "GET" && r.URL.Path == "/sandboxes" {
+		if r.Method == http.MethodGet && r.URL.Path == "/sandboxes" {
 			if r.URL.Query().Get("label") != "t3fleet-id=operation-1" {
 				t.Error("missing durable ownership lookup")
 			}
 			respond(t, w, map[string]any{"ok": true, "sandboxes": []any{}})
 			return
 		}
-		if r.Method != "POST" || r.URL.Path != "/sandboxes" || r.Header.Get("Authorization") != "Bearer test-secret" || r.Header.Get("X-Boat-Org") != "test-org" || r.Header.Get("Idempotency-Key") != "operation-1" {
+		if r.Method != http.MethodPost || r.URL.Path != "/sandboxes" || r.Header.Get("Authorization") != "Bearer test-secret" || r.Header.Get("X-Boat-Org") != "test-org" || r.Header.Get("Idempotency-Key") != "operation-1" {
 			t.Errorf("unexpected request metadata: %s %s", r.Method, r.URL.Path)
 		}
 		var body map[string]any
@@ -88,7 +88,7 @@ func TestCreateRequiresSnapshotAndIdempotency(t *testing.T) {
 
 func TestCreateExplicitEnvironmentOptsIntoCredentials(t *testing.T) {
 	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "GET" {
+		if r.Method == http.MethodGet {
 			respond(t, w, map[string]any{"ok": true, "sandboxes": []any{}})
 			return
 		}
@@ -111,9 +111,9 @@ func TestCreateExplicitEnvironmentOptsIntoCredentials(t *testing.T) {
 func TestCreateRecoversLostResponseAfterIdempotencyExpiry(t *testing.T) {
 	reads := 0
 	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "GET" || r.URL.Path != "/sandboxes" || r.URL.Query().Get("label") != "t3fleet-id=old-operation" {
+		if r.Method != http.MethodGet || r.URL.Path != "/sandboxes" || r.URL.Query().Get("label") != "t3fleet-id=old-operation" {
 			t.Error("recovery attempted a new billable create")
-			w.WriteHeader(500)
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		reads++
@@ -142,7 +142,7 @@ func TestCreateFailsClosedOnAmbiguousOrIncompleteOwnership(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != "GET" {
+				if r.Method != http.MethodGet {
 					t.Error("uncertain recovery created a machine")
 				}
 				respond(t, w, tc.body)
@@ -156,10 +156,10 @@ func TestCreateFailsClosedOnAmbiguousOrIncompleteOwnership(t *testing.T) {
 
 func TestCreateRejectsOwnershipLookupFailureWithoutPosting(t *testing.T) {
 	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "GET" {
+		if r.Method != http.MethodGet {
 			t.Error("lookup failure triggered create")
 		}
-		w.WriteHeader(503)
+		w.WriteHeader(http.StatusServiceUnavailable)
 		respond(t, w, map[string]any{"ok": false})
 	})
 	if _, err := c.Create(t.Context(), provider.CreateRequest{Template: provider.Template{Snapshot: "golden"}, OperationID: "op"}); err == nil {
@@ -190,7 +190,7 @@ func TestLifecyclePollsVendorStates(t *testing.T) {
 		t.Run(tc.action, func(t *testing.T) {
 			reads := 0
 			c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
-				if r.Method == "POST" {
+				if r.Method == http.MethodPost {
 					if r.URL.Path != "/sandboxes/bx_test/"+tc.action {
 						t.Error(r.URL.Path)
 					}
@@ -221,7 +221,7 @@ func TestDeleteConfirmationAndCompletion(t *testing.T) {
 	reads := 0
 	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
 		status := "processing"
-		if r.Method == "DELETE" {
+		if r.Method == http.MethodDelete {
 			if r.URL.Path != "/sandboxes/bx_test" || r.Header.Get("X-Ascii-Confirm-Delete") != "bx_test" {
 				t.Error("missing exact deletion confirmation")
 			}
@@ -243,7 +243,7 @@ func TestDeleteStopsOnFailedOperation(t *testing.T) {
 	reads := 0
 	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
 		status := "processing"
-		if r.Method != "DELETE" {
+		if r.Method != http.MethodDelete {
 			reads++
 			status = "failed"
 		}
@@ -276,7 +276,7 @@ func TestSnapshotWaitsUntilReady(t *testing.T) {
 	reads := 0
 	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
 		status := "saving"
-		if r.Method == "POST" {
+		if r.Method == http.MethodPost {
 			if r.URL.Path != "/saved-snapshots" {
 				t.Error(r.URL.Path)
 			}
@@ -354,20 +354,20 @@ func fixtureClient(t *testing.T) (*Client, *executionFixture) {
 func (f *executionFixture) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if r.Method == "POST" && r.URL.Path == "/sandboxes/bx_test/commands" {
+	if r.Method == http.MethodPost && r.URL.Path == "/sandboxes/bx_test/commands" {
 		var body struct {
 			Command string `json:"command"`
 		}
 		data, _ := io.ReadAll(r.Body)
 		if err := json.Unmarshal(data, &body); err != nil {
 			f.t.Error(err)
-			w.WriteHeader(500)
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		match := executionDirectory.FindStringSubmatch(body.Command)
 		if len(match) != 2 {
 			f.t.Error("missing random private directory")
-			w.WriteHeader(500)
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		f.directory = match[1]
@@ -382,7 +382,7 @@ func (f *executionFixture) serve(w http.ResponseWriter, r *http.Request) {
 		out, err := cmd.Output()
 		if err != nil {
 			f.t.Error("fixture shell failed")
-			w.WriteHeader(500)
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		f.commandStdout, f.commandStderr = string(out), stderr.String()
@@ -409,19 +409,19 @@ func (f *executionFixture) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path != "/sandboxes/bx_test/files" {
 		f.t.Errorf("unexpected fixture path %s", r.URL.Path)
-		w.WriteHeader(404)
+		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 	name := r.URL.Query().Get("path")
 	if f.directory == "" || (name != f.directory && name != f.directory+"/stdout" && name != f.directory+"/stderr") {
 		f.t.Error("unexpected output filename")
-		w.WriteHeader(400)
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	if r.Method == "DELETE" {
+	if r.Method == http.MethodDelete {
 		if r.URL.Query().Get("recursive") != "true" || name != f.directory {
 			f.t.Error("cleanup did not target private directory")
-			w.WriteHeader(400)
+			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 		if f.cleanupStatus != 0 {
@@ -436,15 +436,15 @@ func (f *executionFixture) serve(w http.ResponseWriter, r *http.Request) {
 		respond(f.t, w, map[string]any{"ok": true, "success": true})
 		return
 	}
-	if r.Method != "GET" || r.URL.Query().Get("encoding") != "utf8" {
+	if r.Method != http.MethodGet || r.URL.Query().Get("encoding") != "utf8" {
 		f.t.Error("invalid file read")
-		w.WriteHeader(400)
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	data, err := os.ReadFile(name)
 	if err != nil {
 		f.t.Error(err)
-		w.WriteHeader(404)
+		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 	res := map[string]any{"ok": true, "success": true, "path": name, "encoding": "utf8", "size": len(data), "content": string(data)}

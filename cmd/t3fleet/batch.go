@@ -11,9 +11,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
+	"text/tabwriter"
 	"time"
 
 	"github.com/flemzord/t3fleet/internal/config"
@@ -27,20 +27,16 @@ type batchResult struct {
 	Association string        `json:"association"`
 }
 
-func runBatch(ctx context.Context, cfg config.Config, req fleet.BatchRequest, concurrency int, resume, register bool, out, diagnostics io.Writer) error {
-	return runBatchWithInput(ctx, cfg, req, concurrency, resume, register, os.Stdin, interactiveInput(), out, diagnostics)
-}
-
-func runBatchWithInput(ctx context.Context, cfg config.Config, req fleet.BatchRequest, concurrency int, resume, register bool, input io.Reader, interactive bool, out, diagnostics io.Writer) error {
+func runBatchWithInput(ctx context.Context, cfg config.Config, req fleet.BatchRequest, concurrency int, resume, register, asJSON bool, input io.Reader, interactive bool, out, diagnostics io.Writer) error {
 	if register && !interactive {
-		return errors.New("batch association requires a TTY to confirm each T3 handoff; use --no-register and pair individual IDs later")
+		return hinted("add --no-register, then run 't3fleet open' for each machine later", "batch association needs a terminal to confirm each T3 handoff")
 	}
 	if concurrency < 1 || concurrency > fleet.MaxConcurrency || (!resume && (req.Count < 1 || req.Count > fleet.MaxBatchCount)) {
-		return errors.New("count must be 1-100 and concurrency 1-10")
+		return errors.New("--count must be between 1 and 100 and --concurrency between 1 and 10")
 	}
 	token, err := readAdminToken(cfg.StateDir)
 	if err != nil {
-		return errors.New("daemon credentials unavailable")
+		return errDaemonCredentials
 	}
 	if req.ID == "" {
 		var raw [16]byte
@@ -141,14 +137,27 @@ func runBatchWithInput(ctx context.Context, cfg config.Config, req fleet.BatchRe
 			}
 		}
 	}
-	if err := json.NewEncoder(out).Encode(struct {
-		ID      string        `json:"batchId"`
-		Results []batchResult `json:"results"`
-	}{plan.ID, results}); err != nil {
-		return err
+	if asJSON {
+		if err := json.NewEncoder(out).Encode(struct {
+			ID      string        `json:"batchId"`
+			Results []batchResult `json:"results"`
+		}{plan.ID, results}); err != nil {
+			return err
+		}
+	} else {
+		printBatchResults(out, results)
 	}
 	if failed {
-		return fmt.Errorf("batch %s incomplete; resume it or use start/pair with the reported machine IDs", plan.ID)
+		return hinted(fmt.Sprintf("run 't3fleet create --resume %s', or use start/open with the machines above", plan.ID), "batch %s is incomplete", plan.ID)
 	}
 	return ctx.Err()
+}
+
+func printBatchResults(w io.Writer, results []batchResult) {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tID\tSTATE\tASSOCIATION\tERROR")
+	for _, r := range results {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", displayName(r.Machine), r.Machine.ID, orDash(r.Machine.State), r.Association, orDash(r.Error))
+	}
+	tw.Flush()
 }

@@ -27,7 +27,7 @@ any positive integer (for example, `100`). Provider quotas still apply.
 2. Set `dispatchPOC.onDemand.t3Binary` to an absolute executable path for T3
    matching `expectedVersion`. Leave `idleTimeout` unset or at `"0"` and omit
    `workers`. Start `t3fleet serve --config PATH`.
-3. Run `t3fleet pair-dispatch --config PATH` and confirm **t3fleet**
+3. Run `t3fleet dispatch pair --config PATH` and confirm **t3fleet**
    in T3 Desktop. From a GitHub project, choose **Add to another machine** and
    select this environment. Clear any selected ignored files; copying them
    across machines is outside this proof.
@@ -113,7 +113,7 @@ GitHub access. The daemon does not copy credentials from Boat or Desktop.
 On-demand dispatch also accepts T3 **Linked Environments** on the pinned
 nightly. Enable **Settings → Labs → Linked Environments** on the source T3
 server. After pairing the Desktop with `t3fleet`, register the repository as
-above. Run `t3fleet pair-dispatch --peer-access approval-required --config PATH`
+above. Run `t3fleet dispatch pair --peer-access approval-required --config PATH`
 to print a one-use code. From the source environment, open **Linked
 Environments → Link** and use that code to link to the dispatch listener.
 When both servers run on the same host, enter the
@@ -224,7 +224,7 @@ include the pinned T3 runtime and hook.
    the managed IDs from `t3fleet list`. Leave `idleTimeout` unset or set it to
    `"0"`.
 3. Start `t3fleet serve --config PATH`, then run
-   `t3fleet pair-dispatch --config PATH`. Open the resulting one-use link
+   `t3fleet dispatch pair --config PATH`. Open the resulting one-use link
    privately and confirm **t3fleet** in T3. Do not pair the
    individual machines in Desktop for this test.
 4. In the new environment, add the prepared path as an existing project.
