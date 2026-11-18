@@ -1,0 +1,22 @@
+name: Bug report
+description: Report a problem with t3fleet
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For security issues, follow the [security policy](https://github.com/flemzord/t3fleet/security/policy).
+        Remove credentials, pairing links, private endpoints, and account identifiers from any output you share.
+  - type: textarea
+    id: versions
+    attributes:
+      label: Environment
+      description: Include the t3fleet version, T3 Desktop and server versions, OS, architecture, and cloud provider if applicable.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Describe the steps, the expected behavior, and the actual result. Share sanitized output if it helps.
+    validations:
+      required: true

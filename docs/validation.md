@@ -96,8 +96,8 @@ Live-test opt-in variables were explicitly unset for validation. `lint` checks
 gofmt and runs `go vet`; `test` runs all packages with `-race -count=1`; `build`
 writes `bin/t3fleet` inside this checkout only. The CLI help was also checked.
 No cloud machine was allocated or deleted, and no real T3 desktop was opened.
-The existing `mon-test*` resources, private configurations and other checkouts
-were not used. No push, PR, merge or remote CI run is part of this evidence.
+Existing cloud resources, private configurations and other checkouts were not
+used. No push, PR, merge or remote CI run is part of this evidence.
 
 New fixtures verify full local name preflight, persistence failure without
 allocation, stable IDs after restart, replay conflicts, identical template/size,

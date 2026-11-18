@@ -19,6 +19,8 @@ Tests run without cloud credentials. Keep billable cloud canaries separate from 
 ## Releases
 
 CI builds a GoReleaser snapshot without publishing it. To build the same archives locally, install the GoReleaser version pinned in [the release workflow](.github/workflows/release.yml), then run `goreleaser release --snapshot --clean` in the Go development environment. The archives and `checksums.txt` appear in `dist/`.
+The release hook collects the resolved Go modules' and toolchain's license texts
+into `THIRD_PARTY_LICENSES.txt` for each archive.
 
 To publish a release, check out the commit you want to release and confirm its CI passed. Then create and push an annotated `v`-prefixed SemVer tag. For example, for the first alpha release:
 

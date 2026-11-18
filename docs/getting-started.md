@@ -67,8 +67,6 @@ The Devbox CLI is an optional image-publication tool; the running fleet daemon u
 
 For Boat, install the same `vm-tools` profile in a fresh credential-free builder, put its binaries on the remote user's login `PATH`, and run `t3fleet-image-check` before capturing a versioned saved snapshot. Do not start T3 in that golden builder. See the [reference image guide](../images/README.md) for publication details.
 
-A larger development-tools profile exists in [flemzord/nixos-config](https://github.com/flemzord/nixos-config), but it is optional. t3fleet's reference image does not require that personal repository.
-
 The daemon calls `t3fleet-runtime-info` after starting a machine. This hook starts the preinstalled T3 server idempotently before reporting readiness. That is local initialization, not package installation. A standalone VM that will never become a template may optionally use `t3fleet-server-start` as a boot hook.
 
 Before publishing a shared image or snapshot, verify it contains none of:

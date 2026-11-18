@@ -37,10 +37,13 @@ SOFTWARE.
 ## Go dependencies
 
 The module manifest and checksums are in `go.mod` and `go.sum`. Dependency source
-retains its own license notices. Direct dependencies include:
+retains its own license notices. Release archives include
+`THIRD_PARTY_LICENSES.txt` with license texts for the Go toolchain and resolved
+dependencies. Direct dependencies include:
 
 - [coder/websocket](https://github.com/coder/websocket), ISC license.
 - [golang.org/x/crypto](https://go.googlesource.com/crypto), Go BSD-style license.
+- [golang.org/x/term](https://go.googlesource.com/term), Go BSD-style license.
 - [Namespace integrations](https://github.com/namespacelabs/integrations), Apache-2.0 license.
 
 T3 Code, Boat, Namespace, Claude Code, and Codex are separate products with their

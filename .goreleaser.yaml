@@ -1,5 +1,9 @@
 version: 2
 
+before:
+  hooks:
+    - sh scripts/release-licenses.sh
+
 builds:
   - main: ./cmd/t3fleet
     binary: t3fleet
@@ -18,6 +22,7 @@ archives:
       - LICENSE
       - README.md
       - THIRD_PARTY_NOTICES.md
+      - THIRD_PARTY_LICENSES.txt
       - examples/config.json
       - examples/dispatch-boat.json
 
