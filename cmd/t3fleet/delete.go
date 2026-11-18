@@ -3,9 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,53 +11,83 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 
-	"github.com/flemzord/t3fleet/internal/config"
-	"github.com/flemzord/t3fleet/internal/fleet"
 	"golang.org/x/term"
+
+	"github.com/flemzord/t3fleet/internal/fleet"
 )
 
 func interactiveInput() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
 
-func runDelete(ctx context.Context, cfg config.Config, args []string, input io.Reader, interactive bool, out, diagnostics io.Writer) error {
-	fs := flag.NewFlagSet("delete", flag.ContinueOnError)
-	fs.SetOutput(diagnostics)
-	idsArg := fs.String("ids", "", "comma-separated managed IDs")
-	yes := fs.Bool("yes", false, "confirm exactly the explicit IDs")
-	if err := fs.Parse(args); err != nil {
+type deleteOptions struct {
+	ids        string
+	yes        bool
+	jsonOutput bool
+}
+
+type deleteResult struct {
+	ID      string `json:"id"`
+	Deleted bool   `json:"deleted"`
+}
+
+// deleteOne removes a single machine designated by its full ID or exact name.
+// Prefixes are refused: a short typo must never select another machine.
+func (a *app) deleteOne(ctx context.Context, ref string, opts deleteOptions) error {
+	if opts.ids != "" {
+		return hinted("use 't3fleet delete REF' or 't3fleet delete --ids ID,ID --yes'", "a machine argument cannot be combined with --ids")
+	}
+	d, err := a.daemon()
+	if err != nil {
 		return err
 	}
-	if fs.NArg() != 0 || (*idsArg == "" && *yes) {
-		return errors.New("use delete ID, delete interactively, or delete --ids ID,ID --yes")
-	}
-	if !interactive && (*idsArg == "" || !*yes) {
-		return errors.New("without a TTY use delete ID or delete --ids ID,ID --yes")
-	}
-	token, err := readAdminToken(cfg.StateDir)
-	if err != nil {
-		return errors.New("daemon credentials unavailable")
-	}
-	data, err := callAdmin(ctx, cfg.Listen, token, http.MethodGet, "/v1/machines", nil)
+	machine, err := d.resolve(ctx, ref, false)
 	if err != nil {
 		return err
 	}
-	var machines []fleet.Machine
-	if json.Unmarshal(data, &machines) != nil {
-		return errors.New("invalid daemon response")
+	finish := startProgress(a.stderr, machineProgress("delete", displayName(machine)), interactiveProgress(a.stderr))
+	_, err = d.call(ctx, http.MethodDelete, "/v1/machines/"+url.PathEscape(machine.ID), nil)
+	finish(err)
+	if err != nil {
+		return err
+	}
+	if opts.jsonOutput {
+		return printJSON(a.stdout, deleteResult{ID: machine.ID, Deleted: true})
+	}
+	return nil
+}
+
+func (a *app) deleteMany(ctx context.Context, opts deleteOptions) error {
+	if opts.ids == "" && opts.yes {
+		return hinted("use 't3fleet delete REF', 't3fleet delete' interactively, or 't3fleet delete --ids ID,ID --yes'", "--yes requires --ids")
+	}
+	if !a.stdinTTY && (opts.ids == "" || !opts.yes) {
+		return hinted("without a terminal, use 't3fleet delete REF' or 't3fleet delete --ids ID,ID --yes'", "interactive deletion needs a terminal")
+	}
+	d, err := a.daemon()
+	if err != nil {
+		return err
+	}
+	machines, err := d.machines(ctx)
+	if err != nil {
+		return err
 	}
 	var ids []string
-	scanner := bufio.NewScanner(input)
-	if *idsArg != "" {
-		ids = strings.Split(*idsArg, ",")
+	scanner := bufio.NewScanner(a.stdin)
+	if opts.ids != "" {
+		ids = strings.Split(opts.ids, ",")
 	} else {
 		if len(machines) == 0 {
-			fmt.Fprintln(diagnostics, "No managed machines.")
+			fmt.Fprintln(a.stderr, "No managed machines.")
 			return nil
 		}
+		tw := tabwriter.NewWriter(a.stderr, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "#\tNAME\tPROVIDER\tSTATE\tID")
 		for i, m := range machines {
-			fmt.Fprintf(diagnostics, "%d\t%s\t%s\t%s\t%s\n", i+1, m.Name, m.Provider, m.State, m.ID)
+			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n", i+1, orDash(m.Name), orDash(m.Provider), orDash(m.State), m.ID)
 		}
-		fmt.Fprintln(diagnostics, "Select numbers separated by spaces (empty or q cancels):")
+		tw.Flush()
+		fmt.Fprintln(a.stderr, "Select numbers separated by spaces (empty or q cancels):")
 		line, err := readSelection(ctx, scanner)
 		if errors.Is(err, io.EOF) {
 			return nil
@@ -83,15 +111,17 @@ func runDelete(ctx context.Context, cfg config.Config, args []string, input io.R
 		return err
 	}
 	if len(selected) == 0 {
-		fmt.Fprintln(diagnostics, "Empty selection; nothing deleted.")
+		fmt.Fprintln(a.stderr, "Empty selection; nothing deleted.")
 		return nil
 	}
-	fmt.Fprintln(diagnostics, "Selected for permanent deletion:")
+	fmt.Fprintln(a.stderr, "Selected for permanent deletion:")
+	tw := tabwriter.NewWriter(a.stderr, 0, 0, 2, ' ', 0)
 	for _, m := range selected {
-		fmt.Fprintf(diagnostics, "%s\t%s\t%s\t%s\n", m.Name, m.Provider, m.State, m.ID)
+		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", orDash(m.Name), orDash(m.Provider), orDash(m.State), m.ID)
 	}
-	if !*yes {
-		fmt.Fprintln(diagnostics, "Type delete to confirm this exact selection (anything else cancels):")
+	tw.Flush()
+	if !opts.yes {
+		fmt.Fprintln(a.stderr, "Type delete to confirm this exact selection (anything else cancels):")
 		line, err := readSelection(ctx, scanner)
 		if errors.Is(err, io.EOF) {
 			return nil
@@ -100,35 +130,35 @@ func runDelete(ctx context.Context, cfg config.Config, args []string, input io.R
 			return err
 		}
 		if line != "delete" {
-			fmt.Fprintln(diagnostics, "Cancelled; nothing deleted.")
+			fmt.Fprintln(a.stderr, "Cancelled; nothing deleted.")
 			return nil
 		}
 	}
-	type result struct {
-		ID      string `json:"id"`
-		Deleted bool   `json:"deleted"`
-	}
-	results := make([]result, 0, len(selected))
-	failed := false
+	results := make([]deleteResult, 0, len(selected))
+	failed := 0
 	for _, m := range selected {
 		if err := ctx.Err(); err != nil {
-			failed = true
-			results = append(results, result{ID: m.ID})
+			failed++
+			results = append(results, deleteResult{ID: m.ID})
 			continue
 		}
-		finish := startProgress(diagnostics, progressMessages{"Deleting " + m.Name + " (" + m.ID + ")", "Deleted " + m.ID, "Deletion failed for " + m.ID}, interactiveProgress(diagnostics))
-		_, err := callAdmin(ctx, cfg.Listen, token, http.MethodDelete, "/v1/machines/"+url.PathEscape(m.ID), nil)
+		finish := startProgress(a.stderr, machineProgress("delete", displayName(m)+" ("+m.ID+")"), interactiveProgress(a.stderr))
+		_, err := d.call(ctx, http.MethodDelete, "/v1/machines/"+url.PathEscape(m.ID), nil)
 		finish(err)
-		results = append(results, result{m.ID, err == nil})
+		results = append(results, deleteResult{m.ID, err == nil})
 		if err != nil {
-			failed = true
+			failed++
 		}
 	}
-	if err := json.NewEncoder(out).Encode(results); err != nil {
-		return err
+	if opts.jsonOutput {
+		if err := printJSON(a.stdout, results); err != nil {
+			return err
+		}
+	} else {
+		fmt.Fprintf(a.stderr, "Deleted %d of %d selected machines.\n", len(results)-failed, len(results))
 	}
-	if failed {
-		return errors.New("some selected machines were not deleted; inspect reported IDs before retrying")
+	if failed > 0 {
+		return hinted("run 't3fleet list' and inspect the remaining machines before retrying", "%d selected machines were not deleted", failed)
 	}
 	return nil
 }

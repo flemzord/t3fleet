@@ -55,9 +55,11 @@ backup as a golden template violates this runtime contract. The daemon rejects a
 runtime identity or service token already used by another managed VM, leaving
 the affected allocation visible as not ready for explicit cleanup.
 
-Progress and durations go to stderr. Stdout contains one JSON batch summary with
-`batchId` and one ordered `results` entry per VM: its machine record, safe error
-information and association status. A partial failure produces a nonzero exit
+Progress and durations go to stderr. Stdout contains a table with one row per
+VM: name, ID, state, association status and safe error code. With `--json`,
+stdout instead contains one JSON batch summary with `batchId` and one ordered
+`results` entry per VM: its machine record, safe error information and
+association status. A partial failure produces a nonzero exit
 status. Other machines continue; no automatic destructive rollback occurs.
 
 ## Resume without creating duplicates
@@ -134,8 +136,8 @@ numbers are deduplicated. No `--all` option exists.
 For scripts, specify the exact managed IDs and confirmation:
 
 ```sh
-./bin/t3fleet delete --ids MACHINE_ID_1,MACHINE_ID_2 --yes
-# Original single-ID behavior remains available:
+./bin/t3fleet delete --ids MACHINE_ID_1,MACHINE_ID_2 --yes --json
+# Delete one machine by full ID or exact name (ID prefixes are refused):
 ./bin/t3fleet delete MACHINE_ID
 ```
 

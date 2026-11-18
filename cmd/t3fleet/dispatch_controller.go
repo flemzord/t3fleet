@@ -222,7 +222,7 @@ func enableControllerPeerLinks(userdata string) error {
 	if err != nil {
 		return errors.New("could not write local T3 dispatch controller settings")
 	}
-	defer os.Remove(file.Name())
+	defer func() { _ = os.Remove(file.Name()) }()
 	_, writeErr := file.Write(append(data, '\n'))
 	syncErr := file.Sync()
 	closeErr := file.Close()

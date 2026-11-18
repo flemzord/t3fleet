@@ -39,16 +39,25 @@ func operationProgress(cfg config.Config, command string, body any) progressMess
 			base = "image"
 		}
 		return progressMessages{"Creating " + cloud + " machine from " + base + "; waiting for T3 readiness", "Machine ready", "Creation did not complete"}
+	default:
+		return progressMessages{}
+	}
+}
+
+// machineProgress names the machine an operation acts on, so a long wait
+// always shows which cloud resource it concerns.
+func machineProgress(command, name string) progressMessages {
+	switch command {
 	case "start":
-		return progressMessages{"Starting machine; waiting for T3 readiness", "Machine ready", "Start did not complete"}
+		return progressMessages{"Starting " + name + "; waiting for T3 readiness", name + " is ready", "Start of " + name + " did not complete"}
 	case "stop":
-		return progressMessages{"Stopping machine", "Machine stopped", "Stop did not complete"}
+		return progressMessages{"Stopping " + name, name + " stopped", "Stop of " + name + " did not complete"}
 	case "delete":
-		return progressMessages{"Deleting machine", "Machine deleted", "Deletion did not complete"}
+		return progressMessages{"Deleting " + name, name + " deleted", "Deletion of " + name + " did not complete"}
 	case "snapshot":
-		return progressMessages{"Saving snapshot; waiting for provider completion", "Snapshot ready", "Snapshot did not complete"}
+		return progressMessages{"Saving snapshot of " + name + "; waiting for provider completion", "Snapshot ready", "Snapshot did not complete"}
 	case "pair":
-		return progressMessages{"Preparing T3 association; waiting for readiness", "Association link ready", "Association could not be prepared"}
+		return progressMessages{"Preparing T3 association for " + name + "; waiting for readiness", "Association link ready", "Association could not be prepared"}
 	default:
 		return progressMessages{}
 	}

@@ -45,7 +45,7 @@ func serve(ctx context.Context, cfg config.Config, diagnostics io.Writer) error 
 	if err != nil {
 		return fmt.Errorf("cannot open private fleet state: %w", err)
 	}
-	defer disk.Close()
+	defer func() { _ = disk.Close() }()
 	token, err := ensureAdminToken(cfg.StateDir)
 	if err != nil {
 		return errors.New("cannot initialize private daemon token")
@@ -73,7 +73,7 @@ func serve(ctx context.Context, cfg config.Config, diagnostics io.Writer) error 
 		if err != nil {
 			return fmt.Errorf("cannot open private dispatch state: %w", err)
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 		origin := "http://" + poc.Listen
 		if poc.OnDemand != nil {
 			controller, stop, startErr := startDispatchController(ctx, cfg, diagnostics)
@@ -135,6 +135,7 @@ func serve(ctx context.Context, cfg config.Config, diagnostics io.Writer) error 
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
 	fmt.Fprintln(diagnostics, "t3fleet control listening on", listener.Addr().String())
+	printServeSummary(diagnostics, cfg, manager.List())
 	select {
 	case err := <-done:
 		if errors.Is(err, http.ErrServerClosed) {
@@ -202,11 +203,12 @@ func newAdminHandlerWithDispatch(manager fleetAPI, token string, dispatch *proxy
 		}
 		if r.URL.Path == "/v1/dispatch-poc/pair-peer" {
 			w.Header().Set("Cache-Control", "no-store")
-			if dispatch == nil {
+			switch {
+			case dispatch == nil:
 				safeError(w, http.StatusNotFound, "not_found")
-			} else if r.Method != http.MethodPost {
+			case r.Method != http.MethodPost:
 				w.WriteHeader(http.StatusMethodNotAllowed)
-			} else {
+			default:
 				var request struct {
 					Access string `json:"access"`
 				}
@@ -428,11 +430,11 @@ func ensureAdminToken(dir string) (string, error) {
 		return "", err
 	}
 	if _, err = file.WriteString(token + "\n"); err != nil {
-		file.Close()
+		_ = file.Close()
 		return "", err
 	}
 	if err = file.Sync(); err != nil {
-		file.Close()
+		_ = file.Close()
 		return "", err
 	}
 	if err = file.Close(); err != nil {
@@ -453,7 +455,7 @@ func readAdminToken(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	current, err := file.Stat()
 	if err != nil || !os.SameFile(info, current) || !current.Mode().IsRegular() || current.Mode().Perm()&0o077 != 0 {
 		return "", errors.New("admin token changed while opening")
@@ -468,4 +470,21 @@ func readAdminToken(dir string) (string, error) {
 		return "", errors.New("invalid admin token")
 	}
 	return token, nil
+}
+
+// printServeSummary runs after the listener is ready, so readers that wait
+// for the first daemon output can already reach the control API.
+func printServeSummary(w io.Writer, cfg config.Config, machines []fleet.Machine) {
+	providers := strings.Join(configuredProviders(cfg), ", ")
+	if providers == "" {
+		providers = "none configured"
+	}
+	byState := map[string]int{}
+	for _, m := range machines {
+		byState[m.State]++
+	}
+	fmt.Fprintln(w, "  providers:", providers)
+	fmt.Fprintln(w, "  state:    ", cfg.StateDir)
+	fmt.Fprintln(w, "  machines: ", machineSummary(byState, len(machines)))
+	fmt.Fprintln(w, "Cloud machines keep running and billing after the daemon stops; use 't3fleet stop' or 't3fleet delete'.")
 }

@@ -103,7 +103,7 @@ func TestCreateShowsProgressWhileDaemonIsStillWorking(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		close(requested)
 		<-release
-		io.WriteString(w, `{"id":"machine-1","state":"ready"}`)
+		_, _ = io.WriteString(w, `{"id":"machine-1","state":"ready"}`)
 	}))
 	defer server.Close()
 	defer unblock()
@@ -111,7 +111,7 @@ func TestCreateShowsProgressWhileDaemonIsStillWorking(t *testing.T) {
 	var out, diagnostics progressBuffer
 	done := make(chan error, 1)
 	go func() {
-		done <- runClient(t.Context(), cfg, "create", []string{"--name", "demo", "--provider", "boat", "--no-register"}, &out, &diagnostics)
+		done <- runClient(t.Context(), cfg, "create", []string{"--name", "demo", "--provider", "boat", "--no-register", "--json"}, &out, &diagnostics)
 	}()
 	select {
 	case <-requested:

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -232,8 +233,8 @@ func TestCLIThroughAuthenticatedAdminAPI(t *testing.T) {
 
 func TestClientCancellationAndErrorRedaction(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(500)
-		io.WriteString(w, `{"error":"credential-secret"}`)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":"credential-secret"}`)
 	}))
 	defer server.Close()
 	address := strings.TrimPrefix(server.URL, "http://")
@@ -256,7 +257,7 @@ func TestClientExplainsNameConflictForCurrentAndOlderDaemons(t *testing.T) {
 	} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusConflict)
-			io.WriteString(w, body)
+			_, _ = io.WriteString(w, body)
 		}))
 		_, err := callAdmin(t.Context(), strings.TrimPrefix(server.URL, "http://"), "token", "POST", "/v1/machines", map[string]string{"name": "mon-test2"})
 		server.Close()
@@ -273,7 +274,7 @@ func TestClientExplainsMissingRuntimeWithoutLosingAllocatedIdentity(t *testing.T
 	const id = "f2e1a7e3f84914948dfe3f04869a79ef"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)
-		io.WriteString(w, `{"error":"runtime_unavailable","machine":{"id":"`+id+`"},"details":"private-command-output"}`)
+		_, _ = io.WriteString(w, `{"error":"runtime_unavailable","machine":{"id":"`+id+`"},"details":"private-command-output"}`)
 	}))
 	defer server.Close()
 	_, err := callAdmin(t.Context(), strings.TrimPrefix(server.URL, "http://"), "token", "POST", "/v1/machines", nil)
@@ -283,11 +284,20 @@ func TestClientExplainsMissingRuntimeWithoutLosingAllocatedIdentity(t *testing.T
 }
 
 func TestCommandParsingAndHelp(t *testing.T) {
-	path, args, err := extractConfig([]string{"snapshot", "x", "--config", "/tmp/config.json", "--name", "golden"})
-	if err != nil || path != "/tmp/config.json" || strings.Join(args, ",") != "snapshot,x,--name,golden" {
-		t.Fatal("global config flag parsing failed")
+	var loaded []string
+	capture := &app{stdout: io.Discard, stderr: io.Discard, stdin: strings.NewReader(""), load: func(path string) (config.Config, error) {
+		loaded = append(loaded, path)
+		return config.Config{}, errors.New("stop after load")
+	}}
+	if err := capture.execute(t.Context(), []string{"snapshot", "x", "--config", "/tmp/config.json", "--name", "golden"}); err == nil || !slices.Equal(loaded, []string{"/tmp/config.json"}) {
+		t.Fatalf("interspersed --config was not honored: %v %v", loaded, err)
 	}
-	if _, _, err := extractConfig([]string{"--config"}); err == nil {
+	t.Setenv("T3FLEET_CONFIG", "/tmp/from-env.json")
+	capture.configPath = ""
+	if err := capture.execute(t.Context(), []string{"list"}); err == nil || loaded[len(loaded)-1] != "/tmp/from-env.json" {
+		t.Fatalf("T3FLEET_CONFIG was not honored: %v", loaded)
+	}
+	if err := run(t.Context(), []string{"--config"}, io.Discard, io.Discard); err == nil {
 		t.Fatal("missing config value accepted")
 	}
 	var out bytes.Buffer
@@ -320,7 +330,7 @@ func TestServeLifecycleAndPrivateState(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.Listen = listener.Addr().String()
-	listener.Close()
+	_ = listener.Close()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	ready := &readyWriter{ready: make(chan struct{})}
@@ -362,7 +372,7 @@ func TestServeLifecycleAndPrivateState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("serve retained state ownership: %v", err)
 	}
-	reopened.Close()
+	_ = reopened.Close()
 }
 
 func TestCLIInvalidCommandsDoNotMutate(t *testing.T) {
@@ -414,7 +424,7 @@ func TestClientRejectsRedirectsAndMalformedResponses(t *testing.T) {
 	if err == nil || forwarded {
 		t.Fatal("daemon redirect forwarded credentials")
 	}
-	invalid := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, strings.Repeat("x", (1<<20)+1)) }))
+	invalid := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, strings.Repeat("x", (1<<20)+1)) }))
 	defer invalid.Close()
 	if _, err := callAdmin(t.Context(), strings.TrimPrefix(invalid.URL, "http://"), "token", "GET", "/v1/machines", nil); err == nil {
 		t.Fatal("oversized response accepted")
