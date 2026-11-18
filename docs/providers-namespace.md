@@ -71,9 +71,12 @@ Namespace instance is available; the caller must separately check T3's
 `/.well-known/t3/environment` descriptor and protocol/version compatibility.
 
 Namespace has no idempotency-key field on these creation requests. t3fleet
-therefore uses a stable machine name and records `t3fleet.io/operation-id` as
+therefore uses a stable machine name and records `t3fleet-operation-id` as
 a label. A repeated creation reconciles that name and only adopts a Devbox
 with the same operation label. A name owned by another operation fails.
+Namespace label names must match `^[a-z]([a-z0-9-.]*[a-z0-9])?$` and fit in
+63 bytes. Values fit in 255 bytes. Kubernetes-style names containing `/` are
+not valid; the adapter checks these limits before contacting the API.
 Creation requests are never blindly retried. If a request's response is lost,
 retry with the same name and operation ID to reconcile the result. A
 concurrent collision can still return an API error; this does not justify

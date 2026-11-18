@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -316,5 +317,49 @@ func TestShellCommandQuotesData(t *testing.T) {
 	}
 	if _, err = shellCommand(provider.ExecRequest{Args: []string{"true"}, Env: map[string]string{"KEY;touch bad": "v"}}); err == nil {
 		t.Fatal("accepted invalid environment key")
+	}
+}
+
+// Namespace's stdlib.Label contract excludes slash-separated Kubernetes-style
+// names. Keep this independent of the adapter's validation implementation.
+func TestCreateLabelsFollowNamespaceSchema(t *testing.T) {
+	pattern := regexp.MustCompile(`^[a-z]([a-z0-9-.]*[a-z0-9])?$`)
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/Fetch") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		input := body(t, r)
+		for _, entry := range input["labels"].([]any) {
+			item := entry.(map[string]any)
+			name := item["name"].(string)
+			if len(name) > 63 || !pattern.MatchString(name) {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		reply(t, w, map[string]any{"devbox": map[string]any{"id": "dbx-contract", "name": input["name"], "labels": input["labels"]}, "instanceId": "instance-contract"})
+	}, nil)
+	_, err := client.Create(t.Context(), provider.CreateRequest{Name: "canary", OperationID: "pending-operation", Template: provider.Template{Source: "golden", Snapshot: "ready-snapshot"}, Labels: map[string]string{"t3fleet-id": "pending-operation"}})
+	if err != nil {
+		t.Fatalf("provider rejected operation labels: %v", err)
+	}
+}
+
+func TestInvalidLabelsDoNotReachControlPlane(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) { t.Error("invalid label reached control plane") }, nil)
+	cases := []map[string]string{
+		{"kubernetes.io/name": "value"},
+		{"Uppercase": "value"},
+		{"_underscore": "value"},
+		{strings.Repeat("a", 64): "value"},
+		{"name": strings.Repeat("a", 256)},
+		{operationLabel: "spoofed-operation"},
+	}
+	for _, labels := range cases {
+		_, err := client.Create(t.Context(), provider.CreateRequest{Name: "test", OperationID: "operation", Template: provider.Template{Image: "image"}, Labels: labels})
+		if err == nil {
+			t.Fatalf("accepted invalid labels: %v", labels)
+		}
 	}
 }

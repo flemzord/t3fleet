@@ -23,7 +23,7 @@ import (
 )
 
 const defaultEndpoint = "https://private-api.iad.namespaceapis.com"
-const operationLabel = "t3fleet.io/operation-id"
+const operationLabel = "t3fleet-operation-id"
 const servicePath = "/namespace.private.devbox.v1beta.DevBoxService/"
 
 // Config separates the control-plane endpoint from the machine's placement.
@@ -176,10 +176,21 @@ func (c *Client) Get(ctx context.Context, id string) (provider.Machine, error) {
 }
 
 var validName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$`)
+var validLabelName = regexp.MustCompile(`^[a-z]([a-z0-9-.]*[a-z0-9])?$`)
 
 func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provider.Machine, error) {
-	if !validName.MatchString(req.Name) || req.OperationID == "" {
+	if !validName.MatchString(req.Name) || req.OperationID == "" || len(req.OperationID) > 255 {
 		return provider.Machine{}, errors.New("namespace: a valid stable name and operation ID are required")
+	}
+	// Namespace labels are not Kubernetes labels: their names exclude '/'.
+	// Reject malformed user labels before contacting the control plane.
+	for name, value := range req.Labels {
+		if name == operationLabel {
+			return provider.Machine{}, errors.New("namespace: reserved operation label")
+		}
+		if len(name) > 63 || !validLabelName.MatchString(name) || len(value) > 255 {
+			return provider.Machine{}, errors.New("namespace: label name or value violates Namespace limits")
+		}
 	}
 	t := req.Template
 	if t.Snapshot != "" && t.Source == "" {
@@ -207,9 +218,6 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 	}
 	labels := make([]label, 0, len(req.Labels)+1)
 	for name, value := range req.Labels {
-		if name == operationLabel {
-			return provider.Machine{}, errors.New("namespace: reserved operation label")
-		}
 		labels = append(labels, label{name, value})
 	}
 	labels = append(labels, label{operationLabel, req.OperationID})
