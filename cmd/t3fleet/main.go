@@ -35,7 +35,7 @@ Commands:
   delete [ID]                 Delete one machine, or interactively select several
   snapshot ID --name NAME     Capture a provider-supported snapshot
   pair ID                     Print the T3 Code pairing deep link
-  pair-dispatch               Print the experimental dispatch pairing deep link
+  pair-dispatch               Print the dispatch pairing deep link or a code (--peer-access LEVEL)
   version                     Print the CLI version
 
 Bulk create: --count 10 --concurrency 3; names become t3fleet-NAME-01 through t3fleet-NAME-10.

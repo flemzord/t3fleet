@@ -51,13 +51,22 @@ func runClient(ctx context.Context, cfg config.Config, command string, args []st
 	method, path := http.MethodGet, "/v1/machines"
 	var body any
 	pairing := false
+	peerPairing := false
 	register := false
 	switch command {
 	case "pair-dispatch":
-		if len(args) != 0 {
-			return errors.New("pair-dispatch takes no arguments")
+		fs := flag.NewFlagSet("pair-dispatch", flag.ContinueOnError)
+		fs.SetOutput(diagnostics)
+		peerAccess := fs.String("peer-access", "", "issue a Linked Environments code at this access level")
+		if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
+			return errors.New("usage: pair-dispatch [--peer-access LEVEL]")
 		}
-		method, path, pairing = http.MethodPost, "/v1/dispatch-poc/pair", true
+		if *peerAccess == "" {
+			method, path, pairing = http.MethodPost, "/v1/dispatch-poc/pair", true
+		} else {
+			method, path, peerPairing = http.MethodPost, "/v1/dispatch-poc/pair-peer", true
+			body = map[string]string{"access": *peerAccess}
+		}
 	case "list":
 		if len(args) != 0 {
 			return errors.New("list takes no arguments")
@@ -153,6 +162,14 @@ func runClient(ctx context.Context, cfg config.Config, command string, args []st
 		}
 		fmt.Fprintln(out, link)
 		return nil
+	}
+	if peerPairing {
+		var reply struct{ Credential string }
+		if json.Unmarshal(data, &reply) != nil || reply.Credential == "" {
+			return errors.New("invalid peer pairing response")
+		}
+		_, err := fmt.Fprintln(out, reply.Credential)
+		return err
 	}
 	if len(data) == 0 {
 		fmt.Fprintln(out, "ok")

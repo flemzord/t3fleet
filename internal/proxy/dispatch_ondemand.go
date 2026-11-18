@@ -40,11 +40,13 @@ type demandRoute struct {
 	Key       string
 	ProjectID string
 	Ready     bool
+	Peer      *peerRoute `json:",omitempty"`
 }
 
 type onDemandDisk struct {
-	Project *demandProject
-	Routes  map[string]demandRoute
+	Project     *demandProject
+	Routes      map[string]demandRoute
+	PeerThreads map[string]string `json:",omitempty"`
 }
 
 func NewDispatchOnDemand(origin string, store *state.Store, opts DispatchOnDemand) (*Proxy, error) {
@@ -353,7 +355,7 @@ func (d *dispatchPOC) callOnDemand(ctx context.Context, tag string, frame, paylo
 		}
 		<-ctx.Done()
 		return ctx.Err()
-	case "server.getConfig", "server.probe", "subscribeServerConfig", "subscribeProjectClones":
+	case "server.getConfig", "server.probe", "subscribeServerConfig", "subscribeProjectClones", "subscribeAuthAccess":
 		return d.rpc(ctx, 0, frame, acks, send)
 	case "server.refreshProviders":
 		return send(rpcSuccess(id, map[string]any{"providers": d.demandProviders()}))

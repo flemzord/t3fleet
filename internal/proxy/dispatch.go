@@ -36,18 +36,20 @@ type dispatchState struct {
 	Workers       []string
 	Threads       map[string]int
 	Clients       map[string]time.Time
-	OnDemand      *onDemandDisk `json:",omitempty"`
+	OnDemand      *onDemandDisk        `json:",omitempty"`
+	PeerGrants    map[string]peerGrant `json:",omitempty"`
 }
 
 type dispatchPOC struct {
-	mu        sync.Mutex
-	store     *state.Store
-	disk      dispatchState
-	workers   []DispatchWorker
-	timeout   time.Duration
-	sequence  atomic.Uint64
-	onDemand  *DispatchOnDemand
-	preparing map[string]chan struct{}
+	mu           sync.Mutex
+	store        *state.Store
+	disk         dispatchState
+	workers      []DispatchWorker
+	timeout      time.Duration
+	sequence     atomic.Uint64
+	onDemand     *DispatchOnDemand
+	preparing    map[string]chan struct{}
+	peerLaunches sync.Map
 }
 
 const dispatchLabel = "t3fleet"
@@ -112,7 +114,7 @@ func (d *dispatchPOC) proxy(origin string) (*Proxy, error) {
 				v["environmentId"] = environmentID
 				if capabilities, ok := v["capabilities"].(map[string]any); ok {
 					capabilities = maps.Clone(capabilities)
-					dispatchCapabilities(capabilities)
+					d.dispatchCapabilities(capabilities)
 					v["capabilities"] = capabilities
 				}
 			}
@@ -126,9 +128,14 @@ func (d *dispatchPOC) proxy(origin string) (*Proxy, error) {
 	return p, nil
 }
 
-func dispatchCapabilities(v map[string]any) {
+func (d *dispatchPOC) dispatchCapabilities(v map[string]any) {
 	for _, key := range []string{"shellThreadFamilies", "shellOlderSettled", "linkedThreadRefreshes"} {
 		if _, ok := v[key]; ok {
+			v[key] = false
+		}
+	}
+	if d.onDemand == nil {
+		for _, key := range []string{"peerLinks", "peerLinkPairingCodes", "linkFence"} {
 			v[key] = false
 		}
 	}
@@ -642,7 +649,7 @@ func (d *dispatchPOC) sanitizeConfig(tag any, reply map[string]any) {
 			d.mu.Unlock()
 			descriptor["label"] = dispatchLabel
 			if caps, ok := descriptor["capabilities"].(map[string]any); ok {
-				dispatchCapabilities(caps)
+				d.dispatchCapabilities(caps)
 			}
 		}
 	}

@@ -42,11 +42,16 @@ func startDispatchController(ctx context.Context, cfg config.Config, diagnostics
 	}
 	home := filepath.Join(root, "home")
 	base := filepath.Join(root, "runtime")
-	for _, path := range []string{home, base, filepath.Join(home, "tmp")} {
+	userdata := filepath.Join(base, "userdata")
+	for _, path := range []string{home, base, userdata, filepath.Join(home, "tmp")} {
 		if err := privateControllerDirectory(path); err != nil {
 			_ = lock.Close()
 			return proxy.DispatchWorker{}, nil, err
 		}
+	}
+	if err := enableControllerPeerLinks(userdata); err != nil {
+		_ = lock.Close()
+		return proxy.DispatchWorker{}, nil, err
 	}
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -184,6 +189,45 @@ func privateControllerDirectory(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
 		return errors.New("unsafe local dispatch controller directory")
+	}
+	return nil
+}
+
+// T3 loads this settings file at startup. The controller belongs to t3fleet;
+// only its Linked Environments setting is managed here.
+func enableControllerPeerLinks(userdata string) error {
+	const maxSettings = 4 << 20
+	path := filepath.Join(userdata, "settings.json")
+	settings := make(map[string]json.RawMessage)
+	if info, err := os.Lstat(path); err == nil {
+		if !info.Mode().IsRegular() || info.Size() > maxSettings {
+			return errors.New("invalid local T3 dispatch controller settings file")
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || len(data) > maxSettings || json.Unmarshal(data, &settings) != nil || settings == nil {
+			return errors.New("could not read local T3 dispatch controller settings")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return errors.New("could not find local T3 dispatch controller settings")
+	}
+	if string(settings["linkedEnvironmentsEnabled"]) == "true" {
+		return nil
+	}
+	settings["linkedEnvironmentsEnabled"] = json.RawMessage("true")
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return errors.New("could not encode local T3 dispatch controller settings")
+	}
+	file, err := os.CreateTemp(userdata, ".settings-*")
+	if err != nil {
+		return errors.New("could not write local T3 dispatch controller settings")
+	}
+	defer os.Remove(file.Name())
+	_, writeErr := file.Write(append(data, '\n'))
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if writeErr != nil || syncErr != nil || closeErr != nil || os.Rename(file.Name(), path) != nil {
+		return errors.New("could not save local T3 dispatch controller settings")
 	}
 	return nil
 }

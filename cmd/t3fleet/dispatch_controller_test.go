@@ -11,6 +11,25 @@ import (
 	"github.com/flemzord/t3fleet/internal/config"
 )
 
+func TestEnableControllerPeerLinksKeepsOtherSettings(t *testing.T) {
+	userdata := t.TempDir()
+	path := filepath.Join(userdata, "settings.json")
+	if err := os.WriteFile(path, []byte(`{"linkedEnvironmentsEnabled":false,"newWorktreesStartFromOrigin":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := enableControllerPeerLinks(userdata); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]bool
+	if json.Unmarshal(data, &settings) != nil || len(settings) != 2 || !settings["linkedEnvironmentsEnabled"] || settings["newWorktreesStartFromOrigin"] {
+		t.Fatal("controller Labs update did not preserve other settings")
+	}
+}
+
 func TestLiveDispatchController(t *testing.T) {
 	binary := os.Getenv("T3FLEET_T3_BINARY")
 	if binary == "" {

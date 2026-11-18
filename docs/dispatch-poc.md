@@ -72,6 +72,45 @@ canary completes both first turns and the follow-up with a deterministic ACP
 replay agent, and checks recovery of an interrupted reservation without a new
 allocation.
 
+### Launch from another T3 environment
+
+On-demand dispatch also accepts T3 **Linked Environments** on the pinned
+nightly. Enable **Settings → Labs → Linked Environments** on the source T3
+server. After pairing the Desktop with `t3fleet`, register the repository as
+above. Run `t3fleet pair-dispatch --peer-access approval-required --config PATH`
+to print a one-use code. From the source environment, open **Linked
+Environments → Link** and use that code to link to the dispatch listener.
+When both servers run on the same host, enter the
+dispatch loopback address manually (for example `http://127.0.0.1:47733`);
+the machine picker omits loopback routes. An address on another machine must
+be reachable from the source T3 server. t3fleet itself binds only to loopback.
+
+From a source thread, call `t3_project_list` on the linked environment for the
+project ID. Use `t3_thread_launch` with that project ID and a first text
+message in a root checkout or a new worktree. Two launches with different
+request IDs reserve two different Boat workers. Retry a launch with the same
+`clientRequestId` to recover its original worker and thread. The selected
+Codex model and repository credentials must be available on each worker.
+
+The source can read, wait for, message, interrupt or organize its linked
+threads. The controller validates native T3 grants, including expiry and
+revocation. Use **Sharing & access** on `t3fleet` to revoke a link. Each worker
+applies the link and caller mode limits and keeps
+the native thread fence. Other links and Desktop-created threads are outside
+that scope. Scratch launches, attachments, fleet-wide operations, and links
+to the fixed worker pool are unsupported. Re-linking creates a new grant;
+existing threads stay in the Desktop history under their original grant.
+
+The linked dispatch canary runs a genuine T3 source, controller and two
+workers locally using the ACP replay agent. It checks worker separation,
+follow-up, retry after proxy restart, and access isolation without Boat costs:
+
+```sh
+T3FLEET_T3_BINARY=/absolute/path/to/t3 \
+T3FLEET_T3_SOURCE=/absolute/path/to/pinned/t3code \
+  nix develop --command go test -race -v -run '^TestLiveLinkedDispatch$' ./internal/proxy
+```
+
 ```sh
 T3FLEET_T3_BINARY=/absolute/path/to/t3 \
 T3FLEET_T3_SOURCE=/absolute/path/to/pinned/t3code \

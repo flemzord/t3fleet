@@ -142,6 +142,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+	if p.dispatch != nil && p.dispatch.onDemand != nil {
+		if p.dispatch.servePeerOAuth(p, w, r) {
+			return
+		}
+		if r.URL.Path == "/mcp" {
+			p.dispatch.servePeerMCP(w, r)
+			return
+		}
+	}
 	switch {
 	case r.URL.Path == "/.well-known/t3/environment" && r.Method == http.MethodGet:
 		p.descriptor(w, r)

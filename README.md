@@ -57,6 +57,7 @@ Run `./t3fleet --help` for commands. Use `list` to find managed machine IDs and 
 - [Batch creation and recovery](https://github.com/flemzord/t3fleet/blob/main/docs/bulk-lifecycle.md)
 - [Optional idle stop and automatic wake](https://github.com/flemzord/t3fleet/blob/main/docs/idle-lifecycle.md)
 - [Experimental dispatch: fixed pools and on-demand Boat workers](https://github.com/flemzord/t3fleet/blob/main/docs/dispatch-poc.md)
+- [Launch on-demand threads from another T3 server with Linked Environments](https://github.com/flemzord/t3fleet/blob/main/docs/dispatch-poc.md#launch-from-another-t3-environment)
 - [Architecture](https://github.com/flemzord/t3fleet/blob/main/docs/architecture.md) and [adding a provider](https://github.com/flemzord/t3fleet/blob/main/docs/adding-a-provider.md)
 - [Contributing](https://github.com/flemzord/t3fleet/blob/main/CONTRIBUTING.md) and [reporting a security issue](https://github.com/flemzord/t3fleet/security/policy)
 

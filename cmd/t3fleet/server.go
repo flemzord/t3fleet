@@ -184,6 +184,28 @@ func newAdminHandlerWithDispatch(manager fleetAPI, token string, dispatch *proxy
 			}
 			return
 		}
+		if r.URL.Path == "/v1/dispatch-poc/pair-peer" {
+			w.Header().Set("Cache-Control", "no-store")
+			if dispatch == nil {
+				safeError(w, http.StatusNotFound, "not_found")
+			} else if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+			} else {
+				var request struct {
+					Access string `json:"access"`
+				}
+				if !decodeRequest(w, r, &request) {
+					return
+				}
+				code, err := dispatch.NewPeerPairing(ctx, request.Access)
+				if err != nil {
+					safeError(w, http.StatusBadRequest, err.Error())
+				} else {
+					writeJSON(w, http.StatusOK, map[string]string{"credential": code})
+				}
+			}
+			return
+		}
 
 		if r.URL.Path == "/v1/batches" || strings.HasPrefix(r.URL.Path, "/v1/batches/") {
 			var batch fleet.Batch
