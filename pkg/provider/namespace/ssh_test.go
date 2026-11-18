@@ -9,8 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/flemzord/t3fleet/pkg/provider"
 	"golang.org/x/crypto/ssh"
+
+	"github.com/flemzord/t3fleet/pkg/provider"
 )
 
 // An SSH server can accept the transport yet never answer channel-open. The
@@ -28,7 +29,7 @@ func TestExecCancellationDuringSessionOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	serverDone := make(chan struct{})
 	go func() {
 		defer close(serverDone)
@@ -36,14 +37,14 @@ func TestExecCancellationDuringSessionOpen(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		config := &ssh.ServerConfig{NoClientAuth: true}
 		config.AddHostKey(signer)
 		server, channels, requests, err := ssh.NewServerConn(conn, config)
 		if err != nil {
 			return
 		}
-		defer server.Close()
+		defer func() { _ = server.Close() }()
 		go ssh.DiscardRequests(requests)
 		for range channels { /* deliberately don't accept/reject channel-open */
 		}
@@ -53,7 +54,7 @@ func TestExecCancellationDuringSessionOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	connection := &sshConnection{client: client}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
 	defer cancel()
 	result := make(chan error, 1)

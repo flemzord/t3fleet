@@ -116,7 +116,7 @@ func (d *dispatchPOC) controllerMCPRequest(r *http.Request, body []byte) (*http.
 		cleanup()
 		return nil, nil, err
 	}
-	return res, func() { res.Body.Close(); cleanup() }, nil
+	return res, func() { _ = res.Body.Close(); cleanup() }, nil
 }
 
 func (d *dispatchPOC) diskOrigin() string {
@@ -217,7 +217,7 @@ func (d *dispatchPOC) servePeerMCP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer closeRes()
-		if res.StatusCode != 200 {
+		if res.StatusCode != http.StatusOK {
 			relayPeerMCPResponse(w, res)
 			return
 		}

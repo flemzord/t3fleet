@@ -69,7 +69,7 @@ func New(cfg Config) (*Client, error) {
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, errors.New("boat: invalid API base URL")
 	}
-	if u.Scheme != "https" && !(u.Scheme == "http" && slices.Contains([]string{"localhost", "127.0.0.1", "::1"}, u.Hostname())) {
+	if u.Scheme != "https" && (u.Scheme != "http" || !slices.Contains([]string{"localhost", "127.0.0.1", "::1"}, u.Hostname())) {
 		return nil, errors.New("boat: API base URL requires HTTPS")
 	}
 	if cfg.APIKey == "" || strings.ContainsAny(cfg.APIKey+cfg.Organization+cfg.Environment, "\r\n\x00") {
@@ -149,7 +149,7 @@ func (c *Client) request(ctx context.Context, method, path string, body any, hea
 		}
 		return errors.New("boat: API transport failed")
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	data, err = io.ReadAll(io.LimitReader(res.Body, 8*1024*1024+1))
 	if err != nil || len(data) > 8*1024*1024 {
 		return errors.New("boat: invalid API response")
@@ -415,18 +415,20 @@ func (e *ExecError) Error() string {
 	if e.reason != "" {
 		message += " (" + e.reason + ")"
 	}
-	if apiErr, ok := errors.AsType[*APIError](e.cause); ok {
+	apiErr, isAPIError := errors.AsType[*APIError](e.cause)
+	switch {
+	case isAPIError:
 		message += fmt.Sprintf(" HTTP %d", apiErr.Status)
 		// Only documented, useful transport/lifecycle codes are diagnostic data.
 		// Arbitrary vendor strings must not become an output channel for secrets.
 		if slices.Contains([]string{"sandbox_restoring", "machine_not_running", "sandbox_starting", "sandbox_not_ready", "sandbox_direct_failed", "boat_starting", "boat_direct_failed", "rate_limited", "unauthorized", "permission_denied"}, apiErr.Code) {
 			message += " " + apiErr.Code
 		}
-	} else if errors.Is(e.cause, context.Canceled) {
+	case errors.Is(e.cause, context.Canceled):
 		message += " context_canceled"
-	} else if errors.Is(e.cause, context.DeadlineExceeded) {
+	case errors.Is(e.cause, context.DeadlineExceeded):
 		message += " deadline_exceeded"
-	} else if errors.Is(e.cause, provider.ErrNotFound) {
+	case errors.Is(e.cause, provider.ErrNotFound):
 		message += " not_found"
 	}
 	return message
@@ -650,7 +652,7 @@ func (c *Client) bootstrapPrivateAccess(ctx context.Context, endpoint *url.URL) 
 			return provider.Endpoint{}, errors.New("boat: private endpoint access failed")
 		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
-		res.Body.Close()
+		_ = res.Body.Close()
 		if slices.Contains([]int{301, 302, 303, 307, 308}, res.StatusCode) {
 			if redirects >= 5 {
 				return provider.Endpoint{}, errors.New("boat: private endpoint access redirected too often")

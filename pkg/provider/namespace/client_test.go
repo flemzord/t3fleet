@@ -86,7 +86,7 @@ func TestCreateAndReconcileOperation(t *testing.T) {
 			reply(t, w, map[string]any{"devbox": stored, "instanceId": "instance-1"})
 		default:
 			t.Errorf("unexpected method %s", r.URL.Path)
-			w.WriteHeader(500)
+			w.WriteHeader(http.StatusInternalServerError)
 		}
 	}, nil)
 	req := provider.CreateRequest{Name: "fleet-test", OperationID: "op-1", Size: "m", Template: provider.Template{Image: "registry.example/t3@sha256:abc"}}
@@ -122,7 +122,7 @@ func TestSnapshotForkAndLifecycle(t *testing.T) {
 		switch method {
 		case "Fetch":
 			if len(methods) == 1 {
-				w.WriteHeader(404)
+				w.WriteHeader(http.StatusNotFound)
 				return
 			}
 			if deleted {
@@ -161,7 +161,7 @@ func TestSnapshotForkAndLifecycle(t *testing.T) {
 			reply(t, w, map[string]any{"snapshots": []map[string]any{{"id": "ready", "completedSnapshot": "complete"}, {"id": "pending"}, {"id": "abandoned", "completedSnapshot": "complete", "abandonedAt": "2026-01-01T00:00:00Z"}}})
 		default:
 			t.Errorf("unknown method %s", method)
-			w.WriteHeader(500)
+			w.WriteHeader(http.StatusInternalServerError)
 		}
 	}, nil)
 	machine, err := client.Create(t.Context(), provider.CreateRequest{Name: "fork", OperationID: "op", Template: provider.Template{Source: "golden", Snapshot: "snapshot-ready"}})
@@ -274,7 +274,7 @@ func TestControlPlaneCancellationAndRedaction(t *testing.T) {
 		t.Fatalf("wanted cancellation: %v", err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(403)
+		w.WriteHeader(http.StatusForbidden)
 		_, _ = io.WriteString(w, "secret-body")
 	}))
 	defer server.Close()

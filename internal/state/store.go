@@ -99,7 +99,7 @@ func (s *Store) Load(dst any) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	b, err := io.ReadAll(io.LimitReader(f, MaxBytes+1))
 	if err != nil {
 		return err
@@ -134,7 +134,7 @@ func (s *Store) Save(value any) error {
 		return err
 	}
 	temporary := f.Name()
-	defer os.Remove(temporary)
+	defer func() { _ = os.Remove(temporary) }()
 	if _, err = f.Write(append(b, '\n')); err == nil {
 		err = f.Sync()
 	}
@@ -158,7 +158,7 @@ func (s *Store) Save(value any) error {
 	if err != nil {
 		return err
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 	return dir.Sync()
 }
 

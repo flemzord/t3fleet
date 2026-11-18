@@ -45,7 +45,7 @@ func TestSaveLoadReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if err := s.Load(&got); err != nil || got != want {
 		t.Fatalf("reopened load = %#v, %v", got, err)
 	}

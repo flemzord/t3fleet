@@ -1,0 +1,52 @@
+version: "2"
+
+run:
+  tests: true
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  # bodyclose is not enabled: coder/websocket.Dial closes the handshake body
+  # itself, and HTTP callers here close bodies through closures it cannot follow.
+  enable:
+    - errorlint
+    - gocritic
+    - misspell
+    - nilerr
+    - nolintlint
+    - unconvert
+    - usestdlibvars
+  settings:
+    errcheck:
+      # Terminal and diagnostic writes have no useful recovery path.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (*text/tabwriter.Writer).Flush
+        # Abrupt teardown of a socket that is already being abandoned.
+        - (*github.com/coder/websocket.Conn).CloseNow
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+        - shadow
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+  exclusions:
+    rules:
+      # Receiving from a chan error only to wait for a goroutine is a
+      # synchronisation point, not an ignored call result. Writing "_ = <-ch"
+      # would instead trip staticcheck S1005.
+      - linters: [errcheck]
+        source: '^\s*(case )?<-\w+:?\s*$'
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/flemzord/t3fleet

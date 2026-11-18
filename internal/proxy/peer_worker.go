@@ -172,7 +172,7 @@ func workerPeerJSON(ctx context.Context, client *http.Client, up Upstream, token
 	if err != nil {
 		return errors.New("worker OAuth request failed")
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		return fmt.Errorf("worker replied with status %d", res.StatusCode)
 	}
@@ -221,7 +221,7 @@ func (d *dispatchPOC) callWorkerPeer(parent context.Context, worker DispatchWork
 		if err != nil {
 			return nil, "", errors.New("worker MCP request failed")
 		}
-		defer res.Body.Close()
+		defer func() { _ = res.Body.Close() }()
 		if res.StatusCode < 200 || res.StatusCode >= 300 {
 			return nil, "", fmt.Errorf("worker MCP replied with status %d", res.StatusCode)
 		}

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
 	"github.com/flemzord/t3fleet/pkg/provider"
 )
 
@@ -175,7 +176,7 @@ func TestLiveT3Compatibility(t *testing.T) {
 	if err != nil {
 		t.Fatal("live pairing exchange request failed")
 	}
-	defer pairResponse.Body.Close()
+	defer func() { _ = pairResponse.Body.Close() }()
 	if pairResponse.StatusCode != http.StatusOK {
 		t.Fatalf("live pairing exchange status=%d", pairResponse.StatusCode)
 	}
@@ -251,7 +252,7 @@ func TestLiveT3Compatibility(t *testing.T) {
 	if err != nil {
 		t.Fatal("genuine T3 orchestration shell request failed")
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	body, err = io.ReadAll(io.LimitReader(response.Body, 4<<20))
 	if err != nil {
 		t.Fatal("could not read genuine T3 orchestration shell")

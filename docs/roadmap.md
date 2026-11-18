@@ -16,7 +16,7 @@ This is the first implementation of a native Go fleet daemon. A checked box in a
 - Automatic readiness/start resolution when live proxy traffic needs a stopped machine.
 - Optional configurable idle stop with authenticated agent checks and background RPC wake suppression.
 - Private atomic state, an exclusive ownership lock, strict configuration, and a local authenticated control API.
-- Offline tests with the race detector, formatting checks, and `go vet`.
+- Offline tests with the race detector and golangci-lint checks.
 
 The [provider guides](providers-boat.md) and [protocol guide](protocol.md) define the supported contracts. Manual creation requires a template with the runtime hook installed. On-demand Namespace workers can install the pinned runtime on first use if the image includes Nix.
 

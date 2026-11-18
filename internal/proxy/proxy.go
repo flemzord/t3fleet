@@ -401,7 +401,7 @@ func (p *Proxy) requestJSON(r *http.Request, path string) (map[string]any, error
 	if err != nil {
 		return nil, err
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusOK {
 		return nil, errors.New("upstream unavailable")
 	}

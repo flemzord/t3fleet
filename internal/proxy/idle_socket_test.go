@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
 	"github.com/flemzord/t3fleet/pkg/provider"
 )
 
@@ -131,7 +132,9 @@ func TestIdleRPCClassificationIsConservative(t *testing.T) {
 		{"future.subscribeAndRunAgent", `{}`, false},
 	} {
 		var payload map[string]any
-		json.Unmarshal([]byte(tc.payload), &payload)
+		if err := json.Unmarshal([]byte(tc.payload), &payload); err != nil {
+			t.Fatal(err)
+		}
 		if got := passiveRPC(map[string]any{"tag": tc.tag, "payload": payload}); got != tc.passive {
 			t.Fatal(tc.tag, tc.payload, got)
 		}
@@ -289,7 +292,7 @@ func TestSleepingRPCBufferIsBoundedAndRequiresAuth(t *testing.T) {
 	if ws, res, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(s.URL, "http")+"/ws", nil); err == nil {
 		ws.CloseNow()
 		t.Fatal("unauthorized socket accepted")
-	} else if res == nil || res.StatusCode != 401 {
+	} else if res == nil || res.StatusCode != http.StatusUnauthorized {
 		t.Fatal("unexpected unauthorized response", res, err)
 	}
 	ws, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(s.URL, "http")+"/ws", &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": {"Bearer client"}}})

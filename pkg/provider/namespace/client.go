@@ -17,9 +17,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/flemzord/t3fleet/pkg/provider"
 	"namespacelabs.dev/integrations/api"
 	"namespacelabs.dev/integrations/auth"
+
+	"github.com/flemzord/t3fleet/pkg/provider"
 )
 
 const defaultEndpoint = "https://private-api.iad.namespaceapis.com"
@@ -49,7 +50,8 @@ func New(config Config) (*Client, error) {
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return nil, errors.New("namespace: invalid API endpoint")
 	}
-	if u.Scheme != "https" && !(u.Scheme == "http" && (u.Hostname() == "127.0.0.1" || u.Hostname() == "localhost" || u.Hostname() == "::1")) {
+	loopback := u.Hostname() == "127.0.0.1" || u.Hostname() == "localhost" || u.Hostname() == "::1"
+	if u.Scheme != "https" && (u.Scheme != "http" || !loopback) {
 		return nil, errors.New("namespace: API endpoint requires HTTPS")
 	}
 	config.Endpoint = strings.TrimRight(config.Endpoint, "/")
@@ -147,7 +149,7 @@ func (c *Client) call(ctx context.Context, method string, input, output any) err
 	if err != nil {
 		return fmt.Errorf("namespace %s: %w", method, err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode == http.StatusNotFound {
 		return provider.ErrNotFound
 	}
@@ -251,13 +253,15 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 		input["site"] = c.config.Site
 		input["activate"] = true
 		input["versionControl"] = map[string]any{}
-		if name, ok := strings.CutPrefix(t.Image, "registered:"); ok {
+		name, registered := strings.CutPrefix(t.Image, "registered:")
+		switch {
+		case registered:
 			input["imageName"] = name
-		} else if strings.HasPrefix(t.Image, "builtin:") {
+		case strings.HasPrefix(t.Image, "builtin:"):
 			input["imageName"] = t.Image
-		} else if strings.ContainsAny(t.Image, "/@:") {
+		case strings.ContainsAny(t.Image, "/@:"):
 			input["imageRef"] = t.Image
-		} else {
+		default:
 			input["imageName"] = t.Image
 		}
 	}
@@ -410,7 +414,7 @@ func (c *Client) Exec(ctx context.Context, id string, req provider.ExecRequest) 
 	if err != nil {
 		return provider.ExecResult{}, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	return conn.Exec(ctx, req)
 }
 func (c *Client) Connect(ctx context.Context, id string, port int) (provider.Endpoint, error) {

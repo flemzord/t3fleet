@@ -275,7 +275,7 @@ func request(t *testing.T, target, token string) (int, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	b, err := io.ReadAll(res.Body)
 	if err != nil {
 		t.Fatal(err)
@@ -301,7 +301,7 @@ func pair(t *testing.T, f *fixture, machine fleet.Machine) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	var data struct {
 		AccessToken string `json:"access_token"`
 	}

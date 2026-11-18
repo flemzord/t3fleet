@@ -105,7 +105,7 @@ func (m *Manager) agentActivity(ctx context.Context, h *machineHandle) (bool, er
 	if err != nil {
 		return false, errUnknownActivity
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		return false, errUnknownActivity
 	}

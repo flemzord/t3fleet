@@ -94,7 +94,7 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 		}
 		p, err := NewDispatchOnDemand("http://127.0.0.1:38881", disk, opts)
 		if err != nil {
-			disk.Close()
+			_ = disk.Close()
 			t.Fatal(err)
 		}
 		return p, func() { _ = disk.Close() }
@@ -295,7 +295,7 @@ func TestOnDemandDispatchHonorsConfiguredCapacity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	const limit, projectID = 100, "project"
 	reachedProvisioner := errors.New("provisioner reached")
 	p, err := NewDispatchOnDemand("http://127.0.0.1:38881", store, DispatchOnDemand{

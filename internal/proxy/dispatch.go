@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
 	"github.com/flemzord/t3fleet/internal/state"
 )
 
@@ -220,7 +221,7 @@ func (d *dispatchPOC) getFrom(ctx context.Context, worker DispatchWorker, path s
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, errors.New("dispatch worker rejected HTTP request")
 	}

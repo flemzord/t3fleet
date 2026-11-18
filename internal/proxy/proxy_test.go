@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
 	"github.com/flemzord/t3fleet/pkg/provider"
 )
 
@@ -42,7 +43,7 @@ func sourceServer(t *testing.T, extra http.HandlerFunc) *httptest.Server {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer service-secret" {
 			t.Errorf("upstream auth = %q", r.Header.Get("Authorization"))
-			w.WriteHeader(401)
+			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
 		switch r.URL.Path {
@@ -54,7 +55,7 @@ func sourceServer(t *testing.T, extra http.HandlerFunc) *httptest.Server {
 			if extra != nil {
 				extra(w, r)
 			} else {
-				w.WriteHeader(204)
+				w.WriteHeader(http.StatusNoContent)
 			}
 		}
 	}))
@@ -79,8 +80,8 @@ func exchange(t *testing.T, p *Proxy, s *httptest.Server) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
-	if res.StatusCode != 200 {
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(res.Body)
 		t.Fatalf("pair status %d: %s", res.StatusCode, b)
 	}
@@ -107,7 +108,7 @@ func request(t *testing.T, method, target, token string) (*http.Response, []byte
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +118,7 @@ func request(t *testing.T, method, target, token string) (*http.Response, []byte
 func ticketValue(t *testing.T, s *httptest.Server, token, use string) string {
 	t.Helper()
 	res, b := request(t, "POST", s.URL+"/api/auth/websocket-ticket/"+use, token)
-	if res.StatusCode != 200 {
+	if res.StatusCode != http.StatusOK {
 		t.Fatalf("ticket %d: %s", res.StatusCode, b)
 	}
 	var data map[string]string
@@ -149,7 +150,7 @@ func TestDescriptorPairingAndAuthenticatedHTTP(t *testing.T) {
 		}
 	})
 	res, b := request(t, "GET", s.URL+"/.well-known/t3/environment", "")
-	if res.StatusCode != 200 {
+	if res.StatusCode != http.StatusOK {
 		t.Fatalf("descriptor: %d %s", res.StatusCode, b)
 	}
 	var descriptor map[string]any
@@ -161,7 +162,7 @@ func TestDescriptorPairingAndAuthenticatedHTTP(t *testing.T) {
 		t.Fatal("bypass endpoint remained")
 	}
 	token := exchange(t, p, s)
-	req, _ := http.NewRequestWithContext(t.Context(), "POST", s.URL+"/api/file?key=value&_token=attacker", strings.NewReader("payload"))
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, s.URL+"/api/file?key=value&_token=attacker", strings.NewReader("payload"))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Cookie", "private-cookie")
 	req.Header.Set("X-Forwarded-Host", "evil.example")
@@ -171,11 +172,11 @@ func TestDescriptorPairingAndAuthenticatedHTTP(t *testing.T) {
 	}
 	data, _ := io.ReadAll(response.Body)
 	_ = response.Body.Close()
-	if response.StatusCode != 200 || string(data) != "received:payload" || response.Header.Get("X-T3-Test") != "yes" {
+	if response.StatusCode != http.StatusOK || string(data) != "received:payload" || response.Header.Get("X-T3-Test") != "yes" {
 		t.Fatalf("relay status=%d body=%s", response.StatusCode, data)
 	}
 	res, b = request(t, "GET", s.URL+"/api/auth/session", token)
-	if res.StatusCode != 200 || strings.Contains(string(b), "2020-01-01") {
+	if res.StatusCode != http.StatusOK || strings.Contains(string(b), "2020-01-01") {
 		t.Fatalf("session %d %s", res.StatusCode, b)
 	}
 	if closes.Load() != 4 {
@@ -212,7 +213,7 @@ func TestRequestSecurityDoesNotWakeUnauthorizedMachine(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer res.Body.Close()
+			defer func() { _ = res.Body.Close() }()
 			if res.StatusCode != tc.want {
 				t.Fatalf("status %d want %d", res.StatusCode, tc.want)
 			}
@@ -229,7 +230,7 @@ func TestRequestSecurityDoesNotWakeUnauthorizedMachine(t *testing.T) {
 		t.Fatalf("bad pairing %+v", pair)
 	}
 	res, b := request(t, "GET", s.URL+"/.well-known/t3/environment", "")
-	if res.StatusCode != 503 || strings.Contains(string(b), "secret") {
+	if res.StatusCode != http.StatusServiceUnavailable || strings.Contains(string(b), "secret") {
 		t.Fatalf("error leaked upstream: %d %s", res.StatusCode, b)
 	}
 }
@@ -246,7 +247,7 @@ func TestPairingCodesAreSingleUseAndReplaceable(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer res.Body.Close()
+		defer func() { _ = res.Body.Close() }()
 		return res.StatusCode
 	}
 	if post(first) != 400 {
@@ -280,14 +281,14 @@ func TestPersistentPairingCallbacks(t *testing.T) {
 	})
 	token := exchange(t, p, s)
 	res, _ := request(t, "GET", s.URL+"/api/auth/session", token)
-	if res.StatusCode != 200 {
+	if res.StatusCode != http.StatusOK {
 		t.Fatalf("saved token refused: %d", res.StatusCode)
 	}
 	mu.Lock()
 	delete(tokens, token)
 	mu.Unlock()
 	res, _ = request(t, "GET", s.URL+"/api/auth/session", token)
-	if res.StatusCode != 401 {
+	if res.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("revoked token accepted: %d", res.StatusCode)
 	}
 }
@@ -304,15 +305,17 @@ func TestTicketScopesReplayAndExpiration(t *testing.T) {
 		t.Fatal("RPC ticket is not single use")
 	}
 	media := ticketValue(t, s, token, "media")
-	if !p.redeemTicket(media, "media") || !p.redeemTicket(media, "media") {
-		t.Fatal("media ticket must support multiple stream requests")
+	for range 2 {
+		if !p.redeemTicket(media, "media") {
+			t.Fatal("media ticket must support multiple stream requests")
+		}
 	}
 	res, _ := request(t, "GET", s.URL+"/api/orchestration/shell?wsTicket="+media, "")
-	if res.StatusCode != 401 {
+	if res.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("media ticket reached admin-style route: %d", res.StatusCode)
 	}
 	res, _ = request(t, "GET", s.URL+"/api/device-hub/test?wsTicket="+media, "")
-	if res.StatusCode != 204 {
+	if res.StatusCode != http.StatusNoContent {
 		t.Fatalf("media HTTP ticket refused: %d", res.StatusCode)
 	}
 	p.mu.Lock()
@@ -322,7 +325,7 @@ func TestTicketScopesReplayAndExpiration(t *testing.T) {
 		t.Fatal("expired media ticket accepted")
 	}
 	res, _ = request(t, "POST", s.URL+"/api/auth/websocket-ticket/unknown", token)
-	if res.StatusCode != 404 {
+	if res.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown ticket use: %d", res.StatusCode)
 	}
 }
@@ -339,7 +342,7 @@ func TestCanceledWakeAndEndpointCleanup(t *testing.T) {
 		}
 	})
 	res, _ := request(t, "GET", s.URL+"/.well-known/t3/environment", "")
-	if res.StatusCode != 503 || !canceled.Load() || !closed.Load() {
+	if res.StatusCode != http.StatusServiceUnavailable || !canceled.Load() || !closed.Load() {
 		t.Fatalf("wake not canceled/closed: %d %v %v", res.StatusCode, canceled.Load(), closed.Load())
 	}
 }
@@ -347,7 +350,7 @@ func TestCanceledWakeAndEndpointCleanup(t *testing.T) {
 func TestWebSocketRelayAuthenticatesAndSanitizesServerConfig(t *testing.T) {
 	upstream := sourceServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/ws" {
-			w.WriteHeader(404)
+			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 		if r.URL.Query().Get("wsTicket") != "" || r.URL.Query().Get("orchestrationProtocol") != "2" || r.URL.Query().Get("frameParts") != "" {
@@ -415,7 +418,7 @@ func TestWebSocketRelayAuthenticatesAndSanitizesServerConfig(t *testing.T) {
 		t.Fatalf("binary relay: %v %v %v", kind, b, err)
 	}
 	_, response, err := websocket.Dial(t.Context(), target, nil)
-	if err == nil || response.StatusCode != 401 {
+	if err == nil || response.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("RPC ticket replay accepted: %v", err)
 	}
 }
@@ -454,13 +457,13 @@ func TestConfigValidation(t *testing.T) {
 
 func TestUpstreamFailuresAreRedacted(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(500)
+		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = fmt.Fprint(w, "private-token")
 	}))
 	defer upstream.Close()
 	_, s := proxyServer(t, upstream.URL+"?_token=private-token", nil)
 	res, b := request(t, "GET", s.URL+"/.well-known/t3/environment", "")
-	if res.StatusCode != 503 || strings.Contains(string(b), "private-token") {
+	if res.StatusCode != http.StatusServiceUnavailable || strings.Contains(string(b), "private-token") {
 		t.Fatalf("credential leak: %d %s", res.StatusCode, b)
 	}
 }
@@ -475,14 +478,14 @@ func TestRedirectDoesNotExposeProviderEndpointCredential(t *testing.T) {
 	source = upstream.URL
 	p, s := proxyServer(t, upstream.URL+"?_token=provider-secret", nil)
 	token := exchange(t, p, s)
-	req, _ := http.NewRequestWithContext(t.Context(), "GET", s.URL+"/redirect", nil)
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, s.URL+"/redirect", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	res, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	if res.Header.Get("Location") != s.URL+"/next?keep=1" || res.Header.Get("Set-Cookie") != "" {
 		t.Fatalf("redirect leaks private endpoint: %v", res.Header)
 	}

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
 	"github.com/flemzord/t3fleet/internal/config"
 	"github.com/flemzord/t3fleet/internal/fleet"
 	"github.com/flemzord/t3fleet/internal/state"
@@ -56,7 +57,7 @@ func TestCloudLifecycle(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer disk.Close()
+			defer func() { _ = disk.Close() }()
 			providers[name] = diagnosticProvider{Provider: p, t: t}
 			m, err := fleet.New(fleet.Options{Providers: providers, Templates: cfg.Templates, Store: disk, ExpectedVersion: cfg.ExpectedVersion, ReadyTimeout: 5 * time.Minute})
 			if err != nil {
@@ -110,11 +111,12 @@ func TestCloudLifecycle(t *testing.T) {
 					// Diagnostics emit only fixed exit codes, never runtime-info or
 					// provider credential output. Keep unknown command results private.
 					diagnostic, diagnosticErr := p.Exec(ctx, machine.RemoteID, provider.ExecRequest{Args: []string{"/bin/bash", "-lc", "command -v t3fleet-runtime-info >/dev/null; printf 'helper=%s\\n' \"$?\"; command -v t3 >/dev/null; printf 'server=%s\\n' \"$?\""}})
-					if diagnosticErr != nil {
+					switch {
+					case diagnosticErr != nil:
 						t.Log("private execution transport diagnostic failed; output withheld")
-					} else if diagnostic.Stdout == "helper=0\nserver=0\n" {
+					case diagnostic.Stdout == "helper=0\nserver=0\n":
 						t.Log("runtime binaries resolve correctly in the login shell")
-					} else {
+					default:
 						t.Logf("runtime binaries are unavailable or helper failed (diagnostic exit %d)", diagnostic.ExitCode)
 					}
 					initialization, initErr := p.Exec(ctx, machine.RemoteID, provider.ExecRequest{Args: []string{"/bin/bash", "-lc", "exec t3fleet-runtime-info"}})
@@ -149,13 +151,13 @@ func TestCloudLifecycle(t *testing.T) {
 				Token string `json:"access_token"`
 			}
 			decodeErr := json.NewDecoder(response.Body).Decode(&exchange)
-			response.Body.Close()
+			_ = response.Body.Close()
 			if response.StatusCode != http.StatusOK || decodeErr != nil || exchange.Token == "" {
 				t.Fatalf("pair exchange failed (HTTP%d, decoded=%t, token=%t)", response.StatusCode, decodeErr == nil, exchange.Token != "")
 			}
 			cloudRPC(t, ctx, machine.URL, exchange.Token)
 			// The real server's shell endpoint checks protocol version as well as auth.
-			req, _ := http.NewRequestWithContext(ctx, "GET", machine.URL+"/api/orchestration/shell?omitIdleSubagents=1&omitOlderSettled=1", nil)
+			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, machine.URL+"/api/orchestration/shell?omitIdleSubagents=1&omitOlderSettled=1", nil)
 			req.Header.Set("Authorization", "Bearer "+exchange.Token)
 			req.Header.Set("X-T3-Orchestration-Protocol", "2")
 			shell, err := http.DefaultClient.Do(req)
@@ -163,7 +165,7 @@ func TestCloudLifecycle(t *testing.T) {
 				t.Fatal("cloud orchestration transport failed")
 			}
 			_, _ = io.Copy(io.Discard, io.LimitReader(shell.Body, 4<<20))
-			shell.Body.Close()
+			_ = shell.Body.Close()
 			if shell.StatusCode != http.StatusOK {
 				t.Fatalf("cloud orchestration HTTP%d", shell.StatusCode)
 			}
@@ -192,7 +194,7 @@ func TestCloudLifecycle(t *testing.T) {
 			if err != nil {
 				t.Fatal("cached descriptor failed")
 			}
-			descriptor.Body.Close()
+			_ = descriptor.Body.Close()
 			remote, err := p.Get(ctx, machine.RemoteID)
 			if descriptor.StatusCode != http.StatusOK || err != nil || remote.State != provider.StateStopped {
 				t.Fatal("public descriptor woke the stopped machine")
@@ -210,7 +212,7 @@ func cloudRPC(t *testing.T, ctx context.Context, origin, token string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, "POST", origin+"/api/auth/websocket-ticket/rpc", nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, origin+"/api/auth/websocket-ticket/rpc", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	response, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -220,7 +222,7 @@ func cloudRPC(t *testing.T, ctx context.Context, origin, token string) {
 		Ticket string `json:"ticket"`
 	}
 	decodeErr := json.NewDecoder(response.Body).Decode(&ticket)
-	response.Body.Close()
+	_ = response.Body.Close()
 	if response.StatusCode != http.StatusOK || decodeErr != nil || ticket.Ticket == "" {
 		t.Fatal("ticket issuance failed")
 	}

@@ -251,7 +251,7 @@ func TestReleaseDispatchWorkerReconcilesBoatSandboxAlreadyAbsent(t *testing.T) {
 	worker := batch.Machines[0]
 	// Boat removed the sandbox, but its asynchronous deletion request
 	// could still fail or stall if reissued.
-	if err := boat.mockProvider.Delete(t.Context(), worker.RemoteID); err != nil {
+	if err := boat.Delete(t.Context(), worker.RemoteID); err != nil {
 		t.Fatal(err)
 	}
 	boat.deleteFails = true
@@ -328,7 +328,7 @@ func TestDispatchWorkerLostRequiresConfirmedAbsence(t *testing.T) {
 		t.Fatalf("a stopped worker was reported lost: %v %v", lost, err)
 	}
 	// Removed outside t3fleet, for example from the provider console.
-	if err := boat.mockProvider.Delete(ctx, worker.RemoteID); err != nil {
+	if err := boat.Delete(ctx, worker.RemoteID); err != nil {
 		t.Fatal(err)
 	}
 	if lost, err := f.m.DispatchWorkerLost(ctx, key); !lost || err != nil {
