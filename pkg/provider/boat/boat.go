@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -13,8 +15,10 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/flemzord/t3fleet/pkg/provider"
 )
@@ -25,14 +29,18 @@ const defaultBaseURL = "https://boat.dev/api/v1"
 type Config struct {
 	APIKey       string
 	Organization string
-	BaseURL      string
-	HTTPClient   *http.Client
+	// Environment explicitly opts in to Boat-managed repositories and secrets.
+	// Empty means no account credential injection.
+	Environment string
+	BaseURL     string
+	HTTPClient  *http.Client
 }
 
 type Client struct {
 	base         string
 	key          string
 	organization string
+	environment  string
 	http         *http.Client
 	pollInterval time.Duration
 }
@@ -51,7 +59,7 @@ func New(cfg Config) (*Client, error) {
 	if u.Scheme != "https" && !(u.Scheme == "http" && slices.Contains([]string{"localhost", "127.0.0.1", "::1"}, u.Hostname())) {
 		return nil, errors.New("boat: API base URL requires HTTPS")
 	}
-	if cfg.APIKey == "" || strings.ContainsAny(cfg.APIKey+cfg.Organization, "\r\n\x00") {
+	if cfg.APIKey == "" || strings.ContainsAny(cfg.APIKey+cfg.Organization+cfg.Environment, "\r\n\x00") {
 		return nil, errors.New("boat: invalid credentials or organization")
 	}
 	hc := http.Client{Timeout: 70 * time.Second}
@@ -60,7 +68,7 @@ func New(cfg Config) (*Client, error) {
 	}
 	// Never forward the account bearer token to a redirect target.
 	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Client{base: strings.TrimRight(base, "/"), key: cfg.APIKey, organization: cfg.Organization, http: &hc, pollInterval: time.Second}, nil
+	return &Client{base: strings.TrimRight(base, "/"), key: cfg.APIKey, organization: cfg.Organization, environment: cfg.Environment, http: &hc, pollInterval: time.Second}, nil
 }
 
 func (*Client) Name() string { return "boat" }
@@ -181,12 +189,14 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 		return provider.Machine{}, errors.New("boat: unsupported machine size")
 	}
 	body := struct {
-		From       string            `json:"from"`
-		Name       string            `json:"name"`
-		Type       string            `json:"type,omitempty"`
-		Visibility string            `json:"visibility"`
-		Labels     map[string]string `json:"labels,omitzero"`
-	}{template, req.Name, req.Size, "private", req.Labels}
+		From        string            `json:"from"`
+		Name        string            `json:"name"`
+		Type        string            `json:"type,omitempty"`
+		Visibility  string            `json:"visibility"`
+		Environment string            `json:"environment,omitempty"`
+		NoEnv       bool              `json:"noEnv"`
+		Labels      map[string]string `json:"labels,omitzero"`
+	}{template, req.Name, req.Size, "private", c.environment, c.environment == "", req.Labels}
 	var res struct {
 		Sandbox sandbox `json:"sandbox"`
 	}
@@ -285,7 +295,11 @@ var envKey = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 
-func (c *Client) Exec(ctx context.Context, id string, req provider.ExecRequest) (provider.ExecResult, error) {
+// Exec uses the private files API for output. Boat retains command history, so
+// only the numeric exit status is allowed into a command's stdout/stderr.
+// Arguments and environment values remain part of Boat's retained command input
+// and must not contain credentials.
+func (c *Client) Exec(ctx context.Context, id string, req provider.ExecRequest) (result provider.ExecResult, resultErr error) {
 	path, err := sandboxPath(id)
 	if err != nil {
 		return provider.ExecResult{}, err
@@ -311,22 +325,82 @@ func (c *Client) Exec(ctx context.Context, id string, req provider.ExecRequest) 
 		}
 		parts = append(parts, shellQuote(arg))
 	}
+	var random [32]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return provider.ExecResult{}, errors.New("boat: cannot prepare private command output")
+	}
+	directory := "/tmp/t3fleet-exec-" + hex.EncodeToString(random[:])
+	// Cleanup is attempted even after a transport error: the execution may have
+	// reached the machine before the response was lost. A canceled caller must
+	// not cancel removal of private output files.
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		defer cancel()
+		query := url.Values{"path": {directory}, "recursive": {"true"}}
+		err := c.request(cleanupCtx, http.MethodDelete, path+"/files?"+query.Encode(), nil, nil, nil)
+		if err != nil && !errors.Is(err, provider.ErrNotFound) {
+			// Return no partially retrieved secrets when cleanup did not succeed.
+			result = provider.ExecResult{}
+			resultErr = errors.Join(resultErr, errors.New("boat: private command output cleanup failed"))
+		}
+	}()
+	command := "exec 2>/dev/null\numask 077\n" +
+		"mkdir -m 700 -- " + shellQuote(directory) + " || exit 125\n" +
+		"( " + strings.Join(parts, " ") + " ) >" + shellQuote(directory+"/stdout") + " 2>" + shellQuote(directory+"/stderr") + "\n" +
+		"status=$?\nprintf '%s\\n' \"$status\""
 	body := struct {
 		Command        string `json:"command"`
 		TimeoutSeconds int    `json:"timeoutSeconds"`
-	}{strings.Join(parts, " "), 60}
+	}{command, 60}
 	var res struct {
-		Stdout   string `json:"stdout"`
-		Stderr   string `json:"stderr"`
-		ExitCode *int   `json:"exitCode"`
+		Stdout          string `json:"stdout"`
+		Stderr          string `json:"stderr"`
+		ExitCode        *int   `json:"exitCode"`
+		StdoutTruncated bool   `json:"stdoutTruncated"`
+		StderrTruncated bool   `json:"stderrTruncated"`
 	}
 	if err := c.request(ctx, http.MethodPost, path+"/commands", body, nil, &res); err != nil {
 		return provider.ExecResult{}, err
 	}
-	if res.ExitCode == nil {
-		return provider.ExecResult{}, errors.New("boat: command did not finish")
+	if res.ExitCode == nil || *res.ExitCode != 0 || res.Stderr != "" || res.StdoutTruncated || res.StderrTruncated || !commandStatus.MatchString(res.Stdout) {
+		return provider.ExecResult{}, errors.New("boat: invalid private command completion")
 	}
-	return provider.ExecResult{Stdout: res.Stdout, Stderr: res.Stderr, ExitCode: *res.ExitCode}, nil
+	status, err := strconv.Atoi(strings.TrimSuffix(res.Stdout, "\n"))
+	if err != nil || status > 255 {
+		return provider.ExecResult{}, errors.New("boat: invalid private command exit status")
+	}
+	stdout, err := c.readPrivateOutput(ctx, path, directory+"/stdout")
+	if err != nil {
+		return provider.ExecResult{}, err
+	}
+	stderr, err := c.readPrivateOutput(ctx, path, directory+"/stderr")
+	if err != nil {
+		return provider.ExecResult{}, err
+	}
+	return provider.ExecResult{Stdout: stdout, Stderr: stderr, ExitCode: status}, nil
+}
+
+var commandStatus = regexp.MustCompile(`^(0|[1-9][0-9]{0,2})\n?$`)
+
+const maxExecOutput = 4 * 1024 * 1024
+
+func (c *Client) readPrivateOutput(ctx context.Context, sandbox, filename string) (string, error) {
+	query := url.Values{"path": {filename}, "encoding": {"utf8"}}
+	var res struct {
+		Success  bool    `json:"success"`
+		Path     string  `json:"path"`
+		Encoding string  `json:"encoding"`
+		Size     *int64  `json:"size"`
+		Content  *string `json:"content"`
+	}
+	if err := c.request(ctx, http.MethodGet, sandbox+"/files?"+query.Encode(), nil, nil, &res); err != nil {
+		return "", err
+	}
+	if !res.Success || res.Path != filename || res.Encoding != "utf8" || res.Size == nil || res.Content == nil ||
+		*res.Size < 0 || *res.Size > maxExecOutput || int64(len(*res.Content)) != *res.Size || !utf8.ValidString(*res.Content) {
+		return "", errors.New("boat: invalid private command output")
+	}
+	return *res.Content, nil
 }
 
 func (c *Client) Connect(ctx context.Context, id string, port int) (provider.Endpoint, error) {

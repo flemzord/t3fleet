@@ -460,3 +460,144 @@ func TestConcurrentStartsSerializeRemoteWake(t *testing.T) {
 		t.Fatalf("concurrent callers started provider %d times", f.p.starts)
 	}
 }
+
+// A provider can allocate a snapshot clone before its command service accepts
+// work. This is a real Boat API state, not an executable-image failure.
+type delayedProvider struct {
+	*mockProvider
+	readinessMu sync.Mutex
+	remaining   int
+}
+
+func (p *delayedProvider) Get(ctx context.Context, id string) (provider.Machine, error) {
+	remote, err := p.mockProvider.Get(ctx, id)
+	if err != nil {
+		return remote, err
+	}
+	p.readinessMu.Lock()
+	defer p.readinessMu.Unlock()
+	if p.remaining > 0 {
+		p.remaining--
+		remote.State = provider.StateStarting
+	}
+	return remote, nil
+}
+func (p *delayedProvider) Exec(ctx context.Context, id string, req provider.ExecRequest) (provider.ExecResult, error) {
+	p.readinessMu.Lock()
+	remaining := p.remaining
+	p.readinessMu.Unlock()
+	if remaining > 0 {
+		return provider.ExecResult{}, errors.New("command service is still provisioning")
+	}
+	return p.mockProvider.Exec(ctx, id, req)
+}
+func TestCreateWaitsForProviderSnapshotRestore(t *testing.T) {
+	f := newFleet(t)
+	if err := f.m.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	delayed := &delayedProvider{mockProvider: f.p, remaining: 3}
+	f.options.Providers = map[string]provider.Provider{"mock": delayed}
+	var err error
+	f.m, err = fleet.New(f.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, err := f.m.Create(t.Context(), fleet.CreateRequest{Name: "slow-restore", Provider: "mock"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if machine.State != "ready" {
+		t.Fatalf("state=%s", machine.State)
+	}
+	f.p.mu.Lock()
+	defer f.p.mu.Unlock()
+	if f.p.execs != 1 || f.p.allocations != 1 {
+		t.Fatalf("execs=%d allocations=%d", f.p.execs, f.p.allocations)
+	}
+}
+func TestRestoreCancellationRetainsAllocatedIdentity(t *testing.T) {
+	f := newFleet(t)
+	if err := f.m.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	delayed := &delayedProvider{mockProvider: f.p, remaining: 100}
+	f.options.Providers = map[string]provider.Provider{"mock": delayed}
+	var err error
+	f.m, err = fleet.New(f.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
+	defer cancel()
+	machine, err := f.m.Create(ctx, fleet.CreateRequest{Name: "interrupted-restore", Provider: "mock"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline, got %v", err)
+	}
+	saved, getErr := f.m.Get(machine.ID)
+	if getErr != nil || saved.RemoteID == "" || saved.State != "not-ready" {
+		t.Fatalf("allocated identity lost: %#v %v", saved, getErr)
+	}
+	f.p.mu.Lock()
+	defer f.p.mu.Unlock()
+	if f.p.execs != 0 {
+		t.Fatal("executed runtime before provider readiness")
+	}
+}
+
+func TestActiveTrafficStillRevalidatesServiceAuthorization(t *testing.T) {
+	f := newFleet(t)
+	if err := f.m.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	var clockMu sync.Mutex
+	now := time.Now()
+	f.options.Now = func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return now }
+	var err error
+	f.m, err = fleet.New(f.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine := create(t, f, "active-machine")
+	token := pair(t, f, machine)
+	f.p.mu.Lock()
+	before := f.p.execs
+	f.p.mu.Unlock()
+	for range 5 {
+		clockMu.Lock()
+		now = now.Add(3 * time.Minute)
+		clockMu.Unlock()
+		code, _ := request(t, machine.URL+"/api/probe", token)
+		if code != http.StatusOK {
+			t.Fatalf("active request HTTP%d", code)
+		}
+	}
+	f.p.mu.Lock()
+	defer f.p.mu.Unlock()
+	if f.p.execs <= before {
+		t.Fatal("continuous traffic postponed service authorization refresh indefinitely")
+	}
+}
+
+type missingOnDelete struct{ *mockProvider }
+
+func (p *missingOnDelete) Delete(context.Context, string) error { return provider.ErrNotFound }
+func TestAlreadyDeletedRemoteConvergesLocalDeletion(t *testing.T) {
+	f := newFleet(t)
+	if err := f.m.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	f.options.Providers = map[string]provider.Provider{"mock": &missingOnDelete{f.p}}
+	var err error
+	f.m, err = fleet.New(f.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine := create(t, f, "already-deleted")
+	if err := f.m.Delete(t.Context(), machine.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.m.Get(machine.ID); !errors.Is(err, fleet.ErrNotFound) {
+		t.Fatalf("stale local machine remains: %v", err)
+	}
+}

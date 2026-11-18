@@ -40,6 +40,7 @@ type Options struct {
 	ExpectedVersion string
 	ListenHost      string
 	ReadyTimeout    time.Duration
+	Now             func() time.Time
 }
 type CreateRequest struct {
 	Name     string            `json:"name"`
@@ -74,12 +75,13 @@ type diskState struct {
 	Records []record `json:"machines"`
 }
 type machineHandle struct {
-	operation sync.Mutex
-	record    record // protected by Manager.mu
-	proxy     *proxy.Proxy
-	server    *http.Server
-	listener  net.Listener
-	checked   time.Time // protected by operation
+	operation   sync.Mutex
+	record      record // protected by Manager.mu
+	proxy       *proxy.Proxy
+	server      *http.Server
+	listener    net.Listener
+	checked     time.Time // protected by operation
+	initialized time.Time // independent service-authorization refresh clock
 }
 type Manager struct {
 	mu       sync.RWMutex
@@ -99,6 +101,9 @@ func New(opts Options) (*Manager, error) {
 	}
 	if opts.ListenHost != "127.0.0.1" && opts.ListenHost != "::1" {
 		return nil, errors.New("fleet: machine listeners must use loopback")
+	}
+	if opts.Now == nil {
+		opts.Now = time.Now
 	}
 	if opts.ReadyTimeout == 0 {
 		opts.ReadyTimeout = 3 * time.Minute
@@ -308,6 +313,9 @@ func (m *Manager) initialize(ctx context.Context, h *machineHandle, p provider.P
 	ctx, cancel := context.WithTimeout(ctx, m.opts.ReadyTimeout)
 	defer cancel()
 	r := m.copy(h)
+	if err := waitRunning(ctx, p, r.RemoteID); err != nil {
+		return err
+	}
 	result, err := p.Exec(ctx, r.RemoteID, provider.ExecRequest{Args: []string{"/bin/bash", "-lc", "exec t3fleet-runtime-info"}})
 	if err != nil || result.ExitCode != 0 {
 		return errors.New("fleet: image runtime initialization failed; use a prepared t3fleet image")
@@ -368,13 +376,45 @@ func (m *Manager) initialize(ctx context.Context, h *machineHandle, p provider.P
 	if authResponse.StatusCode != http.StatusOK {
 		return errors.New("fleet: T3 service authorization was rejected")
 	}
-	h.checked = time.Now()
+	h.checked = m.opts.Now()
+	h.initialized = m.opts.Now()
 	return m.update(h, func(r *record) {
 		r.Token = info.Token
 		r.EnvironmentID = info.EnvironmentID
 		r.Descriptor = descriptor
 		r.State = "ready"
 	})
+}
+
+// Cloud creation can return an allocated identity before command execution is
+// possible. Readiness belongs to the manager, rather than each caller guessing
+// whether an allocated instance can already execute its first-boot hook.
+func waitRunning(ctx context.Context, p provider.Provider, id string) error {
+	for {
+		remote, err := p.Get(ctx, id)
+		if err != nil {
+			return errors.New("fleet: provider readiness check failed")
+		}
+		switch remote.State {
+		case provider.StateRunning:
+			return nil
+		case provider.StateStopped:
+			if err := p.Start(ctx, id); err != nil {
+				return errors.New("fleet: provider start failed")
+			}
+		case provider.StateStarting:
+			// Wait for the provider to finish restoring the image.
+		default:
+			return errors.New("fleet: remote machine cannot become ready")
+		}
+		timer := time.NewTimer(200 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (m *Manager) Start(ctx context.Context, id string) error {
@@ -399,7 +439,7 @@ func (m *Manager) ensure(ctx context.Context, h *machineHandle, force bool) erro
 		}
 		return m.initialize(ctx, h, p)
 	}
-	if !force && r.State == "ready" && time.Since(h.checked) < 5*time.Second {
+	if !force && r.State == "ready" && m.opts.Now().Sub(h.checked) < 5*time.Second {
 		return nil
 	}
 	remote, err := p.Get(ctx, r.RemoteID)
@@ -415,10 +455,10 @@ func (m *Manager) ensure(ctx context.Context, h *machineHandle, force bool) erro
 	if remote.State == provider.StateDeleted {
 		return errors.New("fleet: remote machine was deleted")
 	}
-	if force || r.Token == "" || r.State != "ready" || time.Since(h.checked) > 10*time.Minute {
+	if force || r.Token == "" || r.State != "ready" || m.opts.Now().Sub(h.initialized) > 10*time.Minute {
 		return m.initialize(ctx, h, p)
 	}
-	h.checked = time.Now()
+	h.checked = m.opts.Now()
 	return nil
 }
 func (m *Manager) resolve(ctx context.Context, id string) (proxy.Upstream, error) {
@@ -466,7 +506,7 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 		return errors.New("fleet: creation is unresolved; run start to reconcile before deleting")
 	}
 	if r.RemoteID != "" {
-		if err = m.opts.Providers[r.Provider].Delete(ctx, r.RemoteID); err != nil {
+		if err = m.opts.Providers[r.Provider].Delete(ctx, r.RemoteID); err != nil && !errors.Is(err, provider.ErrNotFound) {
 			return errors.New("fleet: provider deletion failed; local state retained")
 		}
 	}

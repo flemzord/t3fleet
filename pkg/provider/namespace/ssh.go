@@ -139,8 +139,15 @@ func (c *sshConnection) Exec(ctx context.Context, req provider.ExecRequest) (pro
 	if err != nil {
 		return provider.ExecResult{}, err
 	}
+	// NewSession itself waits for a channel-open reply. Close the owned
+	// transport on cancellation before waiting, not only once a session exists.
+	stop := context.AfterFunc(ctx, func() { _ = c.Close() })
+	defer stop()
 	session, err := c.client.NewSession()
 	if err != nil {
+		if ctx.Err() != nil {
+			return provider.ExecResult{}, ctx.Err()
+		}
 		return provider.ExecResult{}, fmt.Errorf("namespace: open SSH session: %w", err)
 	}
 	defer session.Close()
@@ -158,8 +165,7 @@ func (c *sshConnection) Exec(ctx context.Context, req provider.ExecRequest) (pro
 		return result, errors.New("namespace: command output exceeded limit")
 	}
 	if err != nil {
-		var exit *ssh.ExitError
-		if errors.As(err, &exit) {
+		if exit, ok := errors.AsType[*ssh.ExitError](err); ok {
 			result.ExitCode = exit.ExitStatus()
 			return result, nil
 		}

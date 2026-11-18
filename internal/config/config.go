@@ -39,6 +39,7 @@ type Boat struct {
 	APIKeyFile     string `json:"apiKeyFile,omitempty"`
 	CredentialFile string `json:"credentialFile,omitempty"`
 	Organization   string `json:"organization,omitempty"`
+	Environment    string `json:"environment,omitempty"`
 	BaseURL        string `json:"baseURL,omitempty"`
 }
 
@@ -150,7 +151,7 @@ func (cfg Config) BuildProviders() (map[string]provider.Provider, error) {
 		if err != nil {
 			return nil, err
 		}
-		client, err := boat.New(boat.Config{APIKey: key, Organization: org, BaseURL: cfg.Providers.Boat.BaseURL})
+		client, err := boat.New(boat.Config{APIKey: key, Organization: org, Environment: cfg.Providers.Boat.Environment, BaseURL: cfg.Providers.Boat.BaseURL})
 		if err != nil {
 			return nil, errors.New("cannot initialize Boat; check credentials, organization and API URL")
 		}

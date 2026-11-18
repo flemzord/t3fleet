@@ -8,8 +8,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -48,7 +52,7 @@ func TestCreateFromSnapshot(t *testing.T) {
 		if err := json.Unmarshal(data, &body); err != nil {
 			t.Fatal(err)
 		}
-		if body["from"] != "golden-t3" || body["name"] != "skiff" || body["visibility"] != "private" || body["type"] != "small" {
+		if body["from"] != "golden-t3" || body["name"] != "skiff" || body["visibility"] != "private" || body["type"] != "small" || body["noEnv"] != true {
 			t.Errorf("unexpected body: %#v", body)
 		}
 		w.WriteHeader(http.StatusAccepted)
@@ -71,6 +75,24 @@ func TestCreateRequiresSnapshotAndIdempotency(t *testing.T) {
 		if _, err := c.Create(t.Context(), req); err == nil {
 			t.Error("accepted invalid create")
 		}
+	}
+}
+
+func TestCreateExplicitEnvironmentOptsIntoCredentials(t *testing.T) {
+	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		data, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(data, &body); err != nil {
+			t.Error(err)
+		}
+		if body["environment"] != "t3fleet-user" || body["noEnv"] != false {
+			t.Error("explicit environment was not opted in")
+		}
+		respond(t, w, map[string]any{"ok": true, "sandbox": sandbox{ID: "bx_test", State: "provisioning"}})
+	})
+	c.environment = "t3fleet-user"
+	if _, err := c.Create(t.Context(), provider.CreateRequest{Template: provider.Template{Snapshot: "golden"}, OperationID: "op"}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -174,46 +196,270 @@ func TestPollingHonorsCancellation(t *testing.T) {
 	}
 }
 
-func TestExecQuotesArgumentsAndEnvironment(t *testing.T) {
+type executionFixture struct {
+	t             *testing.T
+	mu            sync.Mutex
+	directory     string
+	deleted       bool
+	commandStdout string
+	commandStderr string
+	alterCommand  func(map[string]any)
+	alterRead     func(map[string]any)
+	onRead        func()
+	cleanupStatus int
+	commandStatus int
+}
+
+var executionDirectory = regexp.MustCompile(`mkdir -m 700 -- '(/tmp/t3fleet-exec-[0-9a-f]{64})'`)
+
+func fixtureClient(t *testing.T) (*Client, *executionFixture) {
+	t.Helper()
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("shell unavailable")
 	}
-	c := clientFor(t, func(w http.ResponseWriter, r *http.Request) {
+	f := &executionFixture{t: t}
+	c := clientFor(t, f.serve)
+	t.Cleanup(func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.directory != "" {
+			_ = os.RemoveAll(f.directory)
+		}
+	})
+	return c, f
+}
+
+func (f *executionFixture) serve(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if r.Method == "POST" && r.URL.Path == "/sandboxes/bx_test/commands" {
 		var body struct {
 			Command string `json:"command"`
 		}
 		data, _ := io.ReadAll(r.Body)
 		if err := json.Unmarshal(data, &body); err != nil {
-			t.Fatal(err)
+			f.t.Error(err)
+			w.WriteHeader(500)
+			return
 		}
-		// Execute only our test's local harmless printf fixture, using exactly the
-		// shell text passed across the provider seam.
-		out, err := exec.CommandContext(t.Context(), "sh", "-c", body.Command).Output()
+		match := executionDirectory.FindStringSubmatch(body.Command)
+		if len(match) != 2 {
+			f.t.Error("missing random private directory")
+			w.WriteHeader(500)
+			return
+		}
+		f.directory = match[1]
+		if f.commandStatus != 0 {
+			w.WriteHeader(f.commandStatus)
+			respond(f.t, w, map[string]any{"ok": false})
+			return
+		}
+		cmd := exec.CommandContext(f.t.Context(), "sh", "-c", body.Command)
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
 		if err != nil {
-			t.Fatal(err)
+			f.t.Error("fixture shell failed")
+			w.WriteHeader(500)
+			return
 		}
-		respond(t, w, map[string]any{"ok": true, "stdout": string(out), "stderr": "", "exitCode": 0})
-	})
+		f.commandStdout, f.commandStderr = string(out), stderr.String()
+		for _, name := range []string{"", "stdout", "stderr"} {
+			info, err := os.Stat(filepath.Join(f.directory, name))
+			if err != nil {
+				f.t.Error(err)
+				continue
+			}
+			want := os.FileMode(0600)
+			if name == "" {
+				want = 0700
+			}
+			if info.Mode().Perm() != want {
+				f.t.Errorf("private output permissions %o, want %o", info.Mode().Perm(), want)
+			}
+		}
+		res := map[string]any{"ok": true, "stdout": string(out), "stderr": stderr.String(), "exitCode": 0}
+		if f.alterCommand != nil {
+			f.alterCommand(res)
+		}
+		respond(f.t, w, res)
+		return
+	}
+	if r.URL.Path != "/sandboxes/bx_test/files" {
+		f.t.Errorf("unexpected fixture path %s", r.URL.Path)
+		w.WriteHeader(404)
+		return
+	}
+	name := r.URL.Query().Get("path")
+	if f.directory == "" || (name != f.directory && name != f.directory+"/stdout" && name != f.directory+"/stderr") {
+		f.t.Error("unexpected output filename")
+		w.WriteHeader(400)
+		return
+	}
+	if r.Method == "DELETE" {
+		if r.URL.Query().Get("recursive") != "true" || name != f.directory {
+			f.t.Error("cleanup did not target private directory")
+			w.WriteHeader(400)
+			return
+		}
+		if f.cleanupStatus != 0 {
+			w.WriteHeader(f.cleanupStatus)
+			respond(f.t, w, map[string]any{"ok": false, "message": "SECRET-CLEANUP"})
+			return
+		}
+		if err := os.RemoveAll(f.directory); err != nil {
+			f.t.Error(err)
+		}
+		f.deleted = true
+		respond(f.t, w, map[string]any{"ok": true, "success": true})
+		return
+	}
+	if r.Method != "GET" || r.URL.Query().Get("encoding") != "utf8" {
+		f.t.Error("invalid file read")
+		w.WriteHeader(400)
+		return
+	}
+	data, err := os.ReadFile(name)
+	if err != nil {
+		f.t.Error(err)
+		w.WriteHeader(404)
+		return
+	}
+	res := map[string]any{"ok": true, "success": true, "path": name, "encoding": "utf8", "size": len(data), "content": string(data)}
+	if f.alterRead != nil {
+		f.alterRead(res)
+	}
+	if f.onRead != nil {
+		f.onRead()
+	}
+	respond(f.t, w, res)
+}
+
+func (f *executionFixture) checkDeleted(t *testing.T) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.deleted {
+		t.Error("private output directory was not removed")
+	}
+	if _, err := os.Stat(f.directory); !errors.Is(err, os.ErrNotExist) {
+		t.Error("private output files remain")
+	}
+}
+
+func TestExecQuotesArgumentsAndEnvironment(t *testing.T) {
+	c, f := fixtureClient(t)
 	arg := "x'; printf INJECTED; #\n$(printf injected)"
 	res, err := c.Exec(t.Context(), "bx_test", provider.ExecRequest{Args: []string{"sh", "-c", `printf '%s|%s' "$VALUE" "$1"`, "test", arg}, Env: map[string]string{"VALUE": "it's literal; $(nope)"}})
 	if err != nil || res.Stdout != "it's literal; $(nope)|"+arg || res.ExitCode != 0 {
 		t.Fatalf("result=%#v err=%v", res, err)
 	}
+	if f.commandStdout != "0\n" || f.commandStderr != "" {
+		t.Fatal("command history received output instead of status")
+	}
+	f.checkDeleted(t)
 }
 
-func TestExecReturnsNonzeroExitAndRejectsInvalidInput(t *testing.T) {
-	c := clientFor(t, func(w http.ResponseWriter, _ *http.Request) {
-		respond(t, w, map[string]any{"ok": true, "stdout": "", "stderr": "failure", "exitCode": 7})
-	})
-	r, err := c.Exec(t.Context(), "bx_test", provider.ExecRequest{Args: []string{"false"}})
-	if err != nil || r.ExitCode != 7 {
-		t.Fatalf("result=%#v err=%v", r, err)
+func TestExecKeepsSecretOutputsOutOfCommandHistory(t *testing.T) {
+	c, f := fixtureClient(t)
+	res, err := c.Exec(t.Context(), "bx_test", provider.ExecRequest{Args: []string{"sh", "-c", `printf 'TOKENMARKER'; printf 'ERRORMARKER' >&2; exit 7`}})
+	if err != nil || res.Stdout != "TOKENMARKER" || res.Stderr != "ERRORMARKER" || res.ExitCode != 7 {
+		t.Fatalf("wrong output transport: exit=%d err=%v", res.ExitCode, err)
 	}
+	if f.commandStdout != "7\n" || f.commandStderr != "" {
+		t.Fatal("sensitive process output reached command history")
+	}
+	f.checkDeleted(t)
+}
+
+func TestExecRejectsInvalidInput(t *testing.T) {
+	c := clientFor(t, func(http.ResponseWriter, *http.Request) { t.Error("invalid input reached API") })
 	for _, req := range []provider.ExecRequest{{}, {Args: []string{"x\x00y"}}, {Args: []string{"true"}, Env: map[string]string{"BAD=KEY": "value"}}} {
 		if _, err := c.Exec(t.Context(), "bx_test", req); err == nil {
 			t.Error("accepted invalid exec input")
 		}
 	}
+}
+
+func TestExecRejectsMalformedCompletionAndCleansUp(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		alter func(map[string]any)
+	}{
+		{"secret-status", func(m map[string]any) { m["stdout"] = "TOKENMARKER" }},
+		{"out-of-range", func(m map[string]any) { m["stdout"] = "999\n" }},
+		{"negative", func(m map[string]any) { m["stdout"] = "-1\n" }},
+		{"stderr", func(m map[string]any) { m["stderr"] = "TOKENMARKER" }},
+		{"missing-exit", func(m map[string]any) { delete(m, "exitCode") }},
+		{"outer-failure", func(m map[string]any) { m["exitCode"] = 125 }},
+		{"truncated", func(m map[string]any) { m["stdoutTruncated"] = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, f := fixtureClient(t)
+			f.alterCommand = tc.alter
+			_, err := c.Exec(t.Context(), "bx_test", provider.ExecRequest{Args: []string{"printf", "TOKENMARKER"}})
+			if err == nil || strings.Contains(err.Error(), "TOKENMARKER") {
+				t.Fatalf("unsafe completion error: %v", err)
+			}
+			f.checkDeleted(t)
+		})
+	}
+}
+
+func TestExecRejectsMalformedFileResponseAndCleansUp(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		alter func(map[string]any)
+	}{
+		{"encoding", func(m map[string]any) { m["encoding"] = "base64" }},
+		{"missing-size", func(m map[string]any) { delete(m, "size") }},
+		{"missing-content", func(m map[string]any) { delete(m, "content") }},
+		{"negative-size", func(m map[string]any) { m["size"] = -1 }},
+		{"oversize", func(m map[string]any) { m["size"] = maxExecOutput + 1 }},
+		{"mismatch-size", func(m map[string]any) { m["size"] = 0 }},
+		{"path", func(m map[string]any) { m["path"] = "/etc/passwd" }},
+		{"failure", func(m map[string]any) { m["success"] = false }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, f := fixtureClient(t)
+			f.alterRead = tc.alter
+			_, err := c.Exec(t.Context(), "bx_test", provider.ExecRequest{Args: []string{"printf", "TOKENMARKER"}})
+			if err == nil || strings.Contains(err.Error(), "TOKENMARKER") {
+				t.Fatalf("unsafe file error: %v", err)
+			}
+			f.checkDeleted(t)
+		})
+	}
+}
+
+func TestExecCleanupUsesIndependentContextAfterCancellation(t *testing.T) {
+	c, f := fixtureClient(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	f.onRead = cancel
+	_, err := c.Exec(ctx, "bx_test", provider.ExecRequest{Args: []string{"printf", "TOKENMARKER"}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
+	f.checkDeleted(t)
+}
+
+func TestExecCleanupFailureDiscardsRetrievedSecrets(t *testing.T) {
+	c, f := fixtureClient(t)
+	f.cleanupStatus = http.StatusForbidden
+	res, err := c.Exec(t.Context(), "bx_test", provider.ExecRequest{Args: []string{"printf", "TOKENMARKER"}})
+	if err == nil || res.Stdout != "" || res.Stderr != "" || strings.Contains(err.Error(), "TOKENMARKER") || strings.Contains(err.Error(), "SECRET-CLEANUP") {
+		t.Fatalf("unsafe cleanup handling: %v", err)
+	}
+}
+
+func TestExecCleanupAfterCommandAPIFailure(t *testing.T) {
+	c, f := fixtureClient(t)
+	f.commandStatus = http.StatusBadGateway
+	_, err := c.Exec(t.Context(), "bx_test", provider.ExecRequest{Args: []string{"true"}})
+	if err == nil {
+		t.Fatal("accepted command failure")
+	}
+	f.checkDeleted(t)
 }
 
 func TestConnectPreservesPrivateToken(t *testing.T) {
