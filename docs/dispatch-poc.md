@@ -180,6 +180,18 @@ the original launch cannot recreate the worker. The sweep handles only
 deletions already saved by an explicit archive under this setting; it does
 not touch previously archived threads that have no saved deletion.
 
+### Release workers removed outside t3fleet
+
+An archive needs the worker to confirm it. If a ready worker was removed
+outside t3fleet, for example from the provider console, its thread can no
+longer be archived and its slot would stay reserved. With
+`deleteWorkerOnArchive` enabled, the daemon checks every ready, unarchived
+worker every 10 minutes. When the provider confirms that the machine no
+longer exists, the dispatcher fences the thread, removes the machine record
+and frees the slot. A stopped worker, a provider error or a machine with a
+running operation keeps its reservation until a later sweep. The thread then
+reports that its worker no longer exists; start a new thread to continue.
+
 The linked dispatch canary runs a genuine T3 source, controller and two
 workers locally using the ACP replay agent. It checks worker separation,
 follow-up, retry after proxy restart, and access isolation without Boat costs:

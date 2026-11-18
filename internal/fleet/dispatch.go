@@ -86,6 +86,49 @@ func (m *Manager) releaseDispatchWorker(ctx context.Context, key string, allowMi
 	return err
 }
 
+// DispatchWorkerLost reports whether the provider confirms that the worker
+// reserved for a dispatch thread no longer exists. A stopped worker, a busy
+// machine or an uncertain provider answer is not lost: the caller keeps the
+// reservation and checks again later.
+func (m *Manager) DispatchWorkerLost(ctx context.Context, key string) (bool, error) {
+	batch, err := m.Batch(key)
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if len(key) != 32 || len(batch.Machines) != 1 || batch.Machines[0].Name != managedName("thread-"+key[:12])+"-01" {
+		return false, errors.New("the reservation does not identify a dedicated dispatch worker")
+	}
+	worker := batch.Machines[0]
+	if worker.State == "deleted" {
+		return true, nil
+	}
+	h, err := m.handle(worker.ID)
+	if err != nil {
+		return false, nil
+	}
+	// Never wait behind a running operation: the next sweep checks again.
+	if !h.operation.TryLock() {
+		return false, nil
+	}
+	defer h.operation.Unlock()
+	r := m.copy(h)
+	host := m.opts.Providers[r.Provider]
+	if r.RemoteID == "" || host == nil {
+		return false, nil
+	}
+	remote, err := host.Get(ctx, r.RemoteID)
+	if errors.Is(err, provider.ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, errors.New("fleet: provider status check failed")
+	}
+	return remote.State == provider.StateDeleted, nil
+}
+
 // ProvisionDispatchWorker reserves a single worker per thread before talking
 // to either provider. Namespace workers install the daemon's pinned runtime
 // only if the base image doesn't already have the hook.

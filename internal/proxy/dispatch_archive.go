@@ -140,7 +140,8 @@ func (d *dispatchPOC) releaseArchivedWorker(ctx context.Context, id string, sequ
 	return sequence, nil
 }
 
-// RunDispatchCleanup retries archived deletes and reclaims incomplete launches.
+// RunDispatchCleanup retries archived deletes, reclaims incomplete launches
+// and releases ready workers that their provider no longer has.
 func (p *Proxy) RunDispatchCleanup(ctx context.Context, report func(error)) {
 	d := p.dispatch
 	if d == nil || d.onDemand == nil || (d.onDemand.Release == nil && d.onDemand.Reclaim == nil) {
@@ -148,12 +149,17 @@ func (p *Proxy) RunDispatchCleanup(ctx context.Context, report func(error)) {
 	}
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
+	var nextLostSweep time.Time
 	for ctx.Err() == nil {
 		if d.onDemand.Release != nil {
 			d.retryDispatchArchives(ctx, report)
 		}
 		if d.onDemand.Reclaim != nil {
 			d.reclaimDispatchLaunches(ctx, time.Now().UTC(), report)
+		}
+		if d.onDemand.Release != nil && d.onDemand.Lost != nil && !time.Now().Before(nextLostSweep) {
+			d.releaseLostWorkers(ctx, report)
+			nextLostSweep = time.Now().Add(lostWorkerSweepInterval)
 		}
 		select {
 		case <-ctx.Done():
