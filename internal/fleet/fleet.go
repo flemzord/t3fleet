@@ -2,6 +2,7 @@
 package fleet
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -176,15 +177,7 @@ func (m *Manager) persistLocked() error {
 	for _, h := range m.machines {
 		disk.Records = append(disk.Records, h.record)
 	}
-	slices.SortFunc(disk.Records, func(a, b record) int {
-		if a.ID < b.ID {
-			return -1
-		}
-		if a.ID > b.ID {
-			return 1
-		}
-		return 0
-	})
+	slices.SortFunc(disk.Records, func(a, b record) int { return cmp.Compare(a.ID, b.ID) })
 	if err := m.opts.Store.Save(disk); err != nil {
 		return fmt.Errorf("fleet: persist state: %w", err)
 	}
@@ -227,15 +220,7 @@ func (m *Manager) List() []Machine {
 	for _, h := range m.machines {
 		result = append(result, h.record.Machine)
 	}
-	slices.SortFunc(result, func(a, b Machine) int {
-		if a.Name < b.Name {
-			return -1
-		}
-		if a.Name > b.Name {
-			return 1
-		}
-		return 0
-	})
+	slices.SortFunc(result, func(a, b Machine) int { return cmp.Compare(a.Name, b.Name) })
 	return result
 }
 func (m *Manager) Get(id string) (Machine, error) {
@@ -292,13 +277,18 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (Machine, error
 	m.mu.Unlock()
 	h.operation.Lock()
 	defer h.operation.Unlock()
-	remote, err := p.Create(ctx, provider.CreateRequest{Name: req.Name, Template: req.Template, Size: req.Size, OperationID: id, Labels: map[string]string{"t3fleet-id": id}})
-	if err != nil {
+	remote, createErr := p.Create(ctx, provider.CreateRequest{Name: req.Name, Template: req.Template, Size: req.Size, OperationID: id, Labels: map[string]string{"t3fleet-id": id}})
+	// A provider may allocate successfully and then fail activation. Retain
+	// that identity before reporting the error so recovery and deletion do not
+	// depend on replaying a billable creation request.
+	if remote.ID != "" {
+		if err := m.update(h, func(r *record) { r.RemoteID = remote.ID; r.State = "starting" }); err != nil {
+			return m.copy(h).Machine, err
+		}
+	}
+	if createErr != nil {
 		_ = m.update(h, func(r *record) { r.State = "create-failed" })
 		return m.copy(h).Machine, errors.New("fleet: provider creation failed; inspect the saved machine before retrying")
-	}
-	if err = m.update(h, func(r *record) { r.RemoteID = remote.ID; r.State = "starting" }); err != nil {
-		return m.copy(h).Machine, err
 	}
 	if err = m.initialize(ctx, h, p); err != nil {
 		_ = m.update(h, func(r *record) { r.State = "not-ready" })
@@ -317,8 +307,11 @@ func (m *Manager) initialize(ctx context.Context, h *machineHandle, p provider.P
 		return err
 	}
 	result, err := p.Exec(ctx, r.RemoteID, provider.ExecRequest{Args: []string{"/bin/bash", "-lc", "exec t3fleet-runtime-info"}})
-	if err != nil || result.ExitCode != 0 {
-		return errors.New("fleet: image runtime initialization failed; use a prepared t3fleet image")
+	if err != nil {
+		return errors.New("fleet: private runtime execution failed; inspect provider connectivity")
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("fleet: image runtime initialization exited %d; use a prepared t3fleet image", result.ExitCode)
 	}
 	var info struct {
 		Token         string `json:"token"`
@@ -430,12 +423,14 @@ func (m *Manager) ensure(ctx context.Context, h *machineHandle, force bool) erro
 	r := m.copy(h)
 	p := m.opts.Providers[r.Provider]
 	if r.RemoteID == "" {
-		remote, err := p.Create(ctx, provider.CreateRequest{Name: r.Name, Template: r.Template, Size: r.Size, OperationID: r.ID, Labels: map[string]string{"t3fleet-id": r.ID}})
-		if err != nil {
-			return errors.New("fleet: provider creation reconciliation failed; saved operation retained")
+		remote, createErr := p.Create(ctx, provider.CreateRequest{Name: r.Name, Template: r.Template, Size: r.Size, OperationID: r.ID, Labels: map[string]string{"t3fleet-id": r.ID}})
+		if remote.ID != "" {
+			if err := m.update(h, func(r *record) { r.RemoteID = remote.ID; r.State = "starting" }); err != nil {
+				return err
+			}
 		}
-		if err = m.update(h, func(r *record) { r.RemoteID = remote.ID; r.State = "starting" }); err != nil {
-			return err
+		if createErr != nil {
+			return errors.New("fleet: provider creation reconciliation failed; saved operation retained")
 		}
 		return m.initialize(ctx, h, p)
 	}
@@ -491,6 +486,24 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 	}
 	if err = m.opts.Providers[r.Provider].Stop(ctx, r.RemoteID); err != nil {
 		return errors.New("fleet: provider stop failed")
+	}
+	wait, cancel := context.WithTimeout(ctx, m.opts.ReadyTimeout)
+	defer cancel()
+	for {
+		remote, err := m.opts.Providers[r.Provider].Get(wait, r.RemoteID)
+		if err != nil {
+			return errors.New("fleet: provider stop could not be confirmed")
+		}
+		if remote.State == provider.StateStopped {
+			break
+		}
+		timer := time.NewTimer(200 * time.Millisecond)
+		select {
+		case <-wait.Done():
+			timer.Stop()
+			return wait.Err()
+		case <-timer.C:
+		}
 	}
 	return m.update(h, func(r *record) { r.State = "stopped" })
 }

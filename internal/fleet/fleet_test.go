@@ -601,3 +601,102 @@ func TestAlreadyDeletedRemoteConvergesLocalDeletion(t *testing.T) {
 		t.Fatalf("stale local machine remains: %v", err)
 	}
 }
+
+// Namespace can allocate a Devbox successfully and then fail its activation.
+// A returned provider identity is authoritative even when Create also reports
+// an error: retaining it makes cleanup and restart independent of replaying a
+// billable creation request.
+type partialIdentityProvider struct {
+	*mockProvider
+	failureMu      sync.Mutex
+	calls          int
+	failures       int
+	identityOnCall int
+}
+
+func (p *partialIdentityProvider) Create(ctx context.Context, req provider.CreateRequest) (provider.Machine, error) {
+	remote, err := p.mockProvider.Create(ctx, req)
+	if err != nil {
+		return remote, err
+	}
+	p.failureMu.Lock()
+	defer p.failureMu.Unlock()
+	p.calls++
+	if p.calls <= p.failures {
+		if p.calls < p.identityOnCall {
+			remote = provider.Machine{}
+		}
+		return remote, errors.New("activation failed after provider allocation")
+	}
+	return remote, nil
+}
+
+func TestCreatePartialIdentitySurvivesFailureAndAllowsCleanup(t *testing.T) {
+	f := newFleet(t)
+	if err := f.m.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	partial := &partialIdentityProvider{mockProvider: f.p, failures: 1, identityOnCall: 1}
+	f.options.Providers = map[string]provider.Provider{"mock": partial}
+	var err error
+	f.m, err = fleet.New(f.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, err := f.m.Create(t.Context(), fleet.CreateRequest{Name: "partial-identity", Provider: "mock"})
+	if err == nil || machine.ID == "" || machine.RemoteID == "" {
+		t.Fatalf("partially allocated identity was lost: %#v, %v", machine, err)
+	}
+	f.restart(t)
+	persisted, err := f.m.Get(machine.ID)
+	if err != nil || persisted.RemoteID != machine.RemoteID {
+		t.Fatalf("partial identity was not durable: %#v, %v", persisted, err)
+	}
+	if err := f.m.Delete(t.Context(), machine.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.p.mu.Lock()
+	defer f.p.mu.Unlock()
+	if len(f.p.requests) != 1 || len(f.p.machines) != 0 {
+		t.Fatalf("cleanup replayed creation or left its resource: requests=%d machines=%d", len(f.p.requests), len(f.p.machines))
+	}
+}
+
+func TestReconciledPartialIdentityAvoidsAnotherCreateAfterRestart(t *testing.T) {
+	f := newFleet(t)
+	if err := f.m.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	partial := &partialIdentityProvider{mockProvider: f.p, failures: 2, identityOnCall: 2}
+	f.options.Providers = map[string]provider.Provider{"mock": partial}
+	var err error
+	f.m, err = fleet.New(f.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, err := f.m.Create(t.Context(), fleet.CreateRequest{Name: "reconciled-identity", Provider: "mock"})
+	if err == nil || machine.ID == "" || machine.RemoteID != "" {
+		t.Fatalf("expected initial ambiguous creation: %#v, %v", machine, err)
+	}
+	f.restart(t)
+	if err := f.m.Start(t.Context(), machine.ID); err == nil {
+		t.Fatal("partial reconciliation unexpectedly succeeded")
+	}
+	persisted, err := f.m.Get(machine.ID)
+	if err != nil || persisted.RemoteID == "" {
+		t.Fatalf("reconciliation discarded returned identity: %#v, %v", persisted, err)
+	}
+	f.restart(t)
+	if err := f.m.Start(t.Context(), machine.ID); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := f.m.Get(machine.ID)
+	if err != nil || ready.State != "ready" || ready.RemoteID != persisted.RemoteID {
+		t.Fatalf("restart failed to reuse partial identity: %#v, %v", ready, err)
+	}
+	f.p.mu.Lock()
+	defer f.p.mu.Unlock()
+	if len(f.p.requests) != 2 || f.p.allocations != 1 {
+		t.Fatalf("restart unnecessarily replayed creation: requests=%d allocations=%d", len(f.p.requests), f.p.allocations)
+	}
+}
