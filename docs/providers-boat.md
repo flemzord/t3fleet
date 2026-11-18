@@ -149,6 +149,15 @@ The diagnostic never interpolates command output, private filenames, URLs,
 arbitrary causes, or arbitrary vendor messages. The underlying cause remains
 available through `Unwrap` for cancellation checks; do not log that raw cause.
 
+`completion (unexpected_api_stderr)` also catches warnings produced by Boat's
+login shell before the private-output script begins. One live cold-restore
+diagnosis found `LC_ALL=en_US.UTF-8` warnings from
+`/etc/profile.d/dev-environment.sh` and `/home/user/.profile`, while later commands
+completed successfully. The correct repair is in image locale initialization:
+make the locale available before exporting `LC_ALL`. The adapter deliberately
+does not ignore these warnings or retry the command, because arbitrary provider
+stderr may contain secret output or indicate that an execution already happened.
+
 ## Validation
 
 Mock HTTP tests cover lifecycle polling, snapshot readiness/failure,

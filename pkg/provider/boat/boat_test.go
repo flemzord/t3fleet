@@ -494,6 +494,12 @@ func TestExecRejectsMalformedCompletionAndCleansUp(t *testing.T) {
 		{"out-of-range", func(m map[string]any) { m["stdout"] = "999\n" }},
 		{"negative", func(m map[string]any) { m["stdout"] = "-1\n" }},
 		{"stderr", func(m map[string]any) { m["stderr"] = "TOKENMARKER" }},
+		// Observed on a cold snapshot restore: the provider's login profile
+		// emitted this before our script could redirect stderr. Fix the image's
+		// locale initialization; do not weaken the private output guarantee.
+		{"profile-locale-warning", func(m map[string]any) {
+			m["stderr"] = "/etc/profile.d/dev-environment.sh: line 2: warning: setlocale: LC_ALL: cannot change locale (en_US.UTF-8)\n"
+		}},
 		{"missing-exit", func(m map[string]any) { delete(m, "exitCode") }},
 		{"outer-failure", func(m map[string]any) { m["exitCode"] = 125 }},
 		{"truncated", func(m map[string]any) { m["stdoutTruncated"] = true }},
@@ -504,6 +510,12 @@ func TestExecRejectsMalformedCompletionAndCleansUp(t *testing.T) {
 			_, err := c.Exec(t.Context(), "bx_test", provider.ExecRequest{Args: []string{"printf", "TOKENMARKER"}})
 			if err == nil || strings.Contains(err.Error(), "TOKENMARKER") {
 				t.Fatalf("unsafe completion error: %v", err)
+			}
+			if tc.name == "profile-locale-warning" {
+				typed, ok := errors.AsType[*ExecError](err)
+				if !ok || !strings.Contains(typed.Error(), "unexpected_api_stderr") || strings.Contains(typed.Error(), "en_US") {
+					t.Fatalf("profile warning was not classified safely: %v", err)
+				}
 			}
 			f.checkDeleted(t)
 		})
