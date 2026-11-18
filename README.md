@@ -30,7 +30,7 @@ You need a provider account with permission to create machines, and a [prepared 
    ./t3fleet init
    ```
 
-   `init` asks for the provider, the Boat organization to bill, and the prepared template, then writes a private file at the default location (`t3fleet status` shows it). For scripts, pass the values as flags, such as `init --provider boat --boat-organization ORG --boat-snapshot SNAPSHOT --no-input`. The file holds no secrets. For Boat, export `BOAT_API_KEY` in the daemon's shell. For Namespace, use the [Namespace credential setup](https://github.com/flemzord/t3fleet/blob/main/docs/providers-namespace.md). [examples/config.json](examples/config.json) shows every field.
+   `init` asks for the provider, the Boat organization to bill, the prepared template, and an optional default VM size for each selected provider. It writes a private file at the default location (`t3fleet status` shows it). For scripts, pass the values as flags, such as `init --provider boat --boat-organization ORG --boat-snapshot SNAPSHOT --boat-size small --no-input`. The file holds no secrets. For Boat, export `BOAT_API_KEY` in the daemon's shell. For Namespace, use the [Namespace credential setup](https://github.com/flemzord/t3fleet/blob/main/docs/providers-namespace.md). See [examples/config.json](examples/config.json) for a sample configuration.
 
 2. Start the daemon:
 
@@ -51,6 +51,8 @@ You need a provider account with permission to create machines, and a [prepared 
    ```
 
 5. Confirm the association in T3 Code Desktop when it opens. Sign in to Claude Code or Codex on the remote machine using your model vendor's flow.
+
+Use `create --size` to override the [configured VM size](docs/getting-started.md#vm-size) for one machine or batch.
 
 For a headless host, use `create --no-register`, then `pair my-agent` to get a short-lived pairing link. If Desktop does not open, run `open my-agent` to retry. Keep the pairing link private.
 

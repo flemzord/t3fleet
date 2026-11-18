@@ -5,8 +5,8 @@
   "machineHost": "127.0.0.1",
   "expectedVersion": "0.1.11-nightly.20261117.4838",
   "providers": {
-    "boat": { "apiKeyEnv": "BOAT_API_KEY", "organization": "YOUR_BOAT_ORGANIZATION" },
-    "namespace": { "site": "iad", "virtualCPU": 4, "memoryMB": 8192, "architecture": "amd64" }
+    "boat": { "apiKeyEnv": "BOAT_API_KEY", "organization": "YOUR_BOAT_ORGANIZATION", "size": "small" },
+    "namespace": { "site": "iad", "size": "s", "architecture": "amd64" }
   },
   "templates": {
     "boat": { "snapshot": "YOUR_READY_BOAT_SNAPSHOT" },

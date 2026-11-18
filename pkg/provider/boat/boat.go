@@ -203,6 +203,16 @@ func sandboxPath(id string) (string, error) {
 	return "/sandboxes/" + url.PathEscape(id), nil
 }
 
+// ValidateSize accepts Boat's named presets or an empty provider default.
+func ValidateSize(size string) error {
+	switch size {
+	case "", "small", "default", "large", "xlarge":
+		return nil
+	default:
+		return errors.New("boat: size must be small, default, large, or xlarge")
+	}
+}
+
 func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provider.Machine, error) {
 	template := cmp.Or(req.Template.Snapshot, req.Template.Image)
 	if template == "" || (req.Template.Snapshot != "" && req.Template.Image != "" && req.Template.Snapshot != req.Template.Image) {
@@ -211,8 +221,8 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 	if req.OperationID == "" || len(req.OperationID) > 256 || strings.ContainsAny(req.OperationID, "\r\n\x00") {
 		return provider.Machine{}, errors.New("boat: operation id is required")
 	}
-	if req.Size != "" && !slices.Contains([]string{"small", "default", "large", "xlarge"}, req.Size) {
-		return provider.Machine{}, errors.New("boat: unsupported machine size")
+	if err := ValidateSize(req.Size); err != nil {
+		return provider.Machine{}, err
 	}
 	labels := maps.Clone(req.Labels)
 	if labels == nil {

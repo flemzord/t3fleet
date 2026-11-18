@@ -206,6 +206,10 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 	if (t.Image == "") == (t.Source == "") {
 		return provider.Machine{}, errors.New("namespace: choose either an image or a source Devbox snapshot")
 	}
+	shape, err := c.shape(req.Size)
+	if err != nil {
+		return provider.Machine{}, err
+	}
 	// A token failure happens before sending a request and is the only
 	// Namespace failure that currently proves this attempt did not create a
 	// Devbox. Errors from Create itself can happen during activation.
@@ -237,10 +241,6 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 		labels = append(labels, label{name, value})
 	}
 	labels = append(labels, label{operationLabel, req.OperationID})
-	shape, err := c.shape(req.Size)
-	if err != nil {
-		return provider.Machine{}, err
-	}
 	method := "Create"
 	input := map[string]any{"name": req.Name, "instanceShape": shape, "labels": labels}
 	if t.Source != "" {
@@ -281,20 +281,36 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 	}
 	return machine, err
 }
-func (c *Client) shape(size string) (map[string]any, error) {
-	cpu, mem := c.config.VirtualCPU, c.config.MemoryMB
+func namedShape(size string) (cpu, memoryMB int32, err error) {
 	switch size {
 	case "":
+		return 0, 0, nil
 	case "s":
-		cpu, mem = 4, 8192
+		return 4, 8192, nil
 	case "m":
-		cpu, mem = 8, 16384
+		return 8, 16384, nil
 	case "l":
-		cpu, mem = 16, 32768
+		return 16, 32768, nil
 	case "xl":
-		cpu, mem = 32, 65536
+		return 32, 65536, nil
 	default:
-		return nil, fmt.Errorf("namespace: unsupported size %q", size)
+		return 0, 0, errors.New("namespace: size must be s, m, l, or xl")
+	}
+}
+
+// ValidateSize accepts Namespace's named presets or an empty provider default.
+func ValidateSize(size string) error {
+	_, _, err := namedShape(size)
+	return err
+}
+
+func (c *Client) shape(size string) (map[string]any, error) {
+	cpu, mem, err := namedShape(size)
+	if err != nil {
+		return nil, err
+	}
+	if size == "" {
+		cpu, mem = c.config.VirtualCPU, c.config.MemoryMB
 	}
 	return map[string]any{"virtualCpu": cpu, "memoryMegabytes": mem, "machineArch": c.config.Architecture, "os": "linux"}, nil
 }

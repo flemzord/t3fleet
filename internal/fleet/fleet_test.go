@@ -454,6 +454,26 @@ func TestVersionMismatchRemainsRecoverable(t *testing.T) {
 	}
 }
 
+func TestCreateSizeOverridesProviderDefault(t *testing.T) {
+	for _, tc := range []struct{ requested, configured, want string }{
+		{configured: "small", want: "small"},
+		{requested: "large", configured: "small", want: "large"},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			f := newFleet(t)
+			f.options.DefaultSizes = map[string]string{"mock": tc.configured}
+			f.restart(t)
+			_, err := f.m.Create(t.Context(), fleet.CreateRequest{Name: "worker", Provider: "mock", Size: tc.requested})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := f.p.requests[0].Size; got != tc.want {
+				t.Fatalf("provider got size %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestAmbiguousCreateReconcilesDurableOperation(t *testing.T) {
 	f := newFleet(t)
 	f.p.createFailsOnce = true

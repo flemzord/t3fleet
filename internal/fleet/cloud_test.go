@@ -59,7 +59,7 @@ func TestCloudLifecycle(t *testing.T) {
 			}
 			defer func() { _ = disk.Close() }()
 			providers[name] = diagnosticProvider{Provider: p, t: t}
-			m, err := fleet.New(fleet.Options{Providers: providers, Templates: cfg.Templates, Store: disk, ExpectedVersion: cfg.ExpectedVersion, ReadyTimeout: 5 * time.Minute})
+			m, err := fleet.New(fleet.Options{Providers: providers, Templates: cfg.Templates, DefaultSizes: cfg.DefaultSizes(), Store: disk, ExpectedVersion: cfg.ExpectedVersion, ReadyTimeout: 5 * time.Minute})
 			if err != nil {
 				t.Fatal(err)
 			}

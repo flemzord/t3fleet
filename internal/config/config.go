@@ -70,6 +70,7 @@ type ProviderConfigs struct {
 }
 
 type Boat struct {
+	Size           string `json:"size,omitempty"`
 	APIKeyEnv      string `json:"apiKeyEnv,omitempty"`
 	APIKeyFile     string `json:"apiKeyFile,omitempty"`
 	CredentialFile string `json:"credentialFile,omitempty"`
@@ -79,6 +80,7 @@ type Boat struct {
 }
 
 type Namespace struct {
+	Size         string `json:"size,omitempty"`
 	Endpoint     string `json:"endpoint,omitempty"`
 	Site         string `json:"site,omitempty"`
 	VirtualCPU   int32  `json:"virtualCPU,omitempty"`
@@ -230,6 +232,9 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Providers.Boat != nil {
 		b := cfg.Providers.Boat
+		if err := boat.ValidateSize(b.Size); err != nil {
+			return fmt.Errorf("providers.boat.size: %w", err)
+		}
 		if b.APIKeyEnv != "" && strings.ContainsAny(b.APIKeyEnv, "=\x00\r\n") {
 			return errors.New("invalid Boat API key environment name")
 		}
@@ -239,10 +244,27 @@ func (cfg Config) Validate() error {
 			}
 		}
 	}
+	if n := cfg.Providers.Namespace; n != nil {
+		if err := namespace.ValidateSize(n.Size); err != nil {
+			return fmt.Errorf("providers.namespace.size: %w", err)
+		}
+	}
 	return nil
 }
 
 func loopback(host string) bool { ip := net.ParseIP(host); return ip != nil && ip.IsLoopback() }
+
+// DefaultSizes returns the named defaults for configured providers.
+func (cfg Config) DefaultSizes() map[string]string {
+	sizes := make(map[string]string, 2)
+	if b := cfg.Providers.Boat; b != nil {
+		sizes["boat"] = b.Size
+	}
+	if n := cfg.Providers.Namespace; n != nil {
+		sizes["namespace"] = n.Size
+	}
+	return sizes
+}
 
 // BuildProviders resolves credentials at daemon startup. CLI-only operations
 // never require cloud credentials. Secrets are not part of Config or its JSON.

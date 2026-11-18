@@ -6,7 +6,8 @@
     "boat": {
       "apiKeyEnv": "BOAT_API_KEY",
       "organization": "YOUR_BOAT_ORGANIZATION",
-      "environment": "YOUR_BOAT_ENVIRONMENT"
+      "environment": "YOUR_BOAT_ENVIRONMENT",
+      "size": "small"
     }
   },
   "templates": {

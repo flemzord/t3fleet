@@ -110,6 +110,29 @@ func TestBatchFullNamePreflightAndCancellation(t *testing.T) {
 	}
 }
 
+func TestBatchKeepsConfiguredSizeAfterRestart(t *testing.T) {
+	f := newFleet(t)
+	f.options.DefaultSizes = map[string]string{"mock": "small"}
+	f.restart(t)
+	req := batchRequest()
+	req.Size = ""
+	batch, err := f.m.PrepareBatch(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.options.DefaultSizes = map[string]string{"mock": "large"}
+	f.restart(t)
+	if err := f.m.Start(t.Context(), batch.Machines[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.p.requests[0].Size; got != "small" {
+		t.Fatalf("provider got size %q for the reserved batch, want small", got)
+	}
+	if _, err := f.m.PrepareBatch(t.Context(), req); !errors.Is(err, fleet.ErrConflict) {
+		t.Fatalf("replay accepted a different resolved size: %v", err)
+	}
+}
+
 // Each mock runtime returns a separate identity and service token, as required
 // of a credential-free golden template. Connections reject cross-machine tokens.
 type isolatedProvider struct {

@@ -10,8 +10,9 @@ use `./bin/t3fleet`; build it with `nix develop --command make build`.
 ```
 
 This reserves `t3fleet-workers-01` through `t3fleet-workers-10`. All machines use the same
-provider, size and resolved image/snapshot. Template and size overrides apply to
-the entire batch. When using a source Devbox, batches require an explicit
+provider, size and resolved image/snapshot. `--size` overrides the configured
+provider size for the entire batch. Template overrides also apply to the entire
+batch. When using a source Devbox, batches require an explicit
 `--snapshot` (or an explicit snapshot in configuration), so each worker cannot
 select a different "latest" snapshot. Do not replace a named snapshot or mutable
 image tag while a batch runs or recovers; t3fleet persists references and cannot
@@ -22,7 +23,7 @@ For example:
 ```sh
 # Replace SNAPSHOT_REFERENCE with a completed, credential-free snapshot.
 ./bin/t3fleet create --name workers --provider boat --count 10 \
-  --snapshot SNAPSHOT_REFERENCE --size SIZE --concurrency 3
+  --snapshot SNAPSHOT_REFERENCE --size small --concurrency 3
 ```
 
 Wait for the snapshot to complete before using it.
@@ -74,8 +75,9 @@ size and lifecycle state. Restart the daemon normally after a process failure.
 ./bin/t3fleet create --resume BATCH_ID --concurrency 3 --no-register
 ```
 
-Resume starts incomplete members with their original operation IDs. It skips
-already-ready members during allocation and never recreates deleted members.
+Resume starts incomplete members with their original operation IDs and saved
+size preset. It skips already-ready members during allocation and never
+recreates deleted members.
 A lost allocation response is reconciled by the provider with the saved ID.
 Never change the name or invent a new batch to recover an uncertain outcome.
 

@@ -22,6 +22,13 @@ the Boat account's repositories, secrets, and agent credentials. Setting
 `Config.Environment` explicitly opts in to the named Boat environment instead.
 Use credential-free, versioned golden snapshots independently of this option.
 
+## VM size
+
+Set `providers.boat.size` in the daemon configuration, or pass `--boat-size` to
+`t3fleet init`, to select `small`, `default`, `large`, or `xlarge`. Leave the
+setting unset to let Boat choose the size. For a manual creation, `create --size`
+overrides this setting.
+
 ## Lifecycle
 
 | t3fleet operation | Boat API |

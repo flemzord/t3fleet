@@ -254,11 +254,14 @@ then open T3 Code Desktop to confirm the association.
 New names receive the t3fleet- prefix once; the full name is limited to 32
 characters. --provider is optional when only one provider is configured.
 
+--size overrides the configured size for the selected provider. Boat accepts
+small, default, large, xlarge. Namespace accepts s, m, l, xl.
+
 With --count, t3fleet creates a durable batch named t3fleet-NAME-01,
 t3fleet-NAME-02, ... and prints a batch ID. Resume an interrupted batch with
 --resume BATCH_ID.`,
 		Example: `  t3fleet create --name agent
-  t3fleet create --name agent --provider namespace --size large
+  t3fleet create --name agent --provider namespace --size l
   t3fleet create --name agent --snapshot my-golden --no-register
   t3fleet create --name workers --count 10 --concurrency 3 --no-register
   t3fleet create --resume 0123456789abcdef0123456789abcdef`,
@@ -299,7 +302,7 @@ t3fleet-NAME-02, ... and prints a batch ID. Resume an interrupted batch with
 	flags.SortFlags = false
 	flags.StringVarP(&request.Name, "name", "n", "", "machine name")
 	flags.StringVarP(&request.Provider, "provider", "p", "", "boat or namespace (default: the only configured provider)")
-	flags.StringVar(&request.Size, "size", "", "provider machine size")
+	flags.StringVar(&request.Size, "size", "", "machine size (overrides the configured provider default)")
 	flags.StringVar(&request.Template.Image, "image", "", "prepared image reference (overrides the template)")
 	flags.StringVar(&request.Template.Snapshot, "snapshot", "", "prepared snapshot reference (overrides the template)")
 	flags.StringVar(&request.Template.Source, "source", "", "golden Namespace Devbox to fork (overrides the template)")

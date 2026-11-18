@@ -146,6 +146,21 @@ For unattended use, configure an appropriate scoped credential through the SDK's
 
 For on-demand threads, see [provider order and Namespace fallback](dispatch-poc.md#fall-back-to-namespace). This setting does not change the provider selected by `t3fleet create --provider`.
 
+### VM size
+
+Set `providers.boat.size` or `providers.namespace.size` to choose the default
+size for new machines on that provider. `t3fleet init` prompts for this value;
+scripts can pass `--boat-size` and `--namespace-size` for the selected providers.
+
+| Provider | Presets | If `size` is omitted |
+| --- | --- | --- |
+| Boat | `small`, `default`, `large`, `xlarge` | Boat chooses the size. |
+| Namespace | `s`, `m`, `l`, `xl` | The daemon uses `virtualCPU` and `memoryMB` (4 CPUs and 8192 MB by default). |
+
+See [Namespace size presets](providers-namespace.md#configuration) for their CPU
+and memory values. Restart the daemon after editing its configuration. The setting
+applies to new machines, including on-demand workers.
+
 ### T3 version
 
 Set `expectedVersion` to the exact server/client version, without a leading `v`. The reference default currently matches `0.1.11-nightly.20261117.4838`. A mismatch leaves the machine managed but not ready. Rebuild the golden template and update the configuration together after a compatibility test.
@@ -170,6 +185,9 @@ In another terminal:
 ```
 
 Use `--provider namespace` for a Namespace machine. New names are automatically prefixed once with `t3fleet-`: `--name my-agent` creates `t3fleet-my-agent`. The full name must fit 32 characters. Existing records retain their names. `create` prints the new machine's name and managed ID; `create --json` prints the full record with its `id`, `remoteId`, `state`, and stable local `url`. Other commands accept the machine name, its full ID, or a unique ID prefix.
+
+Pass `--size` to override the configured size for this creation, for example
+`--provider boat --size large` or `--provider namespace --size m`.
 
 `create` prepares a one-use pairing link and opens it in T3 Code on the computer running the CLI. Confirm the backend in T3 to finish saving it. There is no separate `pair` step or manual link to copy in the normal flow. The creation result goes to standard output; progress and handoff instructions go to standard error. An interactive terminal shows an activity spinner and elapsed time during creation and readiness checks. Redirected output uses plain messages without terminal escape sequences. The indicator reports activity, not a completion percentage.
 

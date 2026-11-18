@@ -229,9 +229,11 @@ func (m *Manager) advanceDispatchProvider(key string, h *machineHandle) error {
 	batch := old
 	batch.Request.Provider = next
 	batch.Request.Template = template
+	batch.Request.Size = m.opts.DefaultSizes[next]
 	m.batches[key] = batch
 	if err := m.updateLocked(h, func(r *record) {
 		r.Provider, r.Template, r.InstallRuntime, r.State = next, template, next == "namespace", "planned"
+		r.Size = batch.Request.Size
 		r.DispatchFallbacks = r.DispatchFallbacks[1:]
 	}); err != nil {
 		m.batches[key] = old

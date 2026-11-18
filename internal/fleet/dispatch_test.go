@@ -19,10 +19,12 @@ type dispatchProvider struct {
 	attempts     int
 	checkouts    int
 	bootstrap    int
+	lastSize     string
 }
 
 func (p *dispatchProvider) Create(ctx context.Context, req provider.CreateRequest) (provider.Machine, error) {
 	p.attempts++
+	p.lastSize = req.Size
 	if p.onCreate != nil {
 		p.onCreate()
 	}
@@ -65,6 +67,8 @@ func dispatchProviders(t *testing.T) (*fixture, *dispatchProvider, *dispatchProv
 
 func TestDispatchFallbackRecoversSameDevboxAfterRestart(t *testing.T) {
 	f, boat, namespace := dispatchProviders(t)
+	f.options.DefaultSizes = map[string]string{"boat": "small", "namespace": "m"}
+	f.restart(t)
 	boat.createErrors = []error{provider.ErrCreateRejected}
 	namespace.createFailsOnce = true // Namespace allocates, then loses its reply.
 	key := strings.Repeat("a", 32)
@@ -76,6 +80,10 @@ func TestDispatchFallbackRecoversSameDevboxAfterRestart(t *testing.T) {
 	if err != nil || len(first.Machines) != 1 || first.Machines[0].Provider != "namespace" {
 		t.Fatalf("fallback reservation was not saved: %+v, %v", first, err)
 	}
+	if boat.lastSize != "small" || namespace.lastSize != "m" {
+		t.Fatalf("provider sizes: Boat=%q Namespace=%q", boat.lastSize, namespace.lastSize)
+	}
+	f.options.DefaultSizes = map[string]string{"boat": "large", "namespace": "l"}
 	f.restart(t)
 	// Changing the policy does not reroute an existing reservation.
 	if _, cwd, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, []string{"namespace", "boat"}); err != nil || cwd == "" {
@@ -88,6 +96,9 @@ func TestDispatchFallbackRecoversSameDevboxAfterRestart(t *testing.T) {
 	if boat.attempts != 1 || boat.allocations != 0 || namespace.allocations != 1 || namespace.bootstrap != 1 ||
 		namespace.checkouts != 1 || namespace.requests[1].Template.Image != "registered:example-org/t3-worker" {
 		t.Fatalf("unexpected provider activity: Boat attempts=%d, Namespace allocations=%d", boat.attempts, namespace.allocations)
+	}
+	if namespace.lastSize != "m" {
+		t.Fatalf("fallback size was not preserved after restart: %q", namespace.lastSize)
 	}
 	if _, err := f.m.LookupDispatchWorker(key); err != nil {
 		t.Fatal(err)

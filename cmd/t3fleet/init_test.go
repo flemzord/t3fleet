@@ -30,7 +30,7 @@ func initApp(out, diag io.Writer, input string, tty bool) *app {
 func TestInitWritesPrivateValidConfigAndNeverOverwrites(t *testing.T) {
 	home := isolateUserDirs(t)
 	path := filepath.Join(home, "fresh", "t3fleet", "config.json")
-	args := []string{"init", "--config", path, "--provider", "boat", "--boat-organization", "acme", "--boat-snapshot", "snap-1", "--no-input"}
+	args := []string{"init", "--config", path, "--provider", "boat", "--boat-organization", "acme", "--boat-snapshot", "snap-1", "--boat-size", "small", "--no-input"}
 	var out, diag bytes.Buffer
 	if err := initApp(&out, &diag, "", true).execute(t.Context(), args); err != nil {
 		t.Fatal(err)
@@ -49,7 +49,7 @@ func TestInitWritesPrivateValidConfigAndNeverOverwrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generated config does not load: %v", err)
 	}
-	if cfg.Providers.Boat == nil || cfg.Providers.Boat.Organization != "acme" || cfg.Templates["boat"].Snapshot != "snap-1" || cfg.Providers.Namespace != nil {
+	if cfg.Providers.Boat == nil || cfg.Providers.Boat.Organization != "acme" || cfg.Providers.Boat.Size != "small" || cfg.Templates["boat"].Snapshot != "snap-1" || cfg.Providers.Namespace != nil {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 
@@ -76,8 +76,8 @@ func TestInitWritesPrivateValidConfigAndNeverOverwrites(t *testing.T) {
 func TestInitPromptsForMissingValues(t *testing.T) {
 	home := isolateUserDirs(t)
 	path := filepath.Join(home, "config.json")
-	// providers, boat org, boat snapshot (skip), namespace site, source, snapshot
-	input := "both\nacme\n\niad\ngolden\nsnap-9\n"
+	// providers, Boat org, snapshot (skip), size, Namespace site, source, snapshot, size
+	input := "both\nacme\n\nsmall\niad\ngolden\nsnap-9\nm\n"
 	var diag bytes.Buffer
 	if err := initApp(io.Discard, &diag, input, true).execute(t.Context(), []string{"init", "--config", path}); err != nil {
 		t.Fatal(err)
@@ -86,7 +86,7 @@ func TestInitPromptsForMissingValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Providers.Boat == nil || cfg.Providers.Boat.Organization != "acme" || cfg.Providers.Namespace == nil || cfg.Providers.Namespace.Site != "iad" {
+	if cfg.Providers.Boat == nil || cfg.Providers.Boat.Organization != "acme" || cfg.Providers.Boat.Size != "small" || cfg.Providers.Namespace == nil || cfg.Providers.Namespace.Site != "iad" || cfg.Providers.Namespace.Size != "m" {
 		t.Fatalf("providers: %+v", cfg.Providers)
 	}
 	if _, ok := cfg.Templates["boat"]; ok || cfg.Templates["namespace"].Source != "golden" || cfg.Templates["namespace"].Snapshot != "snap-9" {
@@ -105,6 +105,9 @@ func TestInitRejectsIncompleteInputAndPrintsWithoutWriting(t *testing.T) {
 		{"init", "--config", path, "--provider", "aws"},
 		{"init", "--config", path, "--provider", "namespace", "--namespace-snapshot", "snap"},
 		{"init", "--config", path, "--provider", "boat", "--state-dir", "relative"},
+		{"init", "--config", path, "--provider", "boat", "--boat-size", "m"},
+		{"init", "--config", path, "--provider", "namespace", "--namespace-size", "large"},
+		{"init", "--config", path, "--provider", "boat", "--namespace-size", "m"},
 	} {
 		if err := initApp(io.Discard, io.Discard, "", false).execute(t.Context(), args); err == nil {
 			t.Fatalf("accepted %v", args)

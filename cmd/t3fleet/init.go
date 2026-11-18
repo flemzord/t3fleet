@@ -22,7 +22,9 @@ type initOptions struct {
 	stateDir          string
 	boatOrganization  string
 	boatSnapshot      string
+	boatSize          string
 	namespaceSite     string
+	namespaceSize     string
 	namespaceSource   string
 	namespaceSnapshot string
 	noInput           bool
@@ -44,7 +46,7 @@ the environment or the provider's own login when it starts.
 The directory is created private (0700) and the file is written 0600. An
 existing file is never replaced unless you pass --force.`,
 		Example: `  t3fleet init
-  t3fleet init --provider boat --boat-organization my-org --boat-snapshot snap-123
+  t3fleet init --provider boat --boat-organization my-org --boat-snapshot snap-123 --boat-size small
   t3fleet init --provider namespace --namespace-source golden-devbox --no-input
   t3fleet init --provider boat --print`,
 		Args:              noArgs,
@@ -58,7 +60,9 @@ existing file is never replaced unless you pass --force.`,
 	flags.StringSliceVarP(&opts.providers, "provider", "p", nil, "provider to configure: boat, namespace (repeat or comma-separate for both)")
 	flags.StringVar(&opts.boatOrganization, "boat-organization", "", "Boat organization to bill (empty follows the current Boat wallet)")
 	flags.StringVar(&opts.boatSnapshot, "boat-snapshot", "", "prepared Boat snapshot used as the default template")
+	flags.StringVar(&opts.boatSize, "boat-size", "", "default Boat size: small, default, large, xlarge")
 	flags.StringVar(&opts.namespaceSite, "namespace-site", "", "Namespace site, such as iad (empty uses the provider default)")
+	flags.StringVar(&opts.namespaceSize, "namespace-size", "", "default Namespace size: s, m, l, xl")
 	flags.StringVar(&opts.namespaceSource, "namespace-source", "", "golden Namespace Devbox used as the default template")
 	flags.StringVar(&opts.namespaceSnapshot, "namespace-snapshot", "", "completed snapshot of the golden Devbox (empty uses the latest)")
 	flags.StringVar(&opts.stateDir, "state-dir", "", "absolute private state directory (default "+config.Default().StateDir+")")
@@ -120,6 +124,12 @@ func (a *app) runInit(ctx context.Context, cmd *cobra.Command, opts initOptions)
 	if err != nil {
 		return err
 	}
+	if changed("boat-size") && !slices.Contains(providers, "boat") {
+		return errors.New("--boat-size requires --provider boat")
+	}
+	if changed("namespace-size") && !slices.Contains(providers, "namespace") {
+		return errors.New("--namespace-size requires --provider namespace")
+	}
 
 	cfg := config.Default()
 	if opts.stateDir != "" {
@@ -132,7 +142,10 @@ func (a *app) runInit(ctx context.Context, cmd *cobra.Command, opts initOptions)
 		if err := ask("boat-snapshot", "Prepared Boat snapshot (empty to set later)", &opts.boatSnapshot); err != nil {
 			return err
 		}
-		cfg.Providers.Boat = &config.Boat{APIKeyEnv: "BOAT_API_KEY", Organization: opts.boatOrganization}
+		if err := ask("boat-size", "Boat size (small, default, large, xlarge; empty uses Boat's default)", &opts.boatSize); err != nil {
+			return err
+		}
+		cfg.Providers.Boat = &config.Boat{APIKeyEnv: "BOAT_API_KEY", Organization: opts.boatOrganization, Size: opts.boatSize}
 		if opts.boatSnapshot != "" {
 			cfg.Templates["boat"] = provider.Template{Snapshot: opts.boatSnapshot}
 		}
@@ -152,7 +165,10 @@ func (a *app) runInit(ctx context.Context, cmd *cobra.Command, opts initOptions)
 		if opts.namespaceSnapshot != "" && opts.namespaceSource == "" {
 			return hinted("pass --namespace-source with --namespace-snapshot", "a Namespace snapshot requires its golden Devbox")
 		}
-		cfg.Providers.Namespace = &config.Namespace{Site: opts.namespaceSite}
+		if err := ask("namespace-size", "Namespace size (s, m, l, xl; empty uses the default CPU and memory)", &opts.namespaceSize); err != nil {
+			return err
+		}
+		cfg.Providers.Namespace = &config.Namespace{Site: opts.namespaceSite, Size: opts.namespaceSize}
 		if opts.namespaceSource != "" {
 			cfg.Templates["namespace"] = provider.Template{Source: opts.namespaceSource, Snapshot: opts.namespaceSnapshot}
 		}

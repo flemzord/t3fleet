@@ -24,6 +24,7 @@ any positive integer (for example, `100`). Provider quotas still apply.
    set `templates.boat.snapshot` to a prepared T3 snapshot. Set
    `providers.boat.environment` if the VM needs that environment's repository
    and model credentials. For Namespace, set `templates.namespace.image`.
+   Set an optional [VM size](getting-started.md#vm-size) for each provider.
 2. Set `dispatchPOC.onDemand.t3Binary` to an absolute executable path for T3
    matching `expectedVersion`. Leave `idleTimeout` unset or at `"0"` and omit
    `workers`. Start `t3fleet serve --config PATH`.
@@ -72,7 +73,7 @@ registered Namespace image:
 
 ```json
 {
-  "providers": { "namespace": {} },
+  "providers": { "namespace": { "size": "s" } },
   "templates": { "namespace": { "image": "registered:example-org/t3-worker" } },
   "dispatchPOC": { "onDemand": { "providerOrder": ["boat", "namespace"] } }
 }
@@ -90,6 +91,10 @@ If omitted, the order defaults to `["boat"]`. The legacy
 `namespaceFallback: true` still means `["boat", "namespace"]`; remove it when
 setting `providerOrder`. Every new reservation starts with the first provider.
 This setting does not apply to manual creation or the fixed worker pool.
+
+Each provider attempt uses that provider's configured size. For example, when
+Boat falls back to Namespace, the worker uses `providers.namespace.size`. The
+daemon saves the selected preset with the attempt so retries keep that preset.
 
 t3fleet advances only when the current provider confirms that its first attempt
 did not allocate a worker. Explicit Boat billing, limit and capacity refusals

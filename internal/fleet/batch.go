@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -60,6 +61,7 @@ func (m *Manager) prepareBatch(ctx context.Context, req BatchRequest, dispatchOr
 	if req.Template.Source != "" && req.Template.Snapshot == "" {
 		return Batch{}, fmt.Errorf("%w: batch creation requires an explicit snapshot for a source machine", ErrInvalid)
 	}
+	req.Size = cmp.Or(req.Size, m.opts.DefaultSizes[req.Provider])
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {

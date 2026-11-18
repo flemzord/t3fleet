@@ -19,8 +19,19 @@ connection through Namespace's authenticated TLS gateway. It does not spawn
 | `HTTPClient` | Two-minute request timeout | Optional HTTP transport for Connect calls. |
 | `DialSSH` | Native gateway connector | Injectable connection seam, primarily for offline tests. |
 
-Named sizes `s`, `m`, `l`, and `xl` resolve to 4/8/16/32 CPUs and
-8/16/32/64 GiB respectively. Golden snapshot forks inherit their source site;
+Set `providers.namespace.size` in the daemon configuration, or pass
+`--namespace-size` to `t3fleet init`, to select one of these presets:
+
+| Size | Virtual CPUs | Memory (MB) |
+| --- | ---: | ---: |
+| `s` | 4 | 8192 |
+| `m` | 8 | 16384 |
+| `l` | 16 | 32768 |
+| `xl` | 32 | 65536 |
+
+`create --size` overrides the configured preset for a manual creation. If no
+preset is selected, the daemon uses `providers.namespace.virtualCPU` and
+`providers.namespace.memoryMB`. Golden snapshot forks inherit their source site;
 image creation uses `Site`.
 
 Production control-plane endpoints require HTTPS. HTTP is accepted only on

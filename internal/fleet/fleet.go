@@ -41,6 +41,7 @@ type Options struct {
 	IdleCheckInterval time.Duration
 	Providers         map[string]provider.Provider
 	Templates         map[string]provider.Template
+	DefaultSizes      map[string]string
 	Store             Storage
 	ExpectedVersion   string
 	ListenHost        string
@@ -307,6 +308,7 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (Machine, error
 	if req.Template == (provider.Template{}) {
 		return Machine{}, fmt.Errorf("%w: a prepared image or snapshot is required", ErrInvalid)
 	}
+	req.Size = cmp.Or(req.Size, m.opts.DefaultSizes[req.Provider])
 	idBytes := make([]byte, 16)
 	if _, err := rand.Read(idBytes); err != nil {
 		return Machine{}, errors.New("fleet: cannot generate machine identity")
