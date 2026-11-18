@@ -28,7 +28,7 @@ func (p *Proxy) socket(w http.ResponseWriter, r *http.Request) {
 			headers.Set(name, value)
 		}
 	}
-	machine, _, err := websocket.Dial(ctx, targetURL(up.Endpoint, r, true).String(), &websocket.DialOptions{HTTPClient: &http.Client{Transport: tr}, HTTPHeader: headers, Subprotocols: strings.FieldsFunc(r.Header.Get("Sec-WebSocket-Protocol"), func(r rune) bool { return r == ',' || r == ' ' })})
+	machine, _, err := websocket.Dial(ctx, targetURL(up.Endpoint, r, true).String(), &websocket.DialOptions{HTTPClient: &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, HTTPHeader: headers, Subprotocols: strings.FieldsFunc(r.Header.Get("Sec-WebSocket-Protocol"), func(r rune) bool { return r == ',' || r == ' ' })})
 	if err != nil {
 		fail(w, http.StatusBadGateway, "upstream socket unavailable")
 		return

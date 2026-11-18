@@ -509,3 +509,34 @@ func TestPublicDescriptorUsesCacheWithoutWaking(t *testing.T) {
 		t.Fatal("shared cached descriptor was modified")
 	}
 }
+
+func TestWebSocketDoesNotFollowCredentialRedirect(t *testing.T) {
+	var redirected atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer target.Close()
+	upstream := sourceServer(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/ws", http.StatusTemporaryRedirect)
+	})
+	p, server := proxyServer(t, upstream.URL, func(cfg *Config) {
+		cfg.Resolve = func(context.Context) (Upstream, error) {
+			return Upstream{Endpoint: provider.Endpoint{URL: upstream.URL, Headers: http.Header{"Cookie": {"provider-grant=fixture"}}}, Token: "service-secret"}, nil
+		}
+	})
+	token := exchange(t, p, server)
+	ticket := ticketValue(t, server, token, "rpc")
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/ws?wsTicket="+url.QueryEscape(ticket), nil)
+	if conn != nil {
+		_ = conn.CloseNow()
+	}
+	if err == nil {
+		t.Fatal("unexpected websocket success")
+	}
+	if redirected.Load() != 0 {
+		t.Fatal("upstream credentials followed a WebSocket redirect")
+	}
+}

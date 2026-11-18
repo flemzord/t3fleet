@@ -308,7 +308,9 @@ func transport(ep provider.Endpoint) *http.Transport {
 	if ep.DialContext != nil {
 		t.DialContext = ep.DialContext
 	}
-	t.ForceAttemptHTTP2 = false
+	// Preserve the default transport's HTTP/2 configuration. Merely disabling
+	// ForceAttemptHTTP2 on a clone can leave h2 ALPN enabled without its wire
+	// protocol handler. net/http requires HTTP/1 for WebSocket upgrades itself.
 	return t
 }
 func targetURL(ep provider.Endpoint, r *http.Request, ws bool) *url.URL {
