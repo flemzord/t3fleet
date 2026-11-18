@@ -12,7 +12,7 @@ require (
 require (
 	connectrpc.com/connect v1.20.0 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.2 // indirect
-	github.com/gorilla/websocket v1.5.1 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/jpillora/chisel v1.10.1 // indirect
 	github.com/jpillora/sizestr v1.0.0 // indirect
 	github.com/jxskiss/base62 v1.1.0 // indirect
