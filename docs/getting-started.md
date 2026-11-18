@@ -165,7 +165,7 @@ In another terminal:
 ./bin/t3fleet list --config /absolute/path/to/config.json
 ```
 
-Use `--provider namespace` for a Namespace machine. The create response includes the managed machine's `id`, `remoteId`, `state`, and stable local `url`. Use the managed `id` for CLI commands.
+Use `--provider namespace` for a Namespace machine. New names are automatically prefixed once with `t3fleet-`: `--name my-agent` creates `t3fleet-my-agent`. The full name must fit 32 characters. Existing records retain their names. The create response includes the managed machine's `id`, `remoteId`, `state`, and stable local `url`. Use the managed `id` for CLI commands.
 
 `create` prepares a one-use pairing link and opens it in T3 Code on the computer running the CLI. Confirm the backend in T3 to finish saving it. There is no separate `pair` step or manual link to copy in the normal flow. The machine JSON remains on standard output; progress and handoff instructions go to standard error. An interactive terminal shows an activity spinner and elapsed time during creation and readiness checks. Redirected output uses plain messages without terminal escape sequences. The indicator reports activity, not a completion percentage.
 

@@ -37,9 +37,10 @@ Commands:
   pair ID                     Print the T3 Code pairing deep link
   version                     Print the CLI version
 
-Bulk create: --count 10 --concurrency 3; names become NAME-01 through NAME-10.
+Bulk create: --count 10 --concurrency 3; names become t3fleet-NAME-01 through t3fleet-NAME-10.
 Resume a batch: create --resume BATCH_ID [--no-register].
 Scripted multi-delete: delete --ids ID,ID --yes (managed IDs only).
+New machine names receive t3fleet- automatically (once); total limit: 32 characters.
 Create overrides: --image REF, --snapshot REF, --source GOLDEN_DEVBOX, --size SIZE.
 Use create --no-register for headless scripts or to pair manually later.
 T3 Code requires confirmation before saving an association.

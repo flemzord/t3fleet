@@ -70,6 +70,10 @@ In a second terminal, using the same configuration:
 
 Progress appears on standard error, leaving standard output as machine JSON. When output is redirected or `TERM=dumb`, progress uses plain start/completion messages instead of animation.
 
+New machine names receive the `t3fleet-` prefix automatically, without doubling
+an existing prefix. `--name my-agent` creates `t3fleet-my-agent`. Existing machines
+and saved batches retain their original names. The final name must fit 32 characters.
+
 The returned JSON contains the machine `id` for subsequent commands. On a headless host or in scripts, use `create --no-register` to skip desktop association. Use `pair MACHINE_ID` later to print a short-lived, one-use `t3code://` link. Do not share that link or put it in logs.
 
 If T3 cannot be opened, the machine remains created and the CLI reports its ID. Run `pair` for that ID with the same configuration to recover; do not create another VM.
@@ -86,7 +90,7 @@ For Namespace, use `--provider namespace`. [The complete setup guide](docs/getti
 ./bin/t3fleet delete --ids MACHINE_ID_1,MACHINE_ID_2 --yes
 ```
 
-Bulk create uses `workers-01` through `workers-10` with the same template and
+Bulk create uses `t3fleet-workers-01` through `t3fleet-workers-10` with the same template and
 size. It saves the full plan before allocation, reports each outcome and retains
 failed members for safe recovery. Use `--no-register` for scripts. Interactive
 association opens each ready VM in T3 and waits before the next handoff; T3 still

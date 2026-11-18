@@ -283,3 +283,91 @@ func TestBatchRejectsSharedRuntimeIdentity(t *testing.T) {
 		t.Fatal("shared runtime failure lost recoverable identity")
 	}
 }
+
+func TestManagedNamePrefixAndLength(t *testing.T) {
+	f := newFleet(t)
+	first, err := f.m.Create(t.Context(), fleet.CreateRequest{Name: "example", Provider: "mock"})
+	if err != nil || first.Name != "t3fleet-example" {
+		t.Fatal(first, err)
+	}
+	if duplicate, err := f.m.Create(t.Context(), fleet.CreateRequest{Name: "t3fleet-example", Provider: "mock"}); !errors.Is(err, fleet.ErrConflict) || duplicate.ID != first.ID {
+		t.Fatal("prefixed alias created a duplicate", duplicate, err)
+	}
+	f.p.mu.Lock()
+	actualName := f.p.requests[0].Name
+	f.p.mu.Unlock()
+	if actualName != "t3fleet-example" {
+		t.Fatal("provider name lacks prefix")
+	}
+	req := batchRequest()
+	req.Name = "t3fleet-workers"
+	plan, err := f.m.PrepareBatch(t.Context(), req)
+	if err != nil || plan.Machines[0].Name != "t3fleet-workers-01" || plan.Machines[9].Name != "t3fleet-workers-10" {
+		t.Fatal(plan, err)
+	}
+	req.Name = "workers"
+	replay, err := f.m.PrepareBatch(t.Context(), req)
+	if err != nil || replay.Machines[0].ID != plan.Machines[0].ID {
+		t.Fatal("prefix alias changed batch replay")
+	}
+	if _, err := f.m.Create(t.Context(), fleet.CreateRequest{Name: strings.Repeat("n", 25), Provider: "mock"}); !errors.Is(err, fleet.ErrInvalid) {
+		t.Fatal("accepted overlong prefixed single name")
+	}
+	req.ID = strings.Repeat("b", 32)
+	req.Name = strings.Repeat("n", 22)
+	if _, err := f.m.PrepareBatch(t.Context(), req); !errors.Is(err, fleet.ErrInvalid) {
+		t.Fatal("accepted overlong prefixed batch name")
+	}
+	req.Name = strings.Repeat("n", 21)
+	if _, err := f.m.PrepareBatch(t.Context(), req); err != nil {
+		t.Fatal("rejected exact name limit", err)
+	}
+}
+
+func TestLegacyBatchNamesSurviveReplayAndRecovery(t *testing.T) {
+	f := newFleet(t)
+	req := batchRequest()
+	req.Count = 2
+	plan, err := f.m.PrepareBatch(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.m.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	// Model the state schema written before automatic prefixing was introduced.
+	var document map[string]any
+	if err := f.store.Load(&document); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range document["machines"].([]any) {
+		record := value.(map[string]any)
+		record["name"] = strings.TrimPrefix(record["name"].(string), "t3fleet-")
+	}
+	for _, value := range document["batches"].(map[string]any) {
+		delete(value.(map[string]any), "names")
+	}
+	if err := f.store.Save(document); err != nil {
+		t.Fatal(err)
+	}
+	f.restart(t)
+	replay, err := f.m.PrepareBatch(t.Context(), req)
+	if err != nil || replay.Machines[0].Name != "workers-01" || replay.Machines[0].ID != plan.Machines[0].ID {
+		t.Fatal("legacy plan renamed", replay, err)
+	}
+	if err := f.m.Delete(t.Context(), plan.Machines[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.m.Start(t.Context(), plan.Machines[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	saved, _ := f.m.Batch(req.ID)
+	if saved.Machines[0].Name != "workers-01" || saved.Machines[0].State != "deleted" {
+		t.Fatal("legacy tombstone renamed")
+	}
+	f.p.mu.Lock()
+	defer f.p.mu.Unlock()
+	if len(f.p.requests) != 1 || f.p.requests[0].Name != "workers-02" {
+		t.Fatal("legacy recovery changed cloud name")
+	}
+}

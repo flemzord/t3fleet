@@ -9,7 +9,7 @@ use `./bin/t3fleet`; build it with `nix develop --command make build`.
 ./bin/t3fleet create --name workers --provider boat --count 10 --concurrency 3
 ```
 
-This reserves `workers-01` through `workers-10`. All machines use the same
+This reserves `t3fleet-workers-01` through `t3fleet-workers-10`. All machines use the same
 provider, size and resolved image/snapshot. Template and size overrides apply to
 the entire batch. When using a source Devbox, batches require an explicit
 `--snapshot` (or an explicit snapshot in configuration), so each worker cannot
@@ -31,10 +31,14 @@ available, prepared snapshot before running a paid cloud trial.
 
 Count is limited to 100. Concurrency defaults to 3 and must be between 1 and 10;
 it bounds lifecycle requests in this CLI invocation. Separate CLI invocations
-have separate limits. Names, including suffixes, must fit the normal 32-character
-name limit. Without `--count` or with `--count 1`, the original single-machine
-command keeps its exact name. Adding `--batch-id` explicitly uses the batch
-workflow, including a `-01` suffix for a batch of one.
+have separate limits. New names receive `t3fleet-` automatically, once. Names,
+including the prefix and suffix, must fit the normal 32-character name limit. For ten machines this
+leaves 21 characters for an unprefixed base name; for 100 it leaves 20.
+No name is silently truncated. Existing machines and saved batch plans keep
+their names, including during replay, recovery and deleted-member reporting.
+Without `--count` or with `--count 1`, the original single-machine command adds
+only the `t3fleet-` prefix, without a numeric suffix. Adding `--batch-id` explicitly
+uses the batch workflow, including a `-01` suffix for a batch of one.
 
 The daemon validates **every local name**, provider and template and reserves
 all local ports and operation IDs in one durable write **before allocation**.

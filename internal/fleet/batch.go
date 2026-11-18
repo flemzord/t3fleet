@@ -26,6 +26,7 @@ type Batch struct {
 type batchRecord struct {
 	Request BatchRequest `json:"request"`
 	IDs     []string     `json:"ids"`
+	Names   []string     `json:"names,omitempty"`
 }
 
 // PrepareBatch atomically reserves every local name and operation identity before
@@ -52,23 +53,30 @@ func (m *Manager) PrepareBatch(ctx context.Context, req BatchRequest) (Batch, er
 	if req.Template.Source != "" && req.Template.Snapshot == "" {
 		return Batch{}, fmt.Errorf("%w: batch creation requires an explicit snapshot for a source machine", ErrInvalid)
 	}
-	names := make([]string, req.Count)
-	for i := range names {
-		names[i] = fmt.Sprintf("%s-%02d", req.Name, i+1)
-		if !validName.MatchString(names[i]) {
-			return Batch{}, ErrInvalid
-		}
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
 		return Batch{}, ErrClosed
 	}
 	if old, ok := m.batches[req.ID]; ok {
-		if old.Request != req {
+		comparison := old.Request
+		comparison.Name = managedName(comparison.Name)
+		candidate := req
+		candidate.Name = managedName(candidate.Name)
+		if comparison != candidate {
 			return Batch{}, ErrConflict
 		}
 		return m.batchLocked(req.ID), nil
+	}
+	if !validName.MatchString(req.Name) {
+		return Batch{}, ErrInvalid
+	}
+	names := make([]string, req.Count)
+	for i := range names {
+		names[i] = fmt.Sprintf("%s-%02d", managedName(req.Name), i+1)
+		if !validName.MatchString(names[i]) {
+			return Batch{}, fmt.Errorf("%w: name including t3fleet- and batch suffix must fit 32 characters", ErrInvalid)
+		}
 	}
 	for _, h := range m.machines {
 		for _, name := range names {
@@ -77,7 +85,7 @@ func (m *Manager) PrepareBatch(ctx context.Context, req BatchRequest) (Batch, er
 			}
 		}
 	}
-	b := batchRecord{Request: req}
+	b := batchRecord{Request: req, Names: names}
 	rollback := func() {
 		for _, id := range b.IDs {
 			_ = m.machines[id].server.Close()
@@ -124,7 +132,11 @@ func (m *Manager) batchLocked(id string) Batch {
 		if h := m.machines[machineID]; h != nil {
 			result.Machines = append(result.Machines, h.record.Machine)
 		} else {
-			result.Machines = append(result.Machines, Machine{ID: machineID, Name: fmt.Sprintf("%s-%02d", b.Request.Name, i+1), Provider: b.Request.Provider, State: "deleted"})
+			name := fmt.Sprintf("%s-%02d", b.Request.Name, i+1)
+			if len(b.Names) == len(b.IDs) {
+				name = b.Names[i]
+			}
+			result.Machines = append(result.Machines, Machine{ID: machineID, Name: name, Provider: b.Request.Provider, State: "deleted"})
 		}
 	}
 	return result

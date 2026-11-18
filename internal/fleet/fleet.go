@@ -246,6 +246,10 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (Machine, error
 	if !validName.MatchString(req.Name) {
 		return Machine{}, fmt.Errorf("%w: name must match [a-z][a-z0-9-]{0,31}", ErrInvalid)
 	}
+	req.Name = managedName(req.Name)
+	if !validName.MatchString(req.Name) {
+		return Machine{}, fmt.Errorf("%w: name including t3fleet- must fit 32 characters", ErrInvalid)
+	}
 	p := m.opts.Providers[req.Provider]
 	if p == nil {
 		return Machine{}, fmt.Errorf("%w: unknown provider", ErrInvalid)

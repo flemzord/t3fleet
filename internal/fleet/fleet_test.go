@@ -291,7 +291,7 @@ func TestLifecyclePairingWakeAndDurableRestart(t *testing.T) {
 	f := newFleet(t)
 	machine := create(t, f, "workbench")
 	status, b := request(t, machine.URL+"/.well-known/t3/environment", "")
-	if status != http.StatusOK || !strings.Contains(string(b), `"label":"workbench"`) || strings.Contains(string(b), "directEndpoints") {
+	if status != http.StatusOK || !strings.Contains(string(b), `"label":"t3fleet-workbench"`) || strings.Contains(string(b), "directEndpoints") {
 		t.Fatalf("descriptor %d: %s", status, b)
 	}
 	if status, _ := request(t, machine.URL+"/api/probe", ""); status != http.StatusUnauthorized {
