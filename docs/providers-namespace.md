@@ -72,6 +72,23 @@ For [on-demand dispatch](dispatch.md), configure an image or a source with an ex
 
 ## Lifecycle and retry behavior
 
+### Worker inventory
+
+`t3fleet list` shows the daemon's local state and the Devbox state separately.
+`t3fleet status` counts fleet states globally and Devbox states per configured
+Namespace instance. Both commands use
+the tenant's read-only `Fetch` RPC with the exact managed Devbox ID. Namespace's
+`List` RPC does not include the active instance ID.
+
+An active instance means `running`; a Devbox with no active instance is
+`stopped`. An explicit `destroyedAt` takes precedence and means `deleted`.
+A missing Devbox, failed lookup, or unreadable response gives `unknown`
+without an observation time. Other successful lookups remain visible. The
+daemon limits the number of simultaneous reads and does not activate Devboxes
+or request SSH credentials for inventory.
+
+### Lifecycle operations
+
 The adapter maps lifecycle operations to `Fetch`, `Activate`, `Stop`, and
 `Expire`. Activation sets `waitForReadiness:true`. Readiness here means the
 Namespace instance is available; the caller must separately check T3's

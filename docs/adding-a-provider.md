@@ -48,6 +48,11 @@ HTTP endpoints may include provider query credentials. Those credentials must st
 
 ## 3. Add optional capabilities honestly
 
+Implement `provider.StateObserver` if the adapter can read the current states
+of managed remote IDs without waking their machines. Use the configured account,
+honor cancellation, and return only display-safe states for the requested IDs.
+An omitted ID is unobserved, not proof of deletion.
+
 Implement `provider.Snapshotter` only if the provider offers a reliable explicit capture operation:
 
 ```go

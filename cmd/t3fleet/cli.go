@@ -319,7 +319,7 @@ func (a *app) listCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:               "list",
 		Aliases:           []string{"ls"},
-		Short:             "List managed machines",
+		Short:             "List managed machines with their fleet and live provider states",
 		GroupID:           "machines",
 		Example:           "  t3fleet list\n  t3fleet list --json | jq -r '.[].id'",
 		Args:              noArgs,
@@ -329,16 +329,16 @@ func (a *app) listCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			data, err := d.call(cmd.Context(), http.MethodGet, "/v1/machines", nil)
+			data, err := d.inventory(cmd.Context())
 			if err != nil {
 				return err
 			}
 			if asJSON {
 				return printRawJSON(a.stdout, data)
 			}
-			var machines []fleet.Machine
-			if json.Unmarshal(data, &machines) != nil {
-				return errors.New("invalid daemon response")
+			machines, err := parseInventory(data)
+			if err != nil {
+				return err
 			}
 			if len(machines) == 0 {
 				fmt.Fprintln(a.stderr, "No workers yet. Start a thread in the paired T3 environment to allocate one.")
@@ -624,18 +624,64 @@ on-demand threads from another T3 server. Keep the link or code private.`,
 }
 
 type statusReport struct {
-	FleetListen   string         `json:"fleetListen,omitempty"`
-	ProviderOrder []string       `json:"providerOrder,omitempty"`
-	MaxWorkers    int            `json:"maxWorkers,omitempty"`
-	Config        string         `json:"config"`
-	ConfigSource  string         `json:"configSource"`
-	ConfigFound   bool           `json:"configFound"`
-	StateDir      string         `json:"stateDir"`
-	Listen        string         `json:"listen"`
-	Providers     []string       `json:"providers"`
-	Daemon        daemonStatus   `json:"daemon"`
-	Machines      map[string]int `json:"machines,omitempty"`
-	Total         int            `json:"total"`
+	FleetListen    string                      `json:"fleetListen,omitempty"`
+	ProviderOrder  []string                    `json:"providerOrder,omitempty"`
+	MaxWorkers     int                         `json:"maxWorkers,omitempty"`
+	Config         string                      `json:"config"`
+	ConfigSource   string                      `json:"configSource"`
+	ConfigFound    bool                        `json:"configFound"`
+	StateDir       string                      `json:"stateDir"`
+	Listen         string                      `json:"listen"`
+	Providers      []string                    `json:"providers"`
+	Daemon         daemonStatus                `json:"daemon"`
+	Machines       map[string]int              `json:"machines,omitempty"`
+	Total          int                         `json:"total"`
+	ProviderStates map[string]*providerSummary `json:"providerStates,omitempty"`
+}
+
+type providerSummary struct {
+	States     map[string]int `json:"states"`
+	Total      int            `json:"total"`
+	ObservedAt time.Time      `json:"observedAt,omitzero"`
+}
+
+func (r *statusReport) summarize(machines []fleet.ObservedMachine) {
+	r.Total = len(machines)
+	r.Machines = make(map[string]int)
+	r.ProviderStates = make(map[string]*providerSummary)
+	for _, m := range machines {
+		r.Machines[m.State]++
+		if m.ProviderState == "" {
+			continue // Unsupported provider, or an older daemon.
+		}
+		s := r.ProviderStates[m.Provider]
+		if s == nil {
+			s = &providerSummary{States: make(map[string]int)}
+			r.ProviderStates[m.Provider] = s
+		}
+		s.Total++
+		s.States[m.ProviderState]++
+		if m.ProviderObservedAt.After(s.ObservedAt) {
+			s.ObservedAt = m.ProviderObservedAt
+		}
+	}
+}
+
+func (a *app) readInventorySummary(ctx context.Context, report *statusReport) error {
+	d, err := a.daemon()
+	if err != nil {
+		return err
+	}
+	data, err := d.inventory(ctx)
+	if err != nil {
+		return err
+	}
+	machines, err := parseInventory(data)
+	if err != nil {
+		return err
+	}
+	report.summarize(machines)
+	return nil
 }
 
 type daemonStatus struct {
@@ -649,7 +695,7 @@ func (a *app) statusCommand() *cobra.Command {
 		Use:               "status",
 		Short:             "Show the configuration, daemon and machine summary",
 		GroupID:           "daemon",
-		Long:              "Show settings from the selected file, whether the daemon answers, and how many\nmachines it manages by state. Restart the daemon after editing the file. Exits with an error when the daemon is not running.",
+		Long:              "Show settings from the selected file, whether the daemon answers, and counts by\nfleet state and live provider state. Restart the daemon after editing the file. Exits with an error when the daemon is not running.",
 		Example:           "  t3fleet status\n  t3fleet status --json",
 		Args:              noArgs,
 		ValidArgsFunction: cobra.NoFileCompletions,
@@ -665,19 +711,12 @@ func (a *app) statusCommand() *cobra.Command {
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 3*time.Second)
 			defer cancel()
+			var inventoryErr error
 			if data, err := callAdmin(ctx, cfg.Listen, "", http.MethodGet, "/_info", nil); err == nil {
 				var info struct{ Version string }
 				_ = json.Unmarshal(data, &info)
 				report.Daemon = daemonStatus{Running: true, Version: info.Version}
-				if token, err := readAdminToken(cfg.StateDir); err == nil {
-					if machines, err := (daemonClient{cfg: cfg, token: token}).machines(ctx); err == nil {
-						report.Machines = map[string]int{}
-						for _, m := range machines {
-							report.Machines[m.State]++
-						}
-						report.Total = len(machines)
-					}
-				}
+				inventoryErr = a.readInventorySummary(cmd.Context(), &report)
 			}
 			if asJSON {
 				if err := printJSON(a.stdout, report); err != nil {
@@ -692,7 +731,7 @@ func (a *app) statusCommand() *cobra.Command {
 				}
 				return hinted("start it with 't3fleet serve' using the same configuration", "the fleet daemon is not running on %s", cfg.Listen)
 			}
-			return nil
+			return inventoryErr
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the status as JSON")
@@ -729,7 +768,18 @@ func (a *app) printStatus(r statusReport) {
 		fmt.Fprintf(tw, "Daemon:\t%s\n", styleIf(color, "31", "not running on "+r.Listen))
 	}
 	if r.Machines != nil {
-		fmt.Fprintf(tw, "Machines:\t%s\n", machineSummary(r.Machines, r.Total))
+		fmt.Fprintf(tw, "Fleet state:\t%s\n", machineSummary(r.Machines, r.Total))
+		if r.Total > 0 && len(r.ProviderStates) == 0 {
+			fmt.Fprintln(tw, "Provider state:\tnot reported")
+		}
+		for _, name := range slices.Sorted(maps.Keys(r.ProviderStates)) {
+			s := r.ProviderStates[name]
+			fmt.Fprintf(tw, "Provider state (%s):\t%s", name, machineSummary(s.States, s.Total))
+			if !s.ObservedAt.IsZero() {
+				fmt.Fprintf(tw, "; last observed %s", observationTime(s.ObservedAt))
+			}
+			fmt.Fprintln(tw)
+		}
 	}
 	tw.Flush()
 }
