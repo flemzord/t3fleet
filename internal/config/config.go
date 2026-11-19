@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/flemzord/t3fleet/pkg/provider"
@@ -34,7 +35,33 @@ type Dispatch struct {
 	ProviderOrder         []string `json:"providerOrder"`
 	MaxWorkers            int      `json:"maxWorkers,omitempty"`
 	Model                 string   `json:"model,omitempty"`
+	Agents                []Agent  `json:"agents,omitempty"`
 	DeleteWorkerOnArchive bool     `json:"deleteWorkerOnArchive,omitempty"`
+}
+
+// Agent declares one T3 provider driver and the models the fleet offers for
+// it. The T3 instance ID is the driver name, as on a default T3 server.
+type Agent struct {
+	Driver string   `json:"driver"`
+	Models []string `json:"models"`
+}
+
+// DefaultModel is the Codex model offered when no agent or model is set.
+const DefaultModel = "gpt-5.4"
+
+// AgentDrivers lists the T3 drivers a worker image can run.
+var AgentDrivers = []string{"codex", "claudeAgent", "pi"}
+
+// AgentCatalog returns the declared agents. Without dispatch.agents it offers
+// the single Codex model from dispatch.model. The first model is the default.
+func (d Dispatch) AgentCatalog() []Agent {
+	if len(d.Agents) != 0 {
+		return d.Agents
+	}
+	if d.Model != "" {
+		return []Agent{{Driver: "codex", Models: []string{d.Model}}}
+	}
+	return []Agent{{Driver: "codex", Models: []string{DefaultModel}}}
 }
 
 func (d Dispatch) MaxWorkerCount() int {
@@ -109,8 +136,11 @@ func (cfg Config) Validate() error {
 	if d.MaxWorkers < 0 {
 		return errors.New("dispatch.maxWorkers must be positive or zero for the default")
 	}
-	if len(d.Model) > 128 || strings.ContainsAny(d.Model, " \t\r\n\x00") {
+	if d.Model != "" && !validModel(d.Model) {
 		return errors.New("dispatch.model must be a Codex model identifier")
+	}
+	if err := validateAgents(d); err != nil {
+		return err
 	}
 	if len(d.ProviderOrder) == 0 {
 		return errors.New("dispatch.providerOrder must contain at least one configured instance name")
@@ -132,6 +162,46 @@ func (cfg Config) Validate() error {
 			return fmt.Errorf("dispatch.providerOrder repeats %q", name)
 		}
 		seen[name] = true
+	}
+	return nil
+}
+
+func validModel(model string) bool {
+	return model != "" && len(model) <= 128 && !strings.ContainsAny(model, " \t\r\n\x00")
+}
+
+func validateAgents(d *Dispatch) error {
+	if d.Agents == nil {
+		return nil
+	}
+	if d.Model != "" {
+		return errors.New("dispatch.model and dispatch.agents are exclusive; list the Codex model under dispatch.agents")
+	}
+	if len(d.Agents) == 0 {
+		return errors.New("dispatch.agents must declare at least one agent")
+	}
+	drivers := make(map[string]bool)
+	for _, agent := range d.Agents {
+		if !slices.Contains(AgentDrivers, agent.Driver) {
+			return fmt.Errorf("dispatch.agents driver must be one of %s", strings.Join(AgentDrivers, ", "))
+		}
+		if drivers[agent.Driver] {
+			return fmt.Errorf("dispatch.agents repeats driver %q", agent.Driver)
+		}
+		drivers[agent.Driver] = true
+		if len(agent.Models) == 0 {
+			return fmt.Errorf("dispatch.agents.%s must list at least one model", agent.Driver)
+		}
+		models := make(map[string]bool)
+		for _, model := range agent.Models {
+			if !validModel(model) {
+				return fmt.Errorf("dispatch.agents.%s models must be identifiers of at most 128 characters without spaces", agent.Driver)
+			}
+			if models[model] {
+				return fmt.Errorf("dispatch.agents.%s repeats model %q", agent.Driver, model)
+			}
+			models[model] = true
+		}
 	}
 	return nil
 }

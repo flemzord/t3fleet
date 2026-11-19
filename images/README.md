@@ -1,6 +1,6 @@
 # Reference image
 
-This optional image contains the pinned T3 server, Claude Code, Codex and the
+This optional image contains the pinned T3 server, Claude Code, Codex, Pi and the
 `t3fleet-runtime-info` handshake. It uses only the public `t3fleet` flake and
 Nixpkgs; it does not require a personal Nix configuration.
 

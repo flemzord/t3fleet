@@ -20,14 +20,48 @@ type DispatchOnDemand struct {
 	Controller  DispatchWorker
 	ProjectRoot string
 	MaxWorkers  int
-	Model       string
-	Provision   func(context.Context, string, string) (DispatchWorker, string, error)
-	Lookup      func(string) (DispatchWorker, error)
-	Release     func(context.Context, string) error // nil keeps archived workers
-	Reclaim     func(context.Context, string) error // releases an incomplete launch, including one without a fleet batch
+	// Agents lists the T3 drivers and models workers offer; the first model
+	// is the default. Empty means the default Codex model.
+	Agents    []DispatchAgent
+	Provision func(context.Context, string, string) (DispatchWorker, string, error)
+	Lookup    func(string) (DispatchWorker, error)
+	Release   func(context.Context, string) error // nil keeps archived workers
+	Reclaim   func(context.Context, string) error // releases an incomplete launch, including one without a fleet batch
 	// Lost retires the local worker record and reports true only when the
 	// provider confirms absence. It does not delete remote machines.
 	Lost func(context.Context, string) (bool, error)
+}
+
+// DispatchAgent is one T3 provider driver offered by every worker. Its T3
+// instance ID is the driver name.
+type DispatchAgent struct {
+	Driver string
+	Models []string
+}
+
+const defaultDispatchModel = "gpt-5.4"
+
+var agentDisplayNames = map[string]string{"codex": "Codex", "claudeAgent": "Claude", "pi": "Pi"}
+
+func agentDisplayName(driver string) string {
+	return cmp.Or(agentDisplayNames[driver], driver)
+}
+
+func (o *DispatchOnDemand) agents() []DispatchAgent {
+	if len(o.Agents) == 0 {
+		return []DispatchAgent{{Driver: "codex", Models: []string{defaultDispatchModel}}}
+	}
+	return o.Agents
+}
+
+// offers reports whether a worker runs this T3 instance and model.
+func (o *DispatchOnDemand) offers(instance, model string) bool {
+	for _, agent := range o.agents() {
+		if instance == agent.Driver && slices.Contains(agent.Models, model) {
+			return true
+		}
+	}
+	return false
 }
 
 type demandRoute struct {
@@ -294,10 +328,16 @@ func (d *dispatcher) callOnDemand(ctx context.Context, tag string, frame, payloa
 }
 
 func (d *dispatcher) demandProviders() []any {
-	model := cmp.Or(d.onDemand.Model, "gpt-5.4")
-	return []any{map[string]any{"instanceId": "codex", "driver": "codex", "enabled": true, "installed": true,
-		"version": nil, "status": "ready", "auth": map[string]any{"status": "unknown"},
-		"checkedAt": time.Now().UTC().Format(time.RFC3339Nano), "models": []any{
-			map[string]any{"slug": model, "name": model, "isCustom": model != "gpt-5.4", "isDefault": true, "capabilities": nil},
-		}}}
+	checked := time.Now().UTC().Format(time.RFC3339Nano)
+	var providers []any
+	for _, agent := range d.onDemand.agents() {
+		models := make([]any, 0, len(agent.Models))
+		for i, model := range agent.Models {
+			models = append(models, map[string]any{"slug": model, "name": model,
+				"isCustom": agent.Driver != "codex" || model != defaultDispatchModel, "isDefault": i == 0, "capabilities": nil})
+		}
+		providers = append(providers, map[string]any{"instanceId": agent.Driver, "driver": agent.Driver, "enabled": true, "installed": true,
+			"version": nil, "status": "ready", "auth": map[string]any{"status": "unknown"}, "checkedAt": checked, "models": models})
+	}
+	return providers
 }

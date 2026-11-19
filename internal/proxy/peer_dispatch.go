@@ -291,18 +291,19 @@ func (d *dispatcher) launchPeerThread(w http.ResponseWriter, r *http.Request, re
 		failTool("invalid_request", "Pass a registered project, title and text message in a root checkout or new worktree.")
 		return
 	}
-	model := d.peerModel()
 	if requested, _ := tool.Arguments["modelSelection"].(map[string]any); requested != nil {
-		instance := requested["instanceId"]
-		if instance == nil {
-			instance = requested["provider"]
+		instance, _ := requested["instanceId"].(string)
+		if requested["instanceId"] == nil {
+			instance, _ = requested["provider"].(string)
 		}
-		if requested["model"] != model || instance != "codex" {
-			failTool("invalid_request", "This t3fleet environment runs one configured Codex model.")
+		model, _ := requested["model"].(string)
+		if !d.onDemand.offers(instance, model) {
+			failTool("invalid_request", "This t3fleet environment only runs the agents and models listed by orchestrator_capabilities.")
 			return
 		}
 	} else {
-		tool.Arguments["modelSelection"] = map[string]string{"instanceId": "codex", "model": model}
+		agent := d.onDemand.agents()[0]
+		tool.Arguments["modelSelection"] = map[string]string{"instanceId": agent.Driver, "model": agent.Models[0]}
 	}
 	if requestKey == "" {
 		var err error
@@ -504,13 +505,6 @@ func (d *dispatcher) writePeerToolResult(w http.ResponseWriter, body io.Reader, 
 	d.writePeerResult(w, reply, tool)
 }
 
-func (d *dispatcher) peerModel() string {
-	if d.onDemand.Model != "" {
-		return d.onDemand.Model
-	}
-	return "gpt-5.4"
-}
-
 func (d *dispatcher) writePeerResult(w http.ResponseWriter, reply map[string]any, tool string) {
 	if data := peerStructuredResult(reply); data != nil {
 		d.mu.Lock()
@@ -528,15 +522,23 @@ func (d *dispatcher) writePeerResult(w http.ResponseWriter, reply map[string]any
 		case "t3_environment_read":
 			data["environmentId"], data["label"] = env, dispatchLabel
 		case "orchestrator_capabilities":
-			data["providers"] = []any{map[string]any{
-				"providerInstanceId":           "codex",
-				"driverKind":                   "codex",
-				"displayName":                  "Codex",
-				"models":                       []any{map[string]string{"id": d.peerModel()}},
-				"canRunChildTask":              false,
-				"canRunCrossProviderChildTask": false,
-				"constraints":                  []string{"t3fleet runs the configured model on demand; worker authentication is checked at launch."},
-			}}
+			var providers []any
+			for _, agent := range d.onDemand.agents() {
+				models := make([]any, 0, len(agent.Models))
+				for _, model := range agent.Models {
+					models = append(models, map[string]string{"id": model})
+				}
+				providers = append(providers, map[string]any{
+					"providerInstanceId":           agent.Driver,
+					"driverKind":                   agent.Driver,
+					"displayName":                  agentDisplayName(agent.Driver),
+					"models":                       models,
+					"canRunChildTask":              false,
+					"canRunCrossProviderChildTask": false,
+					"constraints":                  []string{"t3fleet runs the configured models on demand; worker installation and authentication are checked at launch."},
+				})
+			}
+			data["providers"] = providers
 			if features, ok := data["features"].(map[string]any); ok {
 				features["appOwnedSubagents"], features["batchThreadCreation"], features["scheduledTasks"] = false, false, false
 				features["maxBatchThreads"] = 0

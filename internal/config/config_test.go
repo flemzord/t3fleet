@@ -46,6 +46,37 @@ func TestLoadNamedProviders(t *testing.T) {
 	}
 }
 
+func TestAgentCatalog(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	for _, tc := range []struct {
+		name, old, new string
+		want           []Agent
+	}{
+		{"default", "", "", []Agent{{Driver: "codex", Models: []string{DefaultModel}}}},
+		{"legacy model", `"t3Binary":`, `"model":"gpt-6.1","t3Binary":`, []Agent{{Driver: "codex", Models: []string{"gpt-6.1"}}}},
+		{"declared agents", `"t3Binary":`, `"agents":[{"driver":"pi","models":["deepseek/v4"]},{"driver":"claudeAgent","models":["claude-opus-5-5","claude-sonnet-5-5"]},{"driver":"codex","models":["gpt-5.4"]}],"t3Binary":`,
+			[]Agent{{Driver: "pi", Models: []string{"deepseek/v4"}}, {Driver: "claudeAgent", Models: []string{"claude-opus-5-5", "claude-sonnet-5-5"}}, {Driver: "codex", Models: []string{"gpt-5.4"}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Load(writeConfig(t, strings.Replace(fixture, tc.old, tc.new, 1)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := cfg.Dispatch.AgentCatalog()
+			if !slices.EqualFunc(got, tc.want, func(a, b Agent) bool { return a.Driver == b.Driver && slices.Equal(a.Models, b.Models) }) {
+				t.Fatalf("catalog = %+v, want %+v", got, tc.want)
+			}
+			encoded, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(writeConfig(t, string(encoded))); err != nil {
+				t.Fatalf("serialized configuration cannot be loaded: %v", err)
+			}
+		})
+	}
+}
+
 func TestRejectInvalidConfiguration(t *testing.T) {
 	for _, tc := range []struct{ name, old, new string }{
 		{"missing wallet", `"organization":"fast-org",`, ""},
@@ -69,6 +100,14 @@ func TestRejectInvalidConfiguration(t *testing.T) {
 		{"relative controller", `"/opt/t3"`, `"t3"`},
 		{"invalid model", `"t3Binary":`, `"model":"wrong model","t3Binary":`},
 		{"negative capacity", `"t3Binary":`, `"maxWorkers":-1,"t3Binary":`},
+		{"empty agents", `"t3Binary":`, `"agents":[],"t3Binary":`},
+		{"model with agents", `"t3Binary":`, `"model":"gpt-5.4","agents":[{"driver":"codex","models":["gpt-5.4"]}],"t3Binary":`},
+		{"unknown agent driver", `"t3Binary":`, `"agents":[{"driver":"cursor","models":["auto"]}],"t3Binary":`},
+		{"repeated agent driver", `"t3Binary":`, `"agents":[{"driver":"pi","models":["a"]},{"driver":"pi","models":["b"]}],"t3Binary":`},
+		{"agent without models", `"t3Binary":`, `"agents":[{"driver":"pi","models":[]}],"t3Binary":`},
+		{"invalid agent model", `"t3Binary":`, `"agents":[{"driver":"pi","models":["bad model"]}],"t3Binary":`},
+		{"repeated agent model", `"t3Binary":`, `"agents":[{"driver":"pi","models":["a","a"]}],"t3Binary":`},
+		{"unknown agent field", `"t3Binary":`, `"agents":[{"driver":"pi","models":["a"],"instance":"x"}],"t3Binary":`},
 		{"unknown Boat size", `"large"`, `"xl"`},
 		{"unknown Namespace size", `"virtualCPU":12,"memoryMB":32768`, `"size":"large"`},
 		{"Namespace size and custom CPU", `"virtualCPU":12`, `"size":"l","virtualCPU":12`},

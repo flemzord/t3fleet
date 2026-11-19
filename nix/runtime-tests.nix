@@ -61,7 +61,7 @@ let
   };
   imageAgents = pkgs.symlinkJoin {
     name = "t3fleet-image-test-agents";
-    paths = [ fakeT3 (pkgs.writeShellScriptBin "codex" "exit 0") (pkgs.writeShellScriptBin "claude" "exit 0") ];
+    paths = [ fakeT3 (pkgs.writeShellScriptBin "codex" "exit 0") (pkgs.writeShellScriptBin "claude" "exit 0") (pkgs.writeShellScriptBin "pi" "exit 0") ];
   };
   testPkgs = pkgs // { util-linux = kernelUtilities; };
   runtime = pkgs.callPackage ./runtime.nix { pkgs = testPkgs; t3Server = fakeT3; };
@@ -159,6 +159,11 @@ pkgs.runCommand "t3fleet-runtime-tests" { nativeBuildInputs = [ pkgs.python3 ]; 
           assert first == second
           assert first["environmentId"] == "env-startup-fixture"
           assert (home / "mint.log").read_text().splitlines() == ["mint"]
+          settings = home / ".t3fleet/t3/userdata/settings.json"
+          assert stat.S_IMODE(settings.stat().st_mode) == 0o600
+          instances = json.loads(settings.read_text())["providerInstances"]
+          assert {name: value["driver"] for name, value in instances.items()} == {"codex": "codex", "claudeAgent": "claudeAgent", "pi": "pi"}
+          assert instances["pi"]["enabled"] is True
       finally:
           pid_file = home / "mock-server.pid"
           if pid_file.exists():

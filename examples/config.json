@@ -44,7 +44,11 @@
       "reserve"
     ],
     "maxWorkers": 8,
-    "model": "gpt-5.4",
+    "agents": [
+      { "driver": "codex", "models": ["gpt-5.4"] },
+      { "driver": "claudeAgent", "models": ["claude-opus-5-5", "claude-sonnet-5-5"] },
+      { "driver": "pi", "models": ["default"] }
+    ],
     "deleteWorkerOnArchive": false
   }
 }
