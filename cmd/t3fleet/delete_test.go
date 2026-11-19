@@ -59,7 +59,7 @@ func TestDeleteSelectionConfirmationAndIsolation(t *testing.T) {
 			var out, diag bytes.Buffer
 			a := testApp(cfg, &out, &diag)
 			a.stdin, a.stdinTTY = strings.NewReader(tc.input), tc.interactive
-			err := a.execute(t.Context(), append([]string{"delete"}, tc.args...))
+			err := a.execute(t.Context(), append([]string{"admin", "delete"}, tc.args...))
 			if (err != nil) != tc.wantErr || !slices.Equal(deleted, tc.want) {
 				t.Fatalf("err=%v deleted=%v want=%v", err, deleted, tc.want)
 			}
@@ -95,7 +95,7 @@ func TestDeletePartialFailureContinuesOnlySelectedIDs(t *testing.T) {
 	defer server.Close()
 	cfg.Listen = strings.TrimPrefix(server.URL, "http://")
 	var out, diag bytes.Buffer
-	err := runClient(t.Context(), cfg, "delete", []string{"--ids", "one,two", "--yes", "--json"}, &out, &diag)
+	err := runClient(t.Context(), cfg, "admin", []string{"delete", "--ids", "one,two", "--yes", "--json"}, &out, &diag)
 	if err == nil || !slices.Equal(calls, []string{"/v1/machines/one", "/v1/machines/two"}) {
 		t.Fatal("wrong partial deletion", err, calls)
 	}

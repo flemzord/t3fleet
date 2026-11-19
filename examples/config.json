@@ -1,15 +1,50 @@
 {
   "listen": "127.0.0.1:47730",
   "stateDir": "/absolute/path/to/private/t3fleet-state",
-  "idleTimeout": "0",
-  "machineHost": "127.0.0.1",
   "expectedVersion": "0.1.11-nightly.20261117.4838",
   "providers": {
-    "boat": { "apiKeyEnv": "BOAT_API_KEY", "organization": "YOUR_BOAT_ORGANIZATION" },
-    "namespace": { "site": "iad", "virtualCPU": 4, "memoryMB": 8192, "architecture": "amd64" }
+    "primary": {
+      "type": "boat",
+      "organization": "YOUR_BOAT_ORGANIZATION",
+      "apiKeyEnv": "BOAT_API_KEY",
+      "template": {
+        "snapshot": "YOUR_READY_BOAT_SNAPSHOT"
+      },
+      "environment": "YOUR_BOAT_ENVIRONMENT",
+      "size": "large"
+    },
+    "reserve": {
+      "type": "boat",
+      "organization": "YOUR_RESERVE_ORGANIZATION",
+      "apiKeyEnv": "BOAT_RESERVE_KEY",
+      "template": {
+        "snapshot": "YOUR_RESERVE_SNAPSHOT"
+      },
+      "size": "small"
+    },
+    "build": {
+      "type": "namespace",
+      "tenantId": "YOUR_NAMESPACE_TENANT_ID",
+      "tokenFile": "/absolute/path/to/namespace-token",
+      "site": "iad",
+      "template": {
+        "image": "registered:YOUR_ORGANIZATION/YOUR_IMAGE"
+      },
+      "virtualCPU": 8,
+      "memoryMB": 16384,
+      "architecture": "amd64"
+    }
   },
-  "templates": {
-    "boat": { "snapshot": "YOUR_READY_BOAT_SNAPSHOT" },
-    "namespace": { "source": "YOUR_GOLDEN_DEVBOX", "snapshot": "YOUR_COMPLETED_SNAPSHOT_ID" }
+  "dispatch": {
+    "listen": "127.0.0.1:47733",
+    "t3Binary": "/absolute/path/to/t3",
+    "providerOrder": [
+      "primary",
+      "build",
+      "reserve"
+    ],
+    "maxWorkers": 8,
+    "model": "gpt-5.4",
+    "deleteWorkerOnArchive": false
   }
 }

@@ -42,15 +42,15 @@ T3FLEET_T3_BINARY="$HOME/.t3/bin/t3" \
 
 This validates the server protocol, not a T3 desktop UI interaction.
 
-The cloud lifecycle test creates **paid resources** using the accounts selected by a private config. Review its provider organizations, templates, and billing first. Enable only the providers you intend to test:
+The cloud lifecycle test creates **paid resources** using the accounts selected by a private config. Review its provider organizations, templates, and billing first. Use instance names from that configuration and enable only the accounts you intend to test:
 
 ```sh
 T3FLEET_LIVE_CONFIG=/absolute/path/to/private/live-config.json \
-T3FLEET_LIVE_PROVIDERS=boat,namespace \
+T3FLEET_LIVE_PROVIDERS=primary,build \
   go test -race -run '^TestCloudLifecycle$' -v -timeout 30m ./internal/fleet
 ```
 
-The test exercises creation, T3 readiness, pairing, HTTP, WebSocket, stop, discovery without wake, and resume. It attempts resource deletion during cleanup. Verify the final state with the provider even after failure or interruption; successful local process exit alone does not prove billing has stopped. Private recovery state remains under the configured `stateDir` in `canary-boat` and `canary-namespace`. Preserve it if cleanup fails, reconcile any remaining remote machine, and do not delete it merely to allow another test run. Golden sources, published images, and saved snapshots are separate resources and require their own cleanup decision.
+The test exercises creation, T3 readiness, pairing, HTTP, WebSocket, stop, discovery without wake, and resume. It attempts resource deletion during cleanup. Verify the final state with the provider even after failure or interruption; successful local process exit alone does not prove billing has stopped. Private recovery state remains under the configured `stateDir` in a `canary-<instance-name>` subdirectory for each selected instance. Preserve it if cleanup fails, reconcile any remaining remote machine, and do not delete it merely to allow another test run. Golden sources, published images, and saved snapshots are separate resources and require their own cleanup decision.
 
 These tests are opt-in and must not run in pull-request CI. Record the exact T3 version and selected provider when reporting results. A skipped test is not live-validation evidence.
 

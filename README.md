@@ -1,10 +1,8 @@
 # t3fleet
 
-Run T3 Code on persistent [Boat](https://boat.dev/) sandboxes and [Namespace](https://namespace.so/) Devboxes from a local Go daemon.
+Pair T3 Code with one fleet environment. Add GitHub projects as you work. The first message in each thread starts a dedicated T3 server on [Boat](https://boat.dev/) or [Namespace](https://namespace.so/), clones the selected repository on that worker, and runs the turn there. Follow-ups return to the same worker.
 
-Create a remote machine from a prepared template, pair it with T3 Code Desktop, and resume it later through the same local endpoint. Claude Code or Codex runs on the remote machine. t3fleet handles provisioning, power controls, and the private connection through the provider APIs.
-
-**Early alpha.** t3fleet listens on loopback and needs a running daemon to relay traffic. Check the [validated workflows](https://github.com/flemzord/t3fleet/blob/main/docs/validation.md) and [current limits](https://github.com/flemzord/t3fleet/blob/main/docs/roadmap.md) before using it for unattended work. Cloud machines and snapshots can incur charges; stopping the daemon does not stop or delete them.
+The daemon runs a local T3 controller for pairing and project metadata. You can start the daemon, pair and add projects with zero cloud workers. Your JSON configuration chooses the provider instances, their sizes and templates, the order to try them, and the worker limit.
 
 ## Install
 
@@ -16,7 +14,7 @@ nix profile install github:flemzord/t3fleet#t3fleet
 
 See [Nix installation and background service](docs/nix.md) for declarative installs and the Home Manager service.
 
-Download the archive for macOS or Linux (amd64 or arm64) from [GitHub Releases](https://github.com/flemzord/t3fleet/releases). Compare the archive's SHA-256 hash with `checksums.txt`, then extract it. The archive contains the `t3fleet` binary and example configuration files.
+For a tagged version, download the archive for macOS or Linux (amd64 or arm64) from [GitHub Releases](https://github.com/flemzord/t3fleet/releases). Compare the archive's SHA-256 hash with `checksums.txt`, then extract it. Use the examples bundled with that binary: older versions use a different configuration format.
 
 To build from source with Go 1.27 or newer:
 
@@ -28,54 +26,24 @@ make build
 
 The source build writes `bin/t3fleet`. Run `nix develop` first if you want the pinned development toolchain.
 
-## Create your first machine
+## Start a fleet
 
-You need a provider account with permission to create machines, and a [prepared Linux template](https://github.com/flemzord/t3fleet/blob/main/docs/getting-started.md#2-prepare-a-template) with the t3fleet runtime hook. Use matching T3 Desktop and server versions. The sample config targets [T3 Code 0.1.11 nightly (2026-11-17)](https://github.com/pingdotgg/t3code/releases/tag/v0.1.11-nightly.20261117.4838).
+1. Install the matching T3 executable on the controller host and [prepare a worker template](docs/getting-started.md#prepare-the-workers). The example version is `0.1.11-nightly.20261117.4838`.
+2. Run `t3fleet init` or copy the [minimal Boat configuration](examples/boat.json). Set the absolute T3 path, the prepared template, and the Boat organization or Namespace tenant ID. One provider instance is enough; the [multi-provider example](examples/config.json) shows how to add named fallbacks. These entries do not create machines.
+3. Run `t3fleet validate --config PATH`, then `t3fleet serve --config PATH`. Keep the service running.
+4. In another terminal, run `t3fleet pair --config PATH` and open the link in T3 Desktop. To launch from another T3 server into an existing project, pair it with `t3fleet pair --peer-access approval-required --config PATH`. To register a new project from that server, the link needs `--peer-access full-access` and the caller also needs full access.
+5. In Desktop, choose **Add to another machine**, select the fleet, and send a first text message. From a linked T3 server, use the [native project and launch workflow](docs/dispatch.md#launch-from-another-t3-server). Run `t3fleet list --config PATH` to see which provider instance owns the worker.
 
-1. Create the configuration. These examples use the extracted binary; for a source build, use `./bin/t3fleet` instead.
-
-   ```sh
-   ./t3fleet init
-   ```
-
-   `init` asks for the provider, the Boat organization to bill, and the prepared template, then writes a private file at the default location (`t3fleet status` shows it). For scripts, pass the values as flags, such as `init --provider boat --boat-organization ORG --boat-snapshot SNAPSHOT --no-input`. The file holds no secrets. For Boat, export `BOAT_API_KEY` in the daemon's shell. For Namespace, use the [Namespace credential setup](https://github.com/flemzord/t3fleet/blob/main/docs/providers-namespace.md). [examples/config.json](examples/config.json) shows every field.
-
-2. Start the daemon:
-
-   ```sh
-   ./t3fleet serve
-   ```
-
-3. Check it from a second terminal:
-
-   ```sh
-   ./t3fleet status
-   ```
-
-4. Create a machine. `--provider` is only needed when both providers are configured.
-
-   ```sh
-   ./t3fleet create --name my-agent
-   ```
-
-5. Confirm the association in T3 Code Desktop when it opens. Sign in to Claude Code or Codex on the remote machine using your model vendor's flow.
-
-For a headless host, use `create --no-register`, then `pair my-agent` to get a short-lived pairing link. If Desktop does not open, run `open my-agent` to retry. Keep the pairing link private.
-
-Run `./t3fleet --help` for commands and `./t3fleet COMMAND --help` for options and examples. Use `list` to see managed machines, `status` to check the daemon, and `start`, `stop`, `inspect` or `delete` to manage them. Commands accept a machine name (with or without the `t3fleet-` prefix), a full ID, or a unique ID prefix; `delete` requires a full ID or exact name. Add `--json` for scripts. For a non-default config path, use `init --config PATH`, then set `T3FLEET_CONFIG` instead of passing `--config` to each command. `./t3fleet completion zsh` (or `bash`, `fish`) prints a shell completion script that completes machine names.
-
-For experimental dispatch, use `dispatch pair` for a Desktop pairing link or `dispatch pair --peer-access LEVEL` for a Linked Environments code.
+Use `T3FLEET_CONFIG` to set the config path for all commands. `t3fleet status` reports service status; `t3fleet admin --help` lists manual recovery operations. Stopping the daemon does not stop billing. Archive cleanup can be enabled explicitly.
 
 ## Guides
 
-- [Configuration, templates, and troubleshooting](https://github.com/flemzord/t3fleet/blob/main/docs/getting-started.md)
-- [Batch creation and recovery](https://github.com/flemzord/t3fleet/blob/main/docs/bulk-lifecycle.md)
-- [Optional idle stop and automatic wake](https://github.com/flemzord/t3fleet/blob/main/docs/idle-lifecycle.md)
-- [Experimental dispatch: fixed pools and on-demand workers](https://github.com/flemzord/t3fleet/blob/main/docs/dispatch-poc.md)
-- [Choose the on-demand provider order and fallbacks](https://github.com/flemzord/t3fleet/blob/main/docs/dispatch-poc.md#fall-back-to-namespace)
-- [Launch on-demand threads from another T3 server with Linked Environments](https://github.com/flemzord/t3fleet/blob/main/docs/dispatch-poc.md#launch-from-another-t3-environment)
-- [Architecture](https://github.com/flemzord/t3fleet/blob/main/docs/architecture.md) and [adding a provider](https://github.com/flemzord/t3fleet/blob/main/docs/adding-a-provider.md)
-- [Contributing](https://github.com/flemzord/t3fleet/blob/main/CONTRIBUTING.md) and [reporting a security issue](https://github.com/flemzord/t3fleet/security/policy)
+- [Setup, credentials and configuration](docs/getting-started.md)
+- [Project registration, placement, archive and recovery](docs/dispatch.md)
+- [Run as a Home Manager service](docs/nix.md)
+- [Architecture](docs/architecture.md) and [adding a provider type](docs/adding-a-provider.md)
+- [Protocol limits](docs/roadmap.md), [validation record](docs/validation.md) and [security](docs/security.md)
+- [Contributing](CONTRIBUTING.md)
 
 ## License
 

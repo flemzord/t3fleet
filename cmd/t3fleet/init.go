@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -22,9 +23,10 @@ type initOptions struct {
 	stateDir          string
 	boatOrganization  string
 	boatSnapshot      string
+	namespaceTenantID string
 	namespaceSite     string
-	namespaceSource   string
-	namespaceSnapshot string
+	namespaceImage    string
+	t3Binary          string
 	noInput           bool
 	force             bool
 	print             bool
@@ -38,15 +40,15 @@ func (a *app) initCommand() *cobra.Command {
 		GroupID: "daemon",
 		Long: `Create a t3fleet configuration file at the --config path, $T3FLEET_CONFIG,
 or the default location. In a terminal, init asks for the values that flags
-do not provide. The file holds no secrets: 'serve' reads cloud credentials from
-the environment or the provider's own login when it starts.
+do not provide. Set the Boat organization or Namespace tenant for each instance.
+The file holds no secrets. The daemon reads credentials when it uses an instance.
 
 The directory is created private (0700) and the file is written 0600. An
 existing file is never replaced unless you pass --force.`,
 		Example: `  t3fleet init
   t3fleet init --provider boat --boat-organization my-org --boat-snapshot snap-123
-  t3fleet init --provider namespace --namespace-source golden-devbox --no-input
-  t3fleet init --provider boat --print`,
+  t3fleet init --provider namespace --namespace-tenant-id my-tenant --namespace-image registered:org/t3-worker --no-input
+  t3fleet init --provider boat --boat-organization my-org --boat-snapshot snap-123 --t3-binary /opt/t3/bin/t3 --print`,
 		Args:              noArgs,
 		ValidArgsFunction: cobra.NoFileCompletions,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -55,12 +57,13 @@ existing file is never replaced unless you pass --force.`,
 	}
 	flags := cmd.Flags()
 	flags.SortFlags = false
-	flags.StringSliceVarP(&opts.providers, "provider", "p", nil, "provider to configure: boat, namespace (repeat or comma-separate for both)")
-	flags.StringVar(&opts.boatOrganization, "boat-organization", "", "Boat organization to bill (empty follows the current Boat wallet)")
+	flags.StringSliceVarP(&opts.providers, "provider", "p", nil, "provider types in placement order: boat, namespace (repeat or comma-separate)")
+	flags.StringVar(&opts.boatOrganization, "boat-organization", "", "Boat organization to bill (required for Boat)")
 	flags.StringVar(&opts.boatSnapshot, "boat-snapshot", "", "prepared Boat snapshot used as the default template")
+	flags.StringVar(&opts.namespaceTenantID, "namespace-tenant-id", "", "Namespace tenant ID for this instance (required for Namespace)")
 	flags.StringVar(&opts.namespaceSite, "namespace-site", "", "Namespace site, such as iad (empty uses the provider default)")
-	flags.StringVar(&opts.namespaceSource, "namespace-source", "", "golden Namespace Devbox used as the default template")
-	flags.StringVar(&opts.namespaceSnapshot, "namespace-snapshot", "", "completed snapshot of the golden Devbox (empty uses the latest)")
+	flags.StringVar(&opts.namespaceImage, "namespace-image", "", "prepared Namespace image, such as registered:org/t3-worker")
+	flags.StringVar(&opts.t3Binary, "t3-binary", "", "absolute path to the local T3 server binary (default: t3 on PATH)")
 	flags.StringVar(&opts.stateDir, "state-dir", "", "absolute private state directory (default "+config.Default().StateDir+")")
 	flags.BoolVar(&opts.noInput, "no-input", false, "never prompt; use flags and defaults only")
 	flags.BoolVar(&opts.force, "force", false, "replace an existing configuration file")
@@ -125,37 +128,50 @@ func (a *app) runInit(ctx context.Context, cmd *cobra.Command, opts initOptions)
 	if opts.stateDir != "" {
 		cfg.StateDir = opts.stateDir
 	}
-	if slices.Contains(providers, "boat") {
-		if err := ask("boat-organization", "Boat organization (empty follows the current Boat wallet)", &opts.boatOrganization); err != nil {
-			return err
-		}
-		if err := ask("boat-snapshot", "Prepared Boat snapshot (empty to set later)", &opts.boatSnapshot); err != nil {
-			return err
-		}
-		cfg.Providers.Boat = &config.Boat{APIKeyEnv: "BOAT_API_KEY", Organization: opts.boatOrganization}
-		if opts.boatSnapshot != "" {
-			cfg.Templates["boat"] = provider.Template{Snapshot: opts.boatSnapshot}
+	if opts.t3Binary == "" {
+		if binary, err := exec.LookPath("t3"); err == nil && filepath.IsAbs(binary) {
+			opts.t3Binary = binary
 		}
 	}
+	if err := ask("t3-binary", "Absolute path to the local T3 server binary", &opts.t3Binary); err != nil {
+		return err
+	}
+	if !filepath.IsAbs(opts.t3Binary) {
+		return hinted("install T3 or pass --t3-binary /absolute/path/to/t3", "init needs a local T3 server binary path")
+	}
+	cfg.Dispatch = &config.Dispatch{Listen: "127.0.0.1:47733", T3Binary: opts.t3Binary, ProviderOrder: providers}
+	if slices.Contains(providers, "boat") {
+		if err := ask("boat-organization", "Boat organization to bill", &opts.boatOrganization); err != nil {
+			return err
+		}
+		if opts.boatOrganization == "" {
+			return hinted("pass --boat-organization ORGANIZATION", "init needs a Boat organization")
+		}
+		if err := ask("boat-snapshot", "Prepared Boat snapshot", &opts.boatSnapshot); err != nil {
+			return err
+		}
+		if opts.boatSnapshot == "" {
+			return hinted("pass --boat-snapshot SNAPSHOT", "init needs a prepared Boat snapshot")
+		}
+		cfg.Providers["boat"] = config.ProviderConfig{Type: "boat", Template: provider.Template{Snapshot: opts.boatSnapshot}, Boat: config.Boat{Organization: opts.boatOrganization}}
+	}
 	if slices.Contains(providers, "namespace") {
+		if err := ask("namespace-tenant-id", "Namespace tenant ID", &opts.namespaceTenantID); err != nil {
+			return err
+		}
+		if opts.namespaceTenantID == "" {
+			return hinted("pass --namespace-tenant-id TENANT_ID", "init needs a Namespace tenant ID")
+		}
 		if err := ask("namespace-site", "Namespace site (empty uses the provider default)", &opts.namespaceSite); err != nil {
 			return err
 		}
-		if err := ask("namespace-source", "Golden Namespace Devbox (empty to set later)", &opts.namespaceSource); err != nil {
+		if err := ask("namespace-image", "Prepared Namespace image (for example registered:org/t3-worker)", &opts.namespaceImage); err != nil {
 			return err
 		}
-		if opts.namespaceSource != "" {
-			if err := ask("namespace-snapshot", "Completed snapshot ID (empty uses the latest)", &opts.namespaceSnapshot); err != nil {
-				return err
-			}
+		if opts.namespaceImage == "" {
+			return hinted("pass --namespace-image IMAGE", "init needs a prepared Namespace image")
 		}
-		if opts.namespaceSnapshot != "" && opts.namespaceSource == "" {
-			return hinted("pass --namespace-source with --namespace-snapshot", "a Namespace snapshot requires its golden Devbox")
-		}
-		cfg.Providers.Namespace = &config.Namespace{Site: opts.namespaceSite}
-		if opts.namespaceSource != "" {
-			cfg.Templates["namespace"] = provider.Template{Source: opts.namespaceSource, Snapshot: opts.namespaceSnapshot}
-		}
+		cfg.Providers["namespace"] = config.ProviderConfig{Type: "namespace", Template: provider.Template{Image: opts.namespaceImage}, Namespace: config.Namespace{TenantID: opts.namespaceTenantID, Site: opts.namespaceSite}}
 	}
 	if err := cfg.Validate(); err != nil {
 		return hinted("check the values passed to init", "the generated configuration is invalid: %v", err)
@@ -195,8 +211,13 @@ func normalizeProviders(values []string) ([]string, error) {
 			return nil, hinted("use boat, namespace, or both", "unknown provider %q", value)
 		}
 	}
-	slices.Sort(out)
-	out = slices.Compact(out)
+	seen := make(map[string]bool)
+	for _, name := range out {
+		if seen[name] {
+			return nil, hinted("add other named instances in the configuration file", "init already includes %q", name)
+		}
+		seen[name] = true
+	}
 	if len(out) == 0 {
 		return nil, hinted("use boat, namespace, or both", "init needs at least one provider")
 	}
@@ -240,18 +261,13 @@ func (a *app) printInitNextSteps(path, source string, cfg config.Config) {
 	if source == "--config" {
 		next("Export T3FLEET_CONFIG=%s to skip --config on each command.", path)
 	}
-	if cfg.Providers.Boat != nil {
+	if _, boat := cfg.Providers["boat"]; boat {
 		next("Export BOAT_API_KEY in the shell that runs 'serve', or sign in with Boat once.")
-		if cfg.Templates["boat"] == (provider.Template{}) {
-			next("Set templates.boat.snapshot to a prepared t3fleet snapshot, or pass --snapshot to create.")
-		}
 	}
-	if cfg.Providers.Namespace != nil {
+	if _, ns := cfg.Providers["namespace"]; ns {
 		next("Sign in with the Namespace CLI (nsc login), or set NSC_TOKEN_FILE.")
-		if cfg.Templates["namespace"] == (provider.Template{}) {
-			next("Set templates.namespace to a prepared golden Devbox, or pass --source to create.")
-		}
 	}
 	next("Start the daemon: t3fleet serve")
-	next("From another terminal: t3fleet create --name my-agent")
+	next("From another terminal, pair the fleet: t3fleet pair")
+	next("Add a project in T3 and start a thread to allocate its worker.")
 }

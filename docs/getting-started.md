@@ -1,30 +1,13 @@
-# Getting started
+# Set up a fleet
 
-This guide starts a local daemon, creates one remote machine from a prepared template, and opens its association in T3 Code. It does not install software on every boot.
+The host runs `t3fleet serve` and a normal T3 server as its controller. Each thread runs on a separate remote worker. The controller, Desktop and worker image must speak the same T3 protocol; pin the controller and worker to `expectedVersion`. See the [release archives](https://github.com/flemzord/t3fleet/releases), [Nix installation](nix.md) or [source build](../CONTRIBUTING.md#development-setup).
 
-## 1. Install the CLI
-
-To install with Nix or run t3fleet in the background with Home Manager, see the [Nix guide](nix.md).
-
-Download an archive for your platform from [GitHub Releases](https://github.com/flemzord/t3fleet/releases), verify its SHA-256 hash against `checksums.txt`, and extract it. The archive contains `t3fleet` and the example configuration files. If you use the archive, run `./t3fleet` wherever this guide uses `./bin/t3fleet`.
-
-To build from source instead, run these commands from the repository:
-
-```sh
-nix develop
-make lint
-make test
-make build
-```
-
-Alternatively, install Go 1.27 and a C compiler, then run the same Make targets. The binary is `bin/t3fleet`. The Nix shell selects Go 1.27.3 with `GOTOOLCHAIN`; its first use may download the verified toolchain into the normal Go cache.
-
-## 2. Prepare a template
+## Prepare the workers
 
 A **golden template** contains software and startup hooks, but no machine identity or user credentials. It must include:
 
 - A Linux T3 server pinned to the version of the T3 desktop client you will use.
-- Claude Code and/or Codex if those providers will be used.
+- Codex for the fleet's configured model. The reference image also includes Claude Code, but the fleet catalog currently exposes only Codex.
 - A `t3fleet-runtime-info` executable available in the remote user's login shell.
 
 The daemon executes this fixed command after provider startup:
@@ -53,20 +36,6 @@ This repository ships self-contained image inputs:
 
 The Linux `vm-tools` flake output is the common preinstalled profile. Build it on Linux or inside a provider image builder; the macOS development shell builds the daemon, not a Linux guest image.
 
-For Namespace, prefer a persistent golden source Devbox and its completed snapshot. Install `vm-tools` once in a clean source, run `t3fleet-image-check`, then stop the source and wait for its snapshot to complete. The native Go adapter forks that snapshot when creating a machine. Keep T3 stopped in the source so each clone initializes its own identity.
-
-A registered image is an alternative. To publish the reference image, use only a minimal build context:
-
-```sh
-context=$(mktemp -d)
-cp flake.nix flake.lock "$context/"
-cp -R nix "$context/"
-cp images/Dockerfile "$context/Dockerfile"
-devbox image build "$context" --name t3fleet/base --user devbox --optimize=false
-```
-
-The Devbox CLI is an optional image-publication tool; the running fleet daemon uses native APIs. Publication creates a billable provider build and can take longer than preparing a persistent source. Review the account and image name before running it, and remove the temporary local context when finished. Omit a T3 startup hook on any source that will become a golden snapshot.
-
 For Boat, install the same `vm-tools` profile in a fresh credential-free builder, put its binaries on the remote user's login `PATH`, and run `t3fleet-image-check` before capturing a versioned saved snapshot. Do not start T3 in that golden builder. See the [reference image guide](../images/README.md) for publication details.
 
 The daemon calls `t3fleet-runtime-info` after starting a machine. This hook starts the preinstalled T3 server idempotently before reporting readiness. That is local initialization, not package installation. A standalone VM that will never become a template may optionally use `t3fleet-server-start` as a boot hook.
@@ -79,194 +48,47 @@ Before publishing a shared image or snapshot, verify it contains none of:
 
 The reference image check rejects known credential and T3 state paths. It cannot prove that an arbitrary file contains no secret; keep the build environment credential-free as well.
 
-### Boat template
+Boat requires a ready saved snapshot. Namespace accepts a registered image (`registered:org/name`), an OCI image, or a golden Devbox source with an explicit completed snapshot. A Namespace image can bootstrap the pinned runtime on first use when Nix is already installed. The worker needs Git access to the repository and credentials for the chosen Codex model at run time. Fleet does not copy your desktop checkout or credentials.
 
-Use a completed, versioned saved-snapshot name:
+## Configure the controller and placement
 
-```json
-"templates": {
-  "boat": { "snapshot": "t3fleet-linux-T3_VERSION" }
-}
-```
+Start with [examples/boat.json](../examples/boat.json) or the [multi-provider example](../examples/config.json). The JSON file describes the fleet, not a list of projects or machines. Settings take effect when the service restarts.
 
-A snapshot must be `ready`, not `saving` or `failed`. The `create` command uses the provider template from your configuration by default. To select another prepared Boat base explicitly:
-
-```sh
-./bin/t3fleet create --name my-agent --provider boat --snapshot SAVED_SNAPSHOT_NAME --config /absolute/path/to/config.json
-```
-
-### Namespace template
-
-Prefer a golden source Devbox and one of its completed snapshots:
-
-```json
-"templates": {
-  "namespace": {
-    "source": "t3fleet-golden",
-    "snapshot": "COMPLETED_SNAPSHOT_ID"
-  }
-}
-```
-
-Alternatively, use a registered image:
-
-```json
-"templates": {
-  "namespace": { "image": "t3fleet/devbox" }
-}
-```
-
-Omitting `snapshot` selects the source's latest completed snapshot. Namespace's inspected Devbox API does not expose an explicit manual-capture operation; verify that the desired capture is complete before using it. See [Namespace snapshot semantics](providers-namespace.md#images-and-snapshots).
-
-## 3. Configure credentials and billing
-
-Copy [examples/config.json](../examples/config.json), then replace its absolute `stateDir` and template placeholders. Pass `--config PATH` in each command. The explicit path works consistently on Linux and macOS; the implicit default follows the OS user-configuration directory.
-
-Configuration is strict JSON: misspelled or unknown fields fail startup. For this release, both `listen` and machine endpoints must use loopback. Remove provider entries you do not use.
-
-### Boat
-
-The daemon loads Boat credentials in this order:
-
-1. The configured `apiKeyEnv`, or `BOAT_API_KEY` when omitted.
-2. `apiKeyFile`, if provided.
-3. `credentialFile`, or Boat's existing credential file under the OS configuration directory.
-
-For a private token file, use an absolute path and permissions `0600`; symbolic links and group/world-readable files are rejected. Do not put the token directly in `config.json`, an image, or this repository.
-
-Set `providers.boat.organization` explicitly. When empty, the API follows the credential file's organization or Boat's active wallet. t3fleet does not switch that wallet. Make the billable organization a deliberate operator choice.
-
-By default, `providers.boat.environment` is empty and creation sends `noEnv: true`. Boat account environments therefore do not inject repositories, model credentials, or secrets. To attach a specific Boat environment intentionally, set `environment` to its name; this sends `noEnv: false` and accepts that environment's contents. Keep this option empty for golden builders and ordinary clean machines.
-
-An existing Boat CLI sign-in can supply credentials, but the daemon does not execute the CLI for lifecycle operations.
-
-### Namespace
-
-The official Go SDK loads an existing `devbox login` or `nsc login` session. It exchanges that session for a tenant token; the session file is not itself a raw bearer token.
-
-For unattended use, configure an appropriate scoped credential through the SDK's supported `NSC_TOKEN_FILE` or workload-identity flow. Keep it outside the repository. See [Namespace credentials](providers-namespace.md#credentials).
-
-For on-demand threads, see [provider order and Namespace fallback](dispatch-poc.md#fall-back-to-namespace). This setting does not change the provider selected by `t3fleet create --provider`.
-
-### T3 version
-
-Set `expectedVersion` to the exact server/client version, without a leading `v`. The reference default currently matches `0.1.11-nightly.20261117.4838`. A mismatch leaves the machine managed but not ready. Rebuild the golden template and update the configuration together after a compatibility test.
-
-## 4. Start the daemon
-
-```sh
-./bin/t3fleet serve --config /absolute/path/to/config.json
-```
-
-The daemon binds its management API to `127.0.0.1:47730` by default. It creates a random admin token in its private state directory. Only one daemon can own that directory.
-
-Keep this terminal or process running. Closing the daemon drops its local T3 connections but does not stop cloud machines. Each provider's billing and expiration policy still applies.
-
-## 5. Create and pair a machine
-
-In another terminal:
-
-```sh
-./bin/t3fleet create --name my-agent --provider boat --config /absolute/path/to/config.json
-./bin/t3fleet list --config /absolute/path/to/config.json
-```
-
-Use `--provider namespace` for a Namespace machine. New names are automatically prefixed once with `t3fleet-`: `--name my-agent` creates `t3fleet-my-agent`. The full name must fit 32 characters. Existing records retain their names. `create` prints the new machine's name and managed ID; `create --json` prints the full record with its `id`, `remoteId`, `state`, and stable local `url`. Other commands accept the machine name, its full ID, or a unique ID prefix.
-
-`create` prepares a one-use pairing link and opens it in T3 Code on the computer running the CLI. Confirm the backend in T3 to finish saving it. There is no separate `pair` step or manual link to copy in the normal flow. The creation result goes to standard output; progress and handoff instructions go to standard error. An interactive terminal shows an activity spinner and elapsed time during creation and readiness checks. Redirected output uses plain messages without terminal escape sequences. The indicator reports activity, not a completion percentage.
-
-T3 deliberately [confirms an external pairing link](https://github.com/pingdotgg/t3code/blob/main/apps/web/src/components/desktop/DesktopWebLinkCoordinator.tsx) before saving the connection. t3fleet cannot currently remove this final click through a supported desktop API. A successful OS launch only means the link was handed off, not that the environment was registered.
-
-For a headless host or a script, skip the desktop handoff:
-
-```sh
-./bin/t3fleet create --name my-agent --provider boat --no-register --config /absolute/path/to/config.json
-./bin/t3fleet pair my-agent --config /absolute/path/to/config.json
-```
-
-The explicit `pair` command prints a `t3code://pair?...` link for manual use. Pairing codes expire after 15 minutes and can be redeemed once. Generating another link invalidates the previous unused link.
-
-If creation succeeds but pairing or desktop launch fails, the CLI exits with an error and preserves the created machine ID in its output and recovery hint. Retry with `open my-agent` (or `pair my-agent` to print the link) and the same `--config`; do not rerun `create`. On Linux the automatic handoff requires `xdg-open` and a registered T3 Code URL handler. macOS uses `open`; Windows uses the OS URL handler.
-
-The daemon persists the resulting T3 client authorization, so a normal daemon restart does not require pairing again. It must be able to reclaim the saved local port.
-
-## 6. Connect models and work
-
-This first release does not forward Claude/Codex login flows. Use the provider's normal remote terminal access to sign in **on the created machine**:
-
-```sh
-claude auth login
-# or
-codex login
-```
-
-Follow the vendor's remote/headless login instructions. Your subscription or API billing follows the authentication method you choose. Boat or Namespace bills the machine separately.
-
-Add or clone your project using T3's supported project workflow or the remote terminal. t3fleet does not automatically upload your local working tree or `.env` files. Return changes through Git as usual.
-
-## 7. Stop and remove resources
-
-```sh
-./bin/t3fleet stop MACHINE_ID --config /absolute/path/to/config.json
-./bin/t3fleet start MACHINE_ID --config /absolute/path/to/config.json
-./bin/t3fleet delete MACHINE_ID --config /absolute/path/to/config.json
-```
-
-`delete` is an explicit permanent deletion. Saved snapshots are separate provider resources and may remain after the VM is deleted. Remove unneeded snapshots through the provider when appropriate.
-
-Authenticated requests for live T3 data can wake a stopped machine. Public discovery reads use the persisted descriptor and never wake the machine. There is no offline chat cache. An opt-in `idleTimeout` can stop idle VMs while `serve` runs; its background traffic rules avoid waking them for known passive requests. See [idle lifecycle and safety limits](idle-lifecycle.md).
-
-## Troubleshooting
-
-| Symptom | Check |
+| Setting | Meaning |
 | --- | --- |
-| CLI cannot reach daemon | Start `serve` with the same `--config` and state directory. |
-| State directory already in use | Another daemon owns it. Do not delete its lock file to bypass ownership. |
-| Create failed but returns a managed machine ID | Inspect it; `start ID` reconciles the durable creation operation. Do not invent a new name merely to retry a lost response. |
-| Machine remains not ready | Verify the prepared runtime hook and exact T3 version. Cloud startup alone does not prove server readiness. |
-| T3 cannot fetch a localhost endpoint | Keep the daemon running and ensure its saved port is available. |
-| Pairing token is invalid | Generate a fresh link; an old code may have expired or been used. |
-| Namespace `snapshot` is unsupported | Use an existing completed provider snapshot or image; explicit capture is not a capability of this adapter. |
-| Machine still incurs charges after daemon exit | Stop or delete the remote resource explicitly; daemon shutdown is not VM shutdown. |
+| `listen` | Loopback administration address; defaults to `127.0.0.1:47730`. |
+| `stateDir` | Absolute path to private persistent state. The default is under `$XDG_STATE_HOME/t3fleet` or `~/.local/state/t3fleet`. |
+| `expectedVersion` | Exact controller and worker T3 version, without the leading `v`. |
+| `providers.<name>` | One configured account, template and machine shape. Names are operator-defined, e.g. `primary` and `burst` may both have `type: "boat"`. |
+| `dispatch.listen` | Stable T3 endpoint, on a separate `127.0.0.1` port. Pair with this service once. |
+| `dispatch.t3Binary` | Absolute path to the local T3 executable. |
+| `dispatch.providerOrder` | Required array of instance names. The first is primary. Subsequent entries are fallbacks in order. |
+| `dispatch.maxWorkers` | Maximum concurrent reservations, including pending launches. Omitted or zero means 8. |
+| `dispatch.model` | Codex model offered by this fleet; defaults to `gpt-5.4`. |
+| `dispatch.deleteWorkerOnArchive` | Default `false`. Set to `true` to delete a thread’s worker after a confirmed archive. |
 
+**Boat.** Set `template.snapshot`. Optional `size` is `small`, `default`, `large`, or `xlarge`; omit it to use Boat’s default. Each instance requires `organization`, the Boat wallet to bill. To inject an existing Boat environment, set `environment`; otherwise the daemon requests a clean machine. Choose one of `apiKeyEnv`, `apiKeyFile`, or `credentialFile` per instance. An explicit selector must work; it will not fall back to another account. Without a selector, the daemon tries `BOAT_API_KEY` and the Boat login. Private credential files must not be group- or world-readable. See the [Boat adapter](providers-boat.md).
 
-### Duplicate names and unprepared snapshots
+**Namespace.** Set `tenantId` to the ID of the Namespace tenant that owns these workers. The daemon checks that the token belongs to this tenant each time it obtains a credential. Set `template.image`, or both `template.source` and `template.snapshot`. Set `size` to `s`, `m`, `l`, or `xl`, or set `virtualCPU` and `memoryMB` for an explicit shape. The defaults are 4 vCPU, 8192 MiB and `amd64`. You can set `architecture` and `site`. Use `tokenFile` to select a credential for this instance; omit it to use the Namespace SDK login. See the [Namespace adapter](providers-namespace.md).
 
-A name stays reserved after a failed or interrupted creation. `create` reports a
-conflict and, when supported by the running daemon, identifies the existing
-record. Use `list` and `inspect ID` before retrying. Choose a different `--name`
-for an independent VM. Repeating `create` does not replace an existing machine
-or change its saved template. In particular, `start` on an interrupted creation
-reuses its original template and operation identity.
+Credentials are loaded when a provider is used. A missing credential for an unused fallback does not prevent pairing, project registration, or launches on a healthy primary.
 
-A saved provider snapshot is not necessarily a t3fleet template. It must contain
-T3 and `t3fleet-runtime-info` before use. If the fixed runtime command exits 127,
-the daemon reports `runtime_unavailable` instead of a generic gateway error.
-The allocated machine remains managed and billable. Prepare its runtime before
-retrying `start`, or delete it before creating a replacement from a prepared
-snapshot. Repeating `start` cannot install missing software.
+Keep an instance name tied to the same provider account and API endpoint for as long as workers or pending reservations use it. Add a new name for a different account. Reordering the list changes the policy for new threads. A timeout is not a reason to allocate another worker: see [placement and recovery](dispatch.md#placement-and-retry).
 
-After rebuilding the daemon, restart `t3fleet serve` with the same configuration
-to use updated API errors. Replacing the CLI binary alone does not update an
-already running daemon. Machine records and client authorization persist across
-a normal daemon restart; cloud VMs are not stopped by that restart.
+## Start and pair
 
-## Create or delete several machines
+```sh
+export T3FLEET_CONFIG=/absolute/path/to/config.json
+t3fleet validate
+t3fleet serve
+```
 
-Use `create --name workers --provider boat --count 10 --concurrency 3` to reserve
-and start an identical batch. The daemon records the plan before allocation.
-Use `create --resume BATCH_ID` after interruption, or `--no-register` for headless
-work. Each T3 backend still requires confirmation in T3.
+In another terminal with the same configuration, run `t3fleet pair` and open the one-use link in T3 Desktop. Use **Add to another machine** on a GitHub project. Choose the fleet, the default Git branch and a first text message. Adding another project needs no configuration change. The worker receives its own clone on the first launch. For server-to-server use see [Linked Environments](dispatch.md#launch-from-another-t3-server).
 
-Run `delete` in a terminal to select managed machines by row number and confirm
-the exact selection. Scripts must use `delete --ids ID,ID --yes` or the existing
-`delete ID`. See [bulk lifecycle and recovery](bulk-lifecycle.md).
+Use `t3fleet status` to see settings from the selected file and the reachability of the daemon, `t3fleet list` and `t3fleet inspect NAME` to locate a worker, and `t3fleet admin --help` for recovery. Keep the state directory and dispatch origin stable across restarts. The service only listens on loopback; a remote caller needs a private route, such as an SSH tunnel that preserves the port. Keep the admin listener private.
 
-## Enable automatic idle stop
+## Replacing an early configuration
 
-Add `"idleTimeout": "30m"` at the top level of your existing configuration,
-then restart `serve` with the new binary. Omission or `"0"` disables it.
-Fresh authenticated T3 workload checks protect active agents, subagents,
-approvals and background tasks. Unknown activity keeps the VM running.
-`inspect ID` reports the last stop reason and time. See
-[idle lifecycle](idle-lifecycle.md) for passive traffic, wake behavior and limits.
+The old top-level `templates`, `dispatchPOC`, dedicated worker pool, and `idleTimeout` settings are not accepted. Start from the new example and copy each template under its provider instance. If you have existing on-demand workers, keep the original state directory, listener, and account names (`boat` or `namespace`) so their persisted reservations still resolve. For a legacy worker without an account pin, startup checks the remote ID and name against that account. If it cannot confirm an existing allocation, reconcile it with the previous daemon and its original credentials before upgrading. Back up the private state before first startup: the new fleet state format cannot be opened by the previous daemon. Inspect or remove any old manually provisioned resources explicitly; changing a configuration does not delete cloud machines.
+
+Older workers have no saved thread listing. Use `t3fleet list` to identify the worker, then `t3fleet admin start ID` to restore its thread in Desktop. This reads the selected worker only. Opening the fleet does not wake the others.

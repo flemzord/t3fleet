@@ -105,6 +105,25 @@ jobs:
         run: nix run .#packages.${{ matrix.system }}.t3fleet -- version
       - name: Build the Home Manager service definition
         run: nix build --no-link --impure --expr '(import ./nix/tests/home-manager.nix {}).service'
+      - name: Start the configured T3 fleet without cloud access
+        shell: bash
+        run: |
+          # Both instances point to closed loopback endpoints and have no credentials.
+          export FLEET_TEST_HOME
+          FLEET_TEST_HOME=$(mktemp -d)
+          config=$(nix build --no-link --print-out-paths --impure --expr \
+            '(import ./nix/tests/home-manager.nix { homeDirectory = builtins.getEnv "FLEET_TEST_HOME"; }).configFile')
+          fleet=$(nix build --no-link --print-out-paths .#t3fleet)/bin/t3fleet
+          "$fleet" serve --config "$config" > "$FLEET_TEST_HOME/serve.log" 2>&1 &
+          daemon=$!
+          trap 'kill "$daemon" 2>/dev/null || true; wait "$daemon" || true' EXIT
+          for _ in {1..60}; do
+            if curl --fail --silent --max-time 1 --output /dev/null http://127.0.0.1:47730/_healthcheck; then break; fi
+            if ! kill -0 "$daemon" 2>/dev/null; then cat "$FLEET_TEST_HOME/serve.log"; exit 1; fi
+            sleep 1
+          done
+          "$fleet" pair --json --config "$config" | jq -e '.link | startswith("t3code://")' >/dev/null
+          "$fleet" list --json --config "$config" | jq -e '. == []' >/dev/null
       - name: Evaluate the macOS Home Manager services
         if: matrix.system == 'x86_64-linux'
         run: |

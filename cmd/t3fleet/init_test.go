@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -30,7 +31,7 @@ func initApp(out, diag io.Writer, input string, tty bool) *app {
 func TestInitWritesPrivateValidConfigAndNeverOverwrites(t *testing.T) {
 	home := isolateUserDirs(t)
 	path := filepath.Join(home, "fresh", "t3fleet", "config.json")
-	args := []string{"init", "--config", path, "--provider", "boat", "--boat-organization", "acme", "--boat-snapshot", "snap-1", "--no-input"}
+	args := []string{"init", "--config", path, "--provider", "boat", "--boat-organization", "acme", "--boat-snapshot", "snap-1", "--t3-binary", "/opt/t3", "--no-input"}
 	var out, diag bytes.Buffer
 	if err := initApp(&out, &diag, "", true).execute(t.Context(), args); err != nil {
 		t.Fatal(err)
@@ -49,7 +50,10 @@ func TestInitWritesPrivateValidConfigAndNeverOverwrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generated config does not load: %v", err)
 	}
-	if cfg.Providers.Boat == nil || cfg.Providers.Boat.Organization != "acme" || cfg.Templates["boat"].Snapshot != "snap-1" || cfg.Providers.Namespace != nil {
+	if len(cfg.Providers) != 1 || cfg.Providers["boat"].Organization != "acme" || cfg.Providers["boat"].Template.Snapshot != "snap-1" {
+		t.Fatalf("unexpected provider config: %+v", cfg.Providers)
+	}
+	if cfg.Dispatch == nil || cfg.Dispatch.T3Binary != "/opt/t3" || !slices.Equal(cfg.Dispatch.ProviderOrder, []string{"boat"}) {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 
@@ -61,10 +65,10 @@ func TestInitWritesPrivateValidConfigAndNeverOverwrites(t *testing.T) {
 	if after, _ := os.ReadFile(path); !bytes.Equal(before, after) {
 		t.Fatal("existing config changed")
 	}
-	if err := initApp(io.Discard, io.Discard, "", false).execute(t.Context(), []string{"init", "--config", path, "--provider", "namespace", "--force"}); err != nil {
+	if err := initApp(io.Discard, io.Discard, "", false).execute(t.Context(), []string{"init", "--config", path, "--provider", "namespace", "--namespace-tenant-id", "tenant-a", "--namespace-image", "registered:acme/code", "--t3-binary", "/opt/t3", "--force"}); err != nil {
 		t.Fatal(err)
 	}
-	if cfg, err := config.Load(path); err != nil || cfg.Providers.Boat != nil || cfg.Providers.Namespace == nil {
+	if cfg, err := config.Load(path); err != nil || len(cfg.Providers) != 1 || cfg.Providers["namespace"].TenantID != "tenant-a" {
 		t.Fatalf("--force did not replace the config: %v", err)
 	}
 	entries, _ := os.ReadDir(filepath.Dir(path))
@@ -76,8 +80,8 @@ func TestInitWritesPrivateValidConfigAndNeverOverwrites(t *testing.T) {
 func TestInitPromptsForMissingValues(t *testing.T) {
 	home := isolateUserDirs(t)
 	path := filepath.Join(home, "config.json")
-	// providers, boat org, boat snapshot (skip), namespace site, source, snapshot
-	input := "both\nacme\n\niad\ngolden\nsnap-9\n"
+	// Explicit ordering must survive generation, regardless of prompt order.
+	input := "namespace,boat\n/opt/t3\nacme\nsnap-9\ntenant-b\niad\nregistered:acme/code\n"
 	var diag bytes.Buffer
 	if err := initApp(io.Discard, &diag, input, true).execute(t.Context(), []string{"init", "--config", path}); err != nil {
 		t.Fatal(err)
@@ -86,13 +90,13 @@ func TestInitPromptsForMissingValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Providers.Boat == nil || cfg.Providers.Boat.Organization != "acme" || cfg.Providers.Namespace == nil || cfg.Providers.Namespace.Site != "iad" {
+	if cfg.Providers["boat"].Organization != "acme" || cfg.Providers["namespace"].TenantID != "tenant-b" || cfg.Providers["namespace"].Site != "iad" || !slices.Equal(cfg.Dispatch.ProviderOrder, []string{"namespace", "boat"}) {
 		t.Fatalf("providers: %+v", cfg.Providers)
 	}
-	if _, ok := cfg.Templates["boat"]; ok || cfg.Templates["namespace"].Source != "golden" || cfg.Templates["namespace"].Snapshot != "snap-9" {
-		t.Fatalf("templates: %+v", cfg.Templates)
+	if cfg.Providers["boat"].Template.Snapshot != "snap-9" || cfg.Providers["namespace"].Template.Image != "registered:acme/code" {
+		t.Fatalf("templates: %+v", cfg.Providers)
 	}
-	if !strings.Contains(diag.String(), "Providers (boat, namespace, or both) [boat]:") || !strings.Contains(diag.String(), "templates.boat.snapshot") {
+	if !strings.Contains(diag.String(), "Providers (boat, namespace, or both) [boat]:") || !strings.Contains(diag.String(), "t3fleet pair") {
 		t.Fatalf("prompts or next steps missing:\n%s", diag.String())
 	}
 }
@@ -103,23 +107,43 @@ func TestInitRejectsIncompleteInputAndPrintsWithoutWriting(t *testing.T) {
 	for _, args := range [][]string{
 		{"init", "--config", path},
 		{"init", "--config", path, "--provider", "aws"},
-		{"init", "--config", path, "--provider", "namespace", "--namespace-snapshot", "snap"},
-		{"init", "--config", path, "--provider", "boat", "--state-dir", "relative"},
+		{"init", "--config", path, "--provider", "boat", "--boat-snapshot", "snap", "--t3-binary", "/opt/t3"},
+		{"init", "--config", path, "--provider", "namespace", "--namespace-image", "registered:acme/code", "--t3-binary", "/opt/t3"},
+		{"init", "--config", path, "--provider", "namespace", "--t3-binary", "/opt/t3"},
+		{"init", "--config", path, "--provider", "boat", "--boat-organization", "acme", "--boat-snapshot", "snap", "--t3-binary", "/opt/t3", "--state-dir", "relative"},
 	} {
 		if err := initApp(io.Discard, io.Discard, "", false).execute(t.Context(), args); err == nil {
 			t.Fatalf("accepted %v", args)
 		}
 	}
 	var out bytes.Buffer
-	if err := initApp(&out, io.Discard, "", false).execute(t.Context(), []string{"init", "--config", path, "-p", "boat", "--print"}); err != nil {
+	if err := initApp(&out, io.Discard, "", false).execute(t.Context(), []string{"init", "--config", path, "-p", "boat", "--boat-organization", "acme", "--boat-snapshot", "snap", "--t3-binary", "/opt/t3", "--print"}); err != nil {
 		t.Fatal(err)
 	}
 	var printed config.Config
-	if json.Unmarshal(out.Bytes(), &printed) != nil || printed.Providers.Boat == nil {
+	if json.Unmarshal(out.Bytes(), &printed) != nil || printed.Providers["boat"].Type != "boat" {
 		t.Fatalf("--print output: %s", out.String())
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("init wrote a file despite errors or --print")
+	}
+}
+
+func TestValidateChecksFileWithoutRuntimeOrCredentials(t *testing.T) {
+	path := filepath.Join(isolateUserDirs(t), "config.json")
+	if err := initApp(io.Discard, io.Discard, "", false).execute(t.Context(), []string{"init", "--config", path, "--provider", "boat", "--boat-organization", "acme", "--boat-snapshot", "snap", "--t3-binary", "/not-installed/t3"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BOAT_API_KEY", "")
+	var out bytes.Buffer
+	if err := initApp(&out, io.Discard, "", false).execute(t.Context(), []string{"validate", "--config", path}); err != nil || !strings.Contains(out.String(), path) {
+		t.Fatalf("offline validation: %v, %q", err, out.String())
+	}
+	if err := os.WriteFile(path, []byte(`{"legacy":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := initApp(io.Discard, io.Discard, "", false).execute(t.Context(), []string{"validate", "--config", path}); err == nil {
+		t.Fatal("invalid configuration accepted")
 	}
 }
 

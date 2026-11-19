@@ -2,10 +2,11 @@ package fleet
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path"
-	"slices"
 	"strings"
 
 	"github.com/flemzord/t3fleet/internal/proxy"
@@ -13,6 +14,35 @@ import (
 )
 
 var errDispatchSwitchUncertain = errors.New("could not confirm the dispatch fallback selection; restart the daemon and retry this thread")
+
+// Capture the provisioning parameters when reserving the thread. Each
+// fallback has its own size vocabulary, template, and driver.
+type dispatchTarget struct {
+	Instance  string              `json:"instance"`
+	Driver    string              `json:"driver"`
+	Scope     string              `json:"scope,omitempty"`
+	Template  provider.Template   `json:"template"`
+	Size      string              `json:"size,omitempty"`
+	Placement *provider.Placement `json:"placement,omitempty"`
+	Shape     provider.Shape      `json:"shape,omitzero"`
+}
+
+func (m *Manager) dispatchTargets(instances []string) ([]dispatchTarget, error) {
+	targets := make([]dispatchTarget, 0, len(instances))
+	for _, name := range instances {
+		host := m.opts.Providers[name]
+		req := CreateRequest{Provider: name}
+		shape, err := m.applyProviderDefaults(&req)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid machine shape for fallback %q", ErrInvalid, name)
+		}
+		if host == nil || req.Template == (provider.Template{}) {
+			return nil, fmt.Errorf("%w: dispatch fallback %q is missing its provider configuration or template", ErrInvalid, name)
+		}
+		targets = append(targets, dispatchTarget{Instance: name, Driver: host.Name(), Scope: providerScope(host), Template: req.Template, Size: req.Size, Shape: shape, Placement: providerPlacement(host)})
+	}
+	return targets, nil
+}
 
 // LookupDispatchWorker resolves a reservation without allocating a machine.
 // Deleted members stay tombstones so retrying a thread cannot fork its history.
@@ -86,10 +116,9 @@ func (m *Manager) releaseDispatchWorker(ctx context.Context, key string, allowMi
 	return err
 }
 
-// DispatchWorkerLost reports whether the provider confirms that the worker
-// reserved for a dispatch thread no longer exists. A stopped worker, a busy
-// machine or an uncertain provider answer is not lost: the caller keeps the
-// reservation and checks again later.
+// DispatchWorkerLost retires the local reservation when the provider confirms
+// the worker is already gone. It never deletes a remote machine. A stopped,
+// busy or uncertain worker keeps its slot.
 func (m *Manager) DispatchWorkerLost(ctx context.Context, key string) (bool, error) {
 	batch, err := m.Batch(key)
 	if errors.Is(err, ErrNotFound) {
@@ -120,13 +149,16 @@ func (m *Manager) DispatchWorkerLost(ctx context.Context, key string) (bool, err
 		return false, nil
 	}
 	remote, err := host.Get(ctx, r.RemoteID)
-	if errors.Is(err, provider.ErrNotFound) {
-		return true, nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, provider.ErrNotFound) {
 		return false, errors.New("fleet: provider status check failed")
 	}
-	return remote.State == provider.StateDeleted, nil
+	if err == nil && remote.State != provider.StateDeleted {
+		return false, nil
+	}
+	if err := m.removeMachineRecord(h); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ProvisionDispatchWorker reserves a single worker per thread before talking
@@ -157,11 +189,18 @@ func (m *Manager) ProvisionDispatchWorker(ctx context.Context, key, remote strin
 	if current, err := m.handle(machine.ID); err != nil || current != h {
 		return proxy.DispatchWorker{}, "", errors.New("the reserved dispatch worker was removed")
 	}
-	// Reservations from before providerOrder have no saved policy. Recover
-	// the original opt-in only if the first provider has not been called.
-	if r := m.copy(h); r.DispatchFallbacks == nil && r.State == "planned" && r.RemoteID == "" &&
-		len(providerOrder) > 0 && r.Provider == providerOrder[0] {
-		if err := m.update(h, func(r *record) { r.DispatchFallbacks = slices.Clone(providerOrder[1:]) }); err != nil {
+	// Old state specified only fallback names, or no policy at all. Only
+	// upgrade an unattempted intent; an uncertain allocation must not move.
+	if r := m.copy(h); r.FallbackPlan == nil && r.State == "planned" && r.RemoteID == "" {
+		names := r.DispatchFallbacks
+		if names == nil && len(providerOrder) > 0 && r.Provider == providerOrder[0] {
+			names = providerOrder[1:]
+		}
+		targets, targetErr := m.dispatchTargets(names)
+		if targetErr != nil {
+			return proxy.DispatchWorker{}, "", targetErr
+		}
+		if err := m.update(h, func(r *record) { r.FallbackPlan, r.DispatchFallbacks = targets, nil }); err != nil {
 			return proxy.DispatchWorker{}, "", errors.New("could not save the dispatch provider order")
 		}
 	}
@@ -173,7 +212,7 @@ func (m *Manager) ProvisionDispatchWorker(ctx context.Context, key, remote strin
 		if r.State != "planned" || r.RemoteID != "" || !errors.Is(err, provider.ErrCreateRejected) {
 			break
 		}
-		if len(r.DispatchFallbacks) == 0 || ctx.Err() != nil {
+		if len(r.FallbackPlan) == 0 || ctx.Err() != nil {
 			// Only the first attempt can establish that there was no earlier
 			// allocation with a lost response.
 			if saveErr := m.update(h, func(current *record) { current.State = "planned" }); saveErr != nil {
@@ -190,10 +229,7 @@ func (m *Manager) ProvisionDispatchWorker(ctx context.Context, key, remote strin
 		if errors.Is(err, errDispatchSwitchUncertain) {
 			return proxy.DispatchWorker{}, "", err
 		}
-		if r.Provider == "namespace" {
-			return proxy.DispatchWorker{}, "", fmt.Errorf("the reserved Namespace worker is not ready; retry the same thread: %w", err)
-		}
-		return proxy.DispatchWorker{}, "", fmt.Errorf("the reserved %s worker is not ready; retry the same thread", r.Provider)
+		return proxy.DispatchWorker{}, "", fmt.Errorf("the worker reserved on %s is not ready; retry the same thread: %w", r.Provider, err)
 	}
 	result, err := m.opts.Providers[r.Provider].Exec(ctx, r.RemoteID, provider.ExecRequest{
 		Args: []string{"/bin/bash", "-lc", dispatchCheckoutScript, "t3fleet-dispatch", key, remote},
@@ -218,21 +254,34 @@ func (m *Manager) advanceDispatchProvider(key string, h *machineHandle) error {
 	defer m.mu.Unlock()
 	old := m.batches[key]
 	if m.closed || len(old.IDs) != 1 || old.IDs[0] != h.record.ID ||
-		h.record.State != "creating" || h.record.RemoteID != "" || len(h.record.DispatchFallbacks) == 0 {
+		h.record.State != "creating" || h.record.RemoteID != "" || len(h.record.FallbackPlan) == 0 {
 		return errors.New("could not select the next dispatch provider")
 	}
-	next := h.record.DispatchFallbacks[0]
-	template := m.opts.Templates[next]
-	if m.opts.Providers[next] == nil || template == (provider.Template{}) {
-		return fmt.Errorf("the reserved dispatch fallback %q is missing its provider configuration or template", next)
+	next := h.record.FallbackPlan[0]
+	host := m.opts.Providers[next.Instance]
+	if host == nil || host.Name() != next.Driver || (next.Scope != "" && providerScope(host) != next.Scope) {
+		// The primary was conclusively rejected. Keep the intent reusable
+		// (and reclaimable) after the operator restores the fallback.
+		if err := m.updateLocked(h, func(r *record) { r.State = "planned" }); err != nil {
+			return errors.New("could not save the dispatch provider rejection")
+		}
+		return fmt.Errorf("the reserved dispatch fallback requires the original provider %q with driver %q and the same account and endpoint", next.Instance, next.Driver)
 	}
 	batch := old
-	batch.Request.Provider = next
-	batch.Request.Template = template
+	batch.Request.Provider, batch.Request.Template, batch.Request.Size = next.Instance, next.Template, next.Size
+	// Two aliases may share a vendor account. A different template or size
+	// must not reuse the rejected request's idempotency key in that account.
+	var op [16]byte
+	if _, err := rand.Read(op[:]); err != nil {
+		return errors.New("could not generate the dispatch fallback operation")
+	}
 	m.batches[key] = batch
 	if err := m.updateLocked(h, func(r *record) {
-		r.Provider, r.Template, r.InstallRuntime, r.State = next, template, next == "namespace", "planned"
-		r.DispatchFallbacks = r.DispatchFallbacks[1:]
+		r.CreateOperation = hex.EncodeToString(op[:])
+		r.Scope = providerScope(host)
+		r.Provider, r.Driver, r.Template, r.Size, r.Shape, r.Placement = next.Instance, next.Driver, next.Template, next.Size, next.Shape, next.Placement
+		r.InstallRuntime, r.State = next.Driver == "namespace", "planned"
+		r.FallbackPlan = r.FallbackPlan[1:]
 	}); err != nil {
 		m.batches[key] = old
 		h.dispatchSwitchUncertain = true
@@ -282,7 +331,7 @@ base="$HOME/.t3fleet/dispatch-workspaces/$key"
 repo="$base/repo"
 mkdir -p -- "$base"
 if [[ -e "$repo" || -L "$repo" ]]; then
-  [[ ! -L "$repo" && "$(git -C "$repo" config --local --get remote.origin.url)" == "$remote" ]]
+  [[ ! -L "$repo" && "$(git -C "$repo" config --local --get remote.origin.url)" == "$remote" ]] || exit 1
 else
   stage=$(mktemp -d "$base/clone.XXXXXXXX")
   trap 'rmdir -- "$stage" 2>/dev/null || true' EXIT

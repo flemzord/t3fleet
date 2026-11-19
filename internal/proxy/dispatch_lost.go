@@ -13,9 +13,8 @@ const lostWorkerSweepInterval = 10 * time.Minute
 
 var errWorkerLost = errors.New("the dispatch worker no longer exists; start a new thread")
 
-// demandLoss records a ready worker that its provider no longer has. It is
-// saved before cleanup so the route cannot be used again, then released once
-// the fleet has removed its machine record.
+// A released loss is a durable tombstone for the thread. Retry any pending
+// loss left by an interrupted cleanup before freeing its worker slot.
 type demandLoss struct {
 	Released bool
 }
@@ -27,7 +26,7 @@ func lostCandidate(route demandRoute) bool {
 	return route.Ready && route.Archive == nil && (route.Lost == nil || !route.Lost.Released)
 }
 
-func (d *dispatchPOC) releaseLostWorkers(ctx context.Context, report func(error)) {
+func (d *dispatcher) releaseLostWorkers(ctx context.Context, report func(error)) {
 	d.mu.Lock()
 	var ids []string
 	for id, route := range d.disk.OnDemand.Routes {
@@ -53,7 +52,7 @@ func (d *dispatchPOC) releaseLostWorkers(ctx context.Context, report func(error)
 }
 
 // The caller holds the thread's write lock.
-func (d *dispatchPOC) releaseLostWorker(ctx context.Context, id string) error {
+func (d *dispatcher) releaseLostWorker(ctx context.Context, id string) error {
 	d.mu.Lock()
 	route, ok := d.disk.OnDemand.Routes[id]
 	d.mu.Unlock()
@@ -62,24 +61,11 @@ func (d *dispatchPOC) releaseLostWorker(ctx context.Context, id string) error {
 	}
 	cleanup, cancel := context.WithTimeout(ctx, d.timeout)
 	defer cancel()
-	if route.Lost == nil {
-		lost, err := d.onDemand.Lost(cleanup, route.Key)
-		if err != nil {
-			return err
-		}
-		if !lost {
-			return nil
-		}
-		// Fence the route before the fleet removes its machine record.
-		d.mu.Lock()
-		route.Lost = &demandLoss{}
-		err = d.saveDemandRouteLocked(id, route)
-		d.mu.Unlock()
-		if err != nil {
-			return err
-		}
-	}
-	if err := d.onDemand.Release(cleanup, route.Key); err != nil {
+	// The fleet retires its local record before returning true and retains its
+	// reservation tombstone. If saving the route fails, a retry sees that
+	// tombstone without allocating, or deleting, a cloud machine.
+	lost, err := d.onDemand.Lost(cleanup, route.Key)
+	if err != nil || !lost {
 		return err
 	}
 	d.mu.Lock()

@@ -49,16 +49,16 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 	}
 	var mu sync.Mutex
 	exp := map[string]prepared{}
-	var attempts []string
+	const firstRemote = "https://github.com/octocat/Hello-World.git"
+	const secondRemote = "git@github.com:another-org/Hello-World.git"
+	var attempts, remotes []string
 	var deletions []string
 	calls := func() int { mu.Lock(); defer mu.Unlock(); return len(attempts) }
 	opts := DispatchOnDemand{Controller: controller, ProjectRoot: t.TempDir(), MaxWorkers: 2, Model: "gpt-6.1-sol", Provision: func(_ context.Context, key, remote string) (DispatchWorker, string, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		attempts = append(attempts, key)
-		if remote != "https://github.com/octocat/Hello-World.git" {
-			return DispatchWorker{}, "", errors.New("project remote did not reach provisioner")
-		}
+		remotes = append(remotes, remote)
 		if len(attempts) == 1 {
 			return DispatchWorker{}, "", errors.New("synthetic lost response")
 		}
@@ -139,13 +139,25 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 	if project["projectId"] != "demo" {
 		t.Fatal("project registration failed")
 	}
+	another := client.rpc("projectClone.start", map[string]any{"projectId": "other", "title": "Another", "remoteUrl": secondRemote, "destinationPath": "~/hello"})
+	if another["projectId"] != "other" || another["cwd"] == project["cwd"] {
+		t.Fatalf("projects with the same repository name were not distinct: %#v", another)
+	}
+	retry := client.rpc("projectClone.start", map[string]any{"projectId": "new-generated-id", "title": "Duplicate", "remoteUrl": "git@github.com:OctoCat/hello-world", "destinationPath": "~/another"})
+	if retry["projectId"] != "demo" || retry["cwd"] != project["cwd"] {
+		t.Fatalf("a repeated Desktop clone changed project identity: %#v", retry)
+	}
 	shell := dispatchHTTP(t, server.URL, token, dispatchShellPath)
 	projects, _ := shell["projects"].([]any)
-	if len(projects) != 1 || calls() != 0 {
+	if len(projects) != 2 || calls() != 0 {
 		t.Fatal("project registration did not stay local")
 	}
 	launch := func(c *dispatchTestClient, reqID int, thread string) {
-		c.send(reqID, "orchestration.launchThread", map[string]any{"threadId": thread, "projectId": "demo", "commandId": "launch-" + thread,
+		projectID := "demo"
+		if thread == "on-demand-b" {
+			projectID = "other"
+		}
+		c.send(reqID, "orchestration.launchThread", map[string]any{"threadId": thread, "projectId": projectID, "commandId": "launch-" + thread,
 			"title": thread, "modelSelection": map[string]any{"instanceId": "devReplay", "model": "multi-turn"}, "runtimeMode": "full-access", "interactionMode": "default",
 			"workspaceStrategy": map[string]any{"type": "root"},
 			"initialMessage":    map[string]any{"text": "One", "messageId": "message-" + thread, "attachments": []any{}},
@@ -171,7 +183,7 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 	launch(client, 13, "on-demand-b")
 	client.result(client.next(13))
 	mu.Lock()
-	if len(attempts) != 3 || attempts[0] != attempts[1] || attempts[1] == attempts[2] || len(exp) != 2 {
+	if len(remotes) != 3 || remotes[0] != firstRemote || remotes[1] != firstRemote || remotes[2] != secondRemote || len(attempts) != 3 || attempts[0] != attempts[1] || attempts[1] == attempts[2] || len(exp) != 2 {
 		mu.Unlock()
 		t.Fatal("retry allocated another worker or different threads shared one reservation")
 	}
@@ -186,6 +198,13 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 	p, stop = restart()
 	server.handler.Store(p)
 	client = newDispatchTestClient(t, ctx, server.URL, token)
+	// These fixture workers expose no passive transport. Real native rows
+	// captured during launch still let Desktop reopen each thread after restart.
+	recovered := dispatchHTTP(t, server.URL, token, dispatchShellPath)
+	recoveredThreads, _ := recovered["threads"].([]any)
+	if len(recoveredThreads) != 2 {
+		t.Fatalf("restart lost native thread listings: %#v", recoveredThreads)
+	}
 	client.rpc("orchestration.dispatchCommand", map[string]any{
 		"type": "message.dispatch", "commandId": "demand-followup", "threadId": "on-demand-b", "messageId": "demand-followup",
 		"text": "Continue the second thread", "attachments": []any{}, "createdBy": "user", "creationSource": "web",
@@ -311,7 +330,7 @@ func TestOnDemandDispatchHonorsConfiguredCapacity(t *testing.T) {
 		t.Fatalf("dispatcher rejected a capacity of %d: %v", limit, err)
 	}
 	d := p.dispatch
-	d.disk.OnDemand.Project = &demandProject{ID: projectID}
+	d.disk.OnDemand.Projects[projectID] = demandProject{ID: projectID, Title: "Project"}
 	for i := range limit - 1 {
 		id := fmt.Sprintf("reserved-%d", i)
 		d.disk.OnDemand.Routes[id] = demandRoute{Key: id, ProjectID: projectID, Ready: true}

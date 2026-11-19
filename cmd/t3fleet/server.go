@@ -25,8 +25,6 @@ import (
 
 type fleetAPI interface {
 	Create(context.Context, fleet.CreateRequest) (fleet.Machine, error)
-	PrepareBatch(context.Context, fleet.BatchRequest) (fleet.Batch, error)
-	Batch(string) (fleet.Batch, error)
 	List() []fleet.Machine
 	Get(string) (fleet.Machine, error)
 	Start(context.Context, string) error
@@ -37,6 +35,15 @@ type fleetAPI interface {
 }
 
 func serve(ctx context.Context, cfg config.Config, diagnostics io.Writer) error {
+	return serveWithController(ctx, cfg, diagnostics, startDispatchController)
+}
+
+type controllerStarter func(context.Context, config.Config, io.Writer) (proxy.DispatchWorker, func(), error)
+
+func serveWithController(ctx context.Context, cfg config.Config, diagnostics io.Writer, startController controllerStarter) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
 	providers, err := cfg.BuildProviders()
 	if err != nil {
 		return err
@@ -50,106 +57,88 @@ func serve(ctx context.Context, cfg config.Config, diagnostics io.Writer) error 
 	if err != nil {
 		return errors.New("cannot initialize private daemon token")
 	}
-	idleTimeout, err := cfg.IdleDuration()
+	manager, err := fleet.New(fleet.Options{Providers: providers, Templates: cfg.ProviderTemplates(), Sizes: cfg.ProviderSizes(), Store: disk, ExpectedVersion: cfg.ExpectedVersion})
 	if err != nil {
-		return err
-	}
-	manager, err := fleet.New(fleet.Options{IdleTimeout: idleTimeout, Providers: providers, Templates: cfg.Templates, Store: disk, ExpectedVersion: cfg.ExpectedVersion, ListenHost: cfg.MachineHost})
-	if err != nil {
-		return errors.New("cannot initialize fleet; check configuration and state")
+		return fmt.Errorf("cannot initialize fleet: %w", err)
 	}
 	defer func() {
 		shutdown, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		_ = manager.Close(shutdown)
 	}()
-	var dispatch *proxy.Proxy
-	if poc := cfg.DispatchPOC; poc != nil {
-		stateName := "dispatch-poc"
-		if poc.OnDemand != nil {
-			stateName = "dispatch-boat"
-		}
-		store, err := state.Open(filepath.Join(cfg.StateDir, stateName))
-		if err != nil {
-			return fmt.Errorf("cannot open private dispatch state: %w", err)
-		}
-		defer func() { _ = store.Close() }()
-		origin := "http://" + poc.Listen
-		if poc.OnDemand != nil {
-			controller, stop, startErr := startDispatchController(ctx, cfg, diagnostics)
-			if startErr != nil {
-				return startErr
-			}
-			defer stop()
-			providerOrder := poc.OnDemand.OrderedProviders()
-			var releaseWorker func(context.Context, string) error
-			if poc.OnDemand.DeleteWorkerOnArchive {
-				releaseWorker = manager.ReleaseDispatchWorker
-			}
-			dispatch, err = proxy.NewDispatchOnDemand(origin, store, proxy.DispatchOnDemand{
-				Controller: controller, ProjectRoot: filepath.Join(cfg.StateDir, stateName, "projects"),
-				MaxWorkers: poc.OnDemand.MaxWorkerCount(), Model: poc.OnDemand.Model,
-				Provision: func(ctx context.Context, key, remote string) (proxy.DispatchWorker, string, error) {
-					return manager.ProvisionDispatchWorker(ctx, key, remote, providerOrder)
-				},
-				Lookup: manager.LookupDispatchWorker, Release: releaseWorker, Reclaim: manager.ReclaimDispatchWorker,
-				Lost: manager.DispatchWorkerLost,
-			})
-		} else {
-			var workers []proxy.DispatchWorker
-			for _, id := range poc.Workers {
-				worker, err := manager.DispatchWorker(id)
-				if err != nil {
-					return fmt.Errorf("dispatch worker %q is missing or unprepared: %w", id, err)
-				}
-				workers = append(workers, worker)
-			}
-			dispatch, err = proxy.NewDispatchPOC(origin, store, workers)
-		}
-		if err != nil {
-			return fmt.Errorf("cannot initialize dispatch POC: %w", err)
-		}
-		ln, err := net.Listen("tcp", poc.Listen)
-		if err != nil {
-			return errors.New("cannot listen for dispatch requests")
-		}
-		pocCtx, cancel := context.WithCancel(ctx)
-		srv := &http.Server{Handler: dispatch, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second,
-			MaxHeaderBytes: 64 << 10, BaseContext: func(net.Listener) context.Context { return pocCtx }}
-		cleanupDone := make(chan struct{})
-		go func() {
-			defer close(cleanupDone)
-			dispatch.RunDispatchCleanup(pocCtx, func(err error) {
-				fmt.Fprintln(diagnostics, "t3fleet dispatch cleanup:", err)
-			})
-		}()
-		defer func() { cancel(); _ = srv.Close(); <-cleanupDone }()
-		go func() { _ = srv.Serve(ln) }()
-		fmt.Fprintln(diagnostics, "t3fleet dispatch POC listening on", ln.Addr().String())
+	// Keep dispatch state at its original path: a new directory would lose
+	// pairing, project metadata and the link to already allocated workers.
+	root := filepath.Join(cfg.StateDir, "dispatch-boat")
+	store, err := state.Open(root)
+	if err != nil {
+		return fmt.Errorf("cannot open private dispatch state: %w", err)
 	}
+	defer func() { _ = store.Close() }()
+	controller, stop, err := startController(ctx, cfg, diagnostics)
+	if err != nil {
+		return err
+	}
+	defer stop()
+	settings := cfg.Dispatch
+	var releaseWorker func(context.Context, string) error
+	if settings.DeleteWorkerOnArchive {
+		releaseWorker = manager.ReleaseDispatchWorker
+	}
+	dispatch, err := proxy.NewDispatchOnDemand("http://"+settings.Listen, store, proxy.DispatchOnDemand{
+		Controller: controller, ProjectRoot: filepath.Join(root, "projects"),
+		MaxWorkers: settings.MaxWorkerCount(), Model: settings.Model,
+		Provision: func(ctx context.Context, key, remote string) (proxy.DispatchWorker, string, error) {
+			return manager.ProvisionDispatchWorker(ctx, key, remote, settings.ProviderOrder)
+		},
+		Lookup: manager.LookupDispatchWorker, Release: releaseWorker, Reclaim: manager.ReclaimDispatchWorker,
+		Lost: manager.DispatchWorkerLost,
+	})
+	if err != nil {
+		return fmt.Errorf("cannot initialize T3 dispatch: %w", err)
+	}
+	ln, err := net.Listen("tcp", settings.Listen)
+	if err != nil {
+		return fmt.Errorf("cannot listen for T3 requests on %s: %w", settings.Listen, err)
+	}
+	defer func() { _ = ln.Close() }()
 	listener, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return errors.New("cannot listen for admin requests; check listen address or another daemon")
 	}
-	server := http.Server{Handler: newAdminHandlerWithDispatch(manager, token, dispatch), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 11 * time.Minute, IdleTimeout: 60 * time.Second}
-	done := make(chan error, 1)
-	go func() { done <- server.Serve(listener) }()
+	defer func() { _ = listener.Close() }()
+	lifetime, cancel := context.WithCancel(ctx)
+	base := func(net.Listener) context.Context { return lifetime }
+	t3 := &http.Server{Handler: dispatch, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second,
+		MaxHeaderBytes: 64 << 10, BaseContext: base}
+	admin := &http.Server{Handler: newAdminHandlerWithDispatch(manager, token, dispatch), ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout: 30 * time.Second, WriteTimeout: 11 * time.Minute, IdleTimeout: 60 * time.Second, BaseContext: base}
+	cleanupDone := make(chan struct{})
+	go func() {
+		defer close(cleanupDone)
+		dispatch.RunDispatchCleanup(lifetime, func(err error) {
+			fmt.Fprintln(diagnostics, "t3fleet dispatch cleanup:", err)
+		})
+	}()
+	defer func() {
+		cancel()
+		_ = t3.Close()
+		_ = admin.Close()
+		<-cleanupDone
+	}()
+	done := make(chan error, 2)
+	go func() { done <- t3.Serve(ln) }()
+	go func() { done <- admin.Serve(listener) }()
+	fmt.Fprintln(diagnostics, "t3fleet listening for T3 on", ln.Addr().String())
 	fmt.Fprintln(diagnostics, "t3fleet control listening on", listener.Addr().String())
 	printServeSummary(diagnostics, cfg, manager.List())
 	select {
 	case err := <-done:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
-		return errors.New("admin server stopped unexpectedly")
+		return fmt.Errorf("fleet listener stopped: %w", err)
 	case <-ctx.Done():
-		shutdown, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdown); err != nil {
-			_ = server.Close()
-			return errors.New("admin shutdown timed out")
-		}
-		return nil
+		cancel()
+		shutdown, stopShutdown := context.WithTimeout(context.Background(), 15*time.Second)
+		defer stopShutdown()
+		return errors.Join(t3.Shutdown(shutdown), admin.Shutdown(shutdown))
 	}
 }
 
@@ -189,7 +178,7 @@ func newAdminHandlerWithDispatch(manager fleetAPI, token string, dispatch *proxy
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 		defer cancel()
 
-		if r.URL.Path == "/v1/dispatch-poc/pair" {
+		if r.URL.Path == "/v1/dispatch/pair" {
 			if dispatch == nil {
 				safeError(w, http.StatusNotFound, "not_found")
 			} else if r.Method != http.MethodPost {
@@ -201,7 +190,7 @@ func newAdminHandlerWithDispatch(manager fleetAPI, token string, dispatch *proxy
 			}
 			return
 		}
-		if r.URL.Path == "/v1/dispatch-poc/pair-peer" {
+		if r.URL.Path == "/v1/dispatch/pair-peer" {
 			w.Header().Set("Cache-Control", "no-store")
 			switch {
 			case dispatch == nil:
@@ -225,35 +214,12 @@ func newAdminHandlerWithDispatch(manager fleetAPI, token string, dispatch *proxy
 			return
 		}
 
-		if r.URL.Path == "/v1/batches" || strings.HasPrefix(r.URL.Path, "/v1/batches/") {
-			var batch fleet.Batch
-			var err error
-			switch {
-			case r.URL.Path == "/v1/batches" && r.Method == http.MethodPost:
-				var request fleet.BatchRequest
-				if !decodeRequest(w, r, &request) {
-					return
-				}
-				batch, err = manager.PrepareBatch(ctx, request)
-			case strings.HasPrefix(r.URL.Path, "/v1/batches/") && r.Method == http.MethodGet:
-				batch, err = manager.Batch(strings.TrimPrefix(r.URL.Path, "/v1/batches/"))
-			default:
-				w.WriteHeader(http.StatusMethodNotAllowed)
-				return
-			}
-			if err != nil {
-				operationError(w, err)
-				return
-			}
-			writeJSON(w, http.StatusOK, batch)
-			return
-		}
 		if r.URL.Path == "/v1/machines" {
 			switch r.Method {
 			case http.MethodGet:
 				writeJSON(w, http.StatusOK, manager.List())
 			case http.MethodPost:
-				var request fleet.CreateRequest
+				var request machineCreateRequest
 				if !decodeRequest(w, r, &request) {
 					return
 				}
@@ -261,7 +227,7 @@ func newAdminHandlerWithDispatch(manager fleetAPI, token string, dispatch *proxy
 					safeError(w, http.StatusBadRequest, "invalid_request")
 					return
 				}
-				machine, err := manager.Create(ctx, request)
+				machine, err := manager.Create(ctx, fleet.CreateRequest{Name: request.Name, Provider: request.Provider})
 				if err != nil {
 					if machine.ID != "" {
 						status, code := operationFailure(err)
@@ -319,6 +285,10 @@ func newAdminHandlerWithDispatch(manager fleetAPI, token string, dispatch *proxy
 		switch parts[1] {
 		case "start":
 			err = manager.Start(ctx, id)
+			if err == nil && dispatch != nil && dispatch.RestoreWorkerListing(ctx, id) != nil {
+				safeError(w, http.StatusBadGateway, "worker_started_listing_unavailable")
+				return
+			}
 		case "stop":
 			err = manager.Stop(ctx, id)
 		case "pair":
@@ -486,5 +456,5 @@ func printServeSummary(w io.Writer, cfg config.Config, machines []fleet.Machine)
 	fmt.Fprintln(w, "  providers:", providers)
 	fmt.Fprintln(w, "  state:    ", cfg.StateDir)
 	fmt.Fprintln(w, "  machines: ", machineSummary(byState, len(machines)))
-	fmt.Fprintln(w, "Cloud machines keep running and billing after the daemon stops; use 't3fleet stop' or 't3fleet delete'.")
+	fmt.Fprintln(w, "Cloud machines keep running and billing after the daemon stops; use 't3fleet admin stop' or 't3fleet admin delete'.")
 }

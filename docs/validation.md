@@ -1,10 +1,28 @@
 # Validation record
 
+## On-demand fleet, November 19, 2026
+
+Local checks used Go 1.27.3 and the genuine T3 server `0.1.11-nightly.20261117.4838`. The [dispatch guide](dispatch.md) lists the two T3 canary commands.
+
+| Boundary | What was checked |
+| --- | --- |
+| T3 protocol | A Desktop protocol client and a linked T3 server registered multiple repositories, launched threads on separate local T3 workers, and recovered assignments after restart. The workers used a deterministic replay agent. |
+| Git checkout | The production worker script cloned two local Git origins, rejected a mismatched origin, and reused an existing checkout without losing uncommitted changes after the origin went offline. |
+| Placement | Adapter fixtures checked explicit account selection, token rotation to a different tenant and missing fallback credentials. Fleet tests exercised ordered fallback, ambiguous allocations and legacy account verification. Retries kept the reserved template, size, Boat environment and Namespace site after restart. |
+| Passive listing | Listing projects and threads left stopped workers asleep and kept unrelated projects visible when another worker was unavailable. Explicitly starting one legacy worker recovered its listing without opening a sibling connection. |
+| Packaging | The configuration examples passed offline validation. A disposable Home Manager service on macOS started a real T3 controller, issued a pairing link and reported an empty fleet with the cloud endpoint pointed at loopback. |
+
+These checks did not create Boat or Namespace machines, exercise a paid model or automate the T3 Desktop UI.
+
+## Historical checks before the redesign
+
+The manual commands and fixed-pool behavior described below are historical. These earlier cloud results do not validate the new placement flow.
+
 Validated on 2026-11-18 with Go 1.27.3 and T3 server
 `0.1.11-nightly.20261117.4838`. This records observed behavior, not a guarantee
 for another desktop version, image, account, or region.
 
-## Local checks
+### Local checks
 
 - `make lint`: golangci-lint with the repository configuration, including formatting and `go vet`.
 - `make test`: all packages with the race detector; no cloud credentials.
@@ -26,7 +44,7 @@ Regression tests also cover HTTP/2 TLS negotiation with private endpoint cookies
 WebSocket redirect rejection, interrupted creation, partial allocation, durable
 recovery, cancellation, and asynchronous deletion.
 
-## Real cloud lifecycle
+### Real cloud lifecycle
 
 Both opt-in `TestCloudLifecycle` runs passed using current authenticated accounts
 and dedicated test machines. Boat used a prepared named snapshot. Namespace used
@@ -57,7 +75,7 @@ sources remain stopped, with their snapshots retained for future machines.
 Stopped machines and saved snapshots may still incur storage charges. No account
 identifiers, credentials, private endpoints, or runtime output are stored here.
 
-## Limits of this proof
+### Limits of this proof
 
 - The reference Dockerfile is included, but a complete build and provider image
   optimization of that exact recipe was not completed. The public Nix tools and
@@ -78,7 +96,7 @@ identifiers, credentials, private endpoints, or runtime output are stored here.
 For repeatable commands and cleanup rules, see
 [Contributing](../CONTRIBUTING.md#optional-live-validation).
 
-## Bulk lifecycle offline validation (2026-11-18)
+### Bulk lifecycle offline validation (2026-11-18)
 
 The prepared bulk-lifecycle checkout was verified to start at local commit
 `fa200e3e87c955a1cbaae62f81dd7b6212e813f4` before edits. Its Nix shell now
@@ -110,7 +128,7 @@ deduplication, declined/empty/invalid/EOF selection, headless deletion, partial
 delete failure, and pacing/cancellation of desktop handoffs with an injected
 launcher. T3 confirmations and a real ten-VM batch remain unverified live.
 
-## Idle lifecycle offline validation (2026-11-18)
+### Idle lifecycle offline validation (2026-11-18)
 
 Go 1.27.3 on macOS arm64 passes `nix develop --command make lint test build`
 for the optional `idleTimeout` policy. Live cloud/T3 opt-in variables were unset.
@@ -140,4 +158,4 @@ The reference was t3boat commit `bd488c87c88b1b467709afaa3080d837483aafbb`.
 Its remote watchdog, CPU checks, snapshot capture, database reads, scheduled
 wake behavior and offline chat replay were not ported. The local policy's live
 desktop behavior and the external-client read-to-stop race remain explicit
-limits; see [idle lifecycle](idle-lifecycle.md).
+limits; see [historical idle lifecycle](https://github.com/flemzord/t3fleet/blob/2421dbf/docs/idle-lifecycle.md).

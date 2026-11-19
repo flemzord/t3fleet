@@ -13,39 +13,48 @@ t3fleet version
 
 On newer Nix versions, `nix profile add` is equivalent. To try it without changing your profile, use `nix run github:flemzord/t3fleet -- version`. In a local checkout, use `nix run . -- version`. The packaged CLI reports the release base and the source revision when Nix has revision metadata.
 
-To install declaratively, add `inputs.t3fleet.url = "github:flemzord/t3fleet";` to your flake and use `inputs.t3fleet.packages.${pkgs.stdenv.hostPlatform.system}.t3fleet` in any package list. You can also add `inputs.t3fleet.overlays.default` to `nixpkgs.overlays` and install `pkgs.t3fleet`. A package-only install uses the [manual configuration and startup](getting-started.md#3-configure-credentials-and-billing).
+To install declaratively, add `inputs.t3fleet.url = "github:flemzord/t3fleet";` to your flake and use `inputs.t3fleet.packages.${pkgs.stdenv.hostPlatform.system}.t3fleet` in any package list. You can also add `inputs.t3fleet.overlays.default` to `nixpkgs.overlays` and install `pkgs.t3fleet`. For a package-only install, follow the [getting started guide](getting-started.md).
 
 ## Enable the background service
 
 Import this module in your Home Manager configuration. It works with standalone Home Manager and with Home Manager integrated into NixOS or nix-darwin. The module installs the CLI as well, so you can skip the profile install above.
 
 ```nix
-{ config, inputs, ... }:
+{ config, inputs, lib, pkgs, ... }:
 {
   imports = [ inputs.t3fleet.homeModules.default ];
 
   services.t3fleet = {
     enable = true;
     settings = {
-      providers.boat = {
+      providers.primary = {
+        type = "boat";
+        template.snapshot = "YOUR_READY_BOAT_SNAPSHOT";
         organization = "YOUR_BOAT_ORGANIZATION";
         apiKeyFile = "${config.home.homeDirectory}/.secrets/boat-api-key";
       };
-      templates.boat.snapshot = "YOUR_READY_BOAT_SNAPSHOT";
+      dispatch = {
+        listen = "127.0.0.1:47733";
+        providerOrder = [ "primary" ];
+        maxWorkers = 8;
+      } // lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+        # Set this to your installed, matching T3 executable.
+        t3Binary = "/absolute/path/to/t3";
+      };
     };
   };
 }
 ```
 
-This example expects `inputs` in Home Manager's `extraSpecialArgs`. You can instead import the Fleet module directly from your flake's `modules` list.
+This example expects `inputs` in Home Manager's `extraSpecialArgs`. You can instead import the Fleet module directly from your flake's `modules` list. On Linux the module supplies its pinned T3 controller; set `settings.dispatch.t3Binary` to override it. On macOS, install a T3 executable matching `expectedVersion` and set its absolute path. The daemon starts this controller locally. Cloud workers are allocated when a thread needs one.
 
-Use the same keys as in [config.json](../examples/config.json). Enter credential **paths as strings**. Nix stores the generated JSON and service definition in the world-readable Nix store. Keep the Boat key in a regular file with mode `0600`. For a Namespace token file, set `services.t3fleet.namespaceTokenFile` to its absolute runtime path; the service sets `NSC_TOKEN_FILE`. For other Namespace authentication methods, see [Namespace credentials](providers-namespace.md#credentials). Use `services.t3fleet.environment` for non-secret variables such as `PATH`; its values also go into the Nix store.
+Use the same keys as in [config.json](../examples/config.json). Enter credential **paths as strings**. Nix stores the generated JSON and service definition in the world-readable Nix store. Keep the Boat key in a regular file with mode `0600`. Each Namespace instance requires `providers.<name>.tenantId` and can set its own `providers.<name>.tokenFile`; to provide an SDK default for the whole service, set `services.t3fleet.namespaceTokenFile`, which sets `NSC_TOKEN_FILE`. For other methods, see [Namespace credentials](providers-namespace.md#credentials). Use `services.t3fleet.environment` for non-secret variables such as `PATH`; its values also go into the Nix store.
 
-Home Manager links the JSON into `$XDG_CONFIG_HOME/t3fleet/config.json` on Linux (`~/.config` by default) or `~/Library/Application Support/t3fleet/config.json` on macOS. On Linux, if you customize `xdg.configHome`, enable Home Manager's XDG settings and load the resulting session environment so the CLI sees the same path. The daemon gets its configuration path directly from the service definition. The default state directory is `$XDG_STATE_HOME/t3fleet` on Linux (`~/.local/state/t3fleet` by default), and `~/.local/state/t3fleet` on macOS.
+Home Manager runs `t3fleet validate` on the generated JSON before activating it. Validation checks the configuration without reading credentials or contacting providers. Home Manager links the result into `$XDG_CONFIG_HOME/t3fleet/config.json` on Linux (`~/.config` by default) or `~/Library/Application Support/t3fleet/config.json` on macOS. On Linux, if you customize `xdg.configHome`, enable Home Manager's XDG settings and load the resulting session environment so the CLI sees the same path. The daemon gets its configuration path directly from the service definition. The default state directory is `$XDG_STATE_HOME/t3fleet` on Linux (`~/.local/state/t3fleet` by default), and `~/.local/state/t3fleet` on macOS.
 
 If you already run Fleet manually, move the existing config file out of the managed location, transfer your settings into Nix, and set `settings.stateDir` to the old state directory. Stop the manual daemon before switching so the service can take ownership of that state. If you used a custom LaunchAgent or systemd unit, disable and remove it as part of the migration so it cannot restart and compete for the same address.
 
-Apply the configuration with your usual Home Manager, NixOS, or nix-darwin switch command. Then run `t3fleet list` as the same user. An empty list shows that the CLI reached the daemon; it does not require creating a cloud machine.
+Apply the configuration with your usual Home Manager, NixOS, or nix-darwin switch command. Run `t3fleet list` as the same user to check the connection, then `t3fleet pair` to get the fleet's Desktop pairing link. Neither command creates a cloud worker. Add a GitHub project in T3 and start a thread to allocate its worker.
 
 | Platform | Inspect the service | Read logs |
 | --- | --- | --- |

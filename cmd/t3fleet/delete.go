@@ -35,7 +35,7 @@ type deleteResult struct {
 // Prefixes are refused: a short typo must never select another machine.
 func (a *app) deleteOne(ctx context.Context, ref string, opts deleteOptions) error {
 	if opts.ids != "" {
-		return hinted("use 't3fleet delete REF' or 't3fleet delete --ids ID,ID --yes'", "a machine argument cannot be combined with --ids")
+		return hinted("use 't3fleet admin delete REF' or 't3fleet admin delete --ids ID,ID --yes'", "a machine argument cannot be combined with --ids")
 	}
 	d, err := a.daemon()
 	if err != nil {
@@ -59,10 +59,10 @@ func (a *app) deleteOne(ctx context.Context, ref string, opts deleteOptions) err
 
 func (a *app) deleteMany(ctx context.Context, opts deleteOptions) error {
 	if opts.ids == "" && opts.yes {
-		return hinted("use 't3fleet delete REF', 't3fleet delete' interactively, or 't3fleet delete --ids ID,ID --yes'", "--yes requires --ids")
+		return hinted("use 't3fleet admin delete REF', 't3fleet admin delete' interactively, or 't3fleet admin delete --ids ID,ID --yes'", "--yes requires --ids")
 	}
 	if !a.stdinTTY && (opts.ids == "" || !opts.yes) {
-		return hinted("without a terminal, use 't3fleet delete REF' or 't3fleet delete --ids ID,ID --yes'", "interactive deletion needs a terminal")
+		return hinted("without a terminal, use 't3fleet admin delete REF' or 't3fleet admin delete --ids ID,ID --yes'", "interactive deletion needs a terminal")
 	}
 	d, err := a.daemon()
 	if err != nil {

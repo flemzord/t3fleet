@@ -26,7 +26,7 @@ var _ provider.Provider = (*Client)(nil)
 
 | Method | Contract |
 | --- | --- |
-| `Name` | Stable configuration identifier, such as `boat`. |
+| `Name` | Stable driver type, such as `boat`. Several named instances may have the same type. |
 | `Create` | Use `OperationID` to deduplicate or safely reconcile a request. Never change names automatically after a lost response. |
 | `Get` | Map vendor states to the common state set; return `provider.ErrNotFound` for absence. |
 | `Start` | Start/resume the existing machine, honoring context cancellation. |
@@ -60,9 +60,11 @@ A backend can support creating from existing snapshots without implementing expl
 
 ## 4. Wire configuration at the application layer
 
-Add the provider's non-secret configuration and credential resolution to `internal/config`. The first implementation has an explicit provider configuration structure and constructor selection. A new adapter therefore needs a small configuration change, but no change to fleet lifecycle or the T3 proxy.
+Add the provider's non-secret configuration and credential resolution to `internal/config`. Instances declare a driver with `providers.<name>.type`; they own their credentials, size and template. Register the new type in configuration decoding, validation and construction. A new adapter therefore needs a small configuration change, but no change to fleet lifecycle or the T3 proxy.
 
-Keep account selection explicit. Authentication success does not establish which wallet, organization, project, region, or tenant should pay for a new VM.
+Keep account selection explicit. Implement `provider.ScopeIdentifier` with a stable identifier derived from the API endpoint and account, independent of credential rotation. Bind each request to that account and resolve credentials only when the instance is used. An unavailable fallback must not prevent the controller from starting.
+
+If the adapter has placement defaults such as a site or injected environment, implement `provider.PlacementProvider`. Honor the saved `CreateRequest.Placement` on retry, including an explicitly empty setting. A config edit must not redirect an existing reservation.
 
 Templates use `provider.Template`:
 

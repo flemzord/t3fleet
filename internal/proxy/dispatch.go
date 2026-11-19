@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -23,29 +22,28 @@ import (
 	"github.com/flemzord/t3fleet/internal/state"
 )
 
-// DispatchWorker is a dedicated, pre-provisioned T3 server. The ID must identify
+// DispatchWorker resolves one T3 server. The ID must identify
 // the same machine (and T3 data) after a restart.
 type DispatchWorker struct {
-	ID         string
-	Resolve    func(context.Context) (Upstream, error)
-	Descriptor func(context.Context) (map[string]any, error)
+	ID      string
+	Resolve func(context.Context) (Upstream, error)
+	// ResolvePassive may only connect without waking a machine. Nil means no passive transport.
+	ResolvePassive func(context.Context) (Upstream, error)
+	Descriptor     func(context.Context) (map[string]any, error)
 }
 
 type dispatchState struct {
 	Origin        string
 	EnvironmentID string
-	Workers       []string
-	Threads       map[string]int
 	Clients       map[string]time.Time
 	OnDemand      *onDemandDisk        `json:",omitempty"`
 	PeerGrants    map[string]peerGrant `json:",omitempty"`
 }
 
-type dispatchPOC struct {
+type dispatcher struct {
 	mu           sync.Mutex
 	store        *state.Store
 	disk         dispatchState
-	workers      []DispatchWorker
 	timeout      time.Duration
 	sequence     atomic.Uint64
 	onDemand     *DispatchOnDemand
@@ -56,58 +54,16 @@ type dispatchPOC struct {
 
 const dispatchLabel = "t3fleet"
 
-// NewDispatchPOC exposes a distinct environment and assigns at most one new
-// thread to each worker. Workers must share a prepared workspace layout.
-func NewDispatchPOC(origin string, store *state.Store, workers []DispatchWorker) (*Proxy, error) {
-	if store == nil || len(workers) < 2 || len(workers) > 8 {
-		return nil, errors.New("dispatch requires private state and 2–8 workers")
-	}
-	var ids []string
-	for _, w := range workers {
-		if w.ID == "" || w.Resolve == nil || slices.Contains(ids, w.ID) {
-			return nil, errors.New("dispatch workers must be distinct and resolvable")
-		}
-		ids = append(ids, w.ID)
-	}
-	d := &dispatchPOC{store: store, workers: slices.Clone(workers), timeout: 2 * time.Minute}
-	if err := store.Load(&d.disk); errors.Is(err, state.ErrEmpty) {
-		id, err := randomToken()
-		if err != nil {
-			return nil, err
-		}
-		d.disk = dispatchState{Origin: origin, EnvironmentID: "t3fleet-" + id, Workers: ids, Threads: map[string]int{}, Clients: map[string]time.Time{}}
-		if err := store.Save(d.disk); err != nil {
-			return nil, err
-		}
-	} else if err != nil {
-		return nil, err
-	}
-	if d.disk.Origin != origin || !slices.Equal(d.disk.Workers, ids) || d.disk.EnvironmentID == "" || d.disk.Threads == nil || d.disk.Clients == nil {
-		return nil, errors.New("dispatch state must keep its original origin and ordered workers")
-	}
-	var taken [8]bool
-	for id, index := range d.disk.Threads {
-		if !validDispatchThreadID(id) || index < 0 || index >= len(workers) || taken[index] {
-			return nil, errors.New("invalid saved dispatch routes")
-		}
-		taken[index] = true
-	}
-	if d.disk.OnDemand != nil {
-		return nil, errors.New("on-demand state cannot be used by the fixed worker pool")
-	}
-	return d.proxy(origin)
-}
-
-func (d *dispatchPOC) proxy(origin string) (*Proxy, error) {
+func (d *dispatcher) proxy(origin string) (*Proxy, error) {
 	environmentID := d.disk.EnvironmentID
-	descriptor := d.workers[0].Descriptor
+	descriptor := d.onDemand.Controller.Descriptor
 	if descriptor == nil {
 		descriptor = func(ctx context.Context) (map[string]any, error) {
-			return d.get(ctx, 0, "/.well-known/t3/environment")
+			return d.getFrom(ctx, d.onDemand.Controller, "/.well-known/t3/environment")
 		}
 	}
 	p, err := New(Config{
-		Origin: origin, Label: dispatchLabel, Resolve: d.workers[0].Resolve,
+		Origin: origin, Label: dispatchLabel, Resolve: d.onDemand.Controller.Resolve,
 		Authorize: d.authorize, SaveToken: d.saveToken, RequestTimeout: d.timeout,
 		Descriptor: func(ctx context.Context) (map[string]any, error) {
 			v, err := descriptor(ctx)
@@ -116,7 +72,7 @@ func (d *dispatchPOC) proxy(origin string) (*Proxy, error) {
 				v["environmentId"] = environmentID
 				if capabilities, ok := v["capabilities"].(map[string]any); ok {
 					capabilities = maps.Clone(capabilities)
-					d.dispatchCapabilities(capabilities)
+					dispatchCapabilities(capabilities)
 					v["capabilities"] = capabilities
 				}
 			}
@@ -130,14 +86,9 @@ func (d *dispatchPOC) proxy(origin string) (*Proxy, error) {
 	return p, nil
 }
 
-func (d *dispatchPOC) dispatchCapabilities(v map[string]any) {
+func dispatchCapabilities(v map[string]any) {
 	for _, key := range []string{"shellThreadFamilies", "shellOlderSettled", "linkedThreadRefreshes"} {
 		if _, ok := v[key]; ok {
-			v[key] = false
-		}
-	}
-	if d.onDemand == nil {
-		for _, key := range []string{"peerLinks", "peerLinkPairingCodes", "linkFence"} {
 			v[key] = false
 		}
 	}
@@ -148,13 +99,13 @@ func tokenDigest(token string) string {
 	return hex.EncodeToString(digest[:])
 }
 
-func (d *dispatchPOC) authorize(token string) bool {
+func (d *dispatcher) authorize(token string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return time.Now().Before(d.disk.Clients[tokenDigest(token)])
 }
 
-func (d *dispatchPOC) saveToken(_ context.Context, token string) error {
+func (d *dispatcher) saveToken(_ context.Context, token string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	next := d.disk
@@ -169,44 +120,22 @@ func (d *dispatchPOC) saveToken(_ context.Context, token string) error {
 	return nil
 }
 
-func (d *dispatchPOC) worker(id string, create bool) (int, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if index, ok := d.disk.Threads[id]; ok {
-		return index, nil
-	}
-	if !create || !validDispatchThreadID(id) {
-		return 0, errors.New("thread has no dispatch assignment")
-	}
-	index := len(d.disk.Threads)
-	if index >= len(d.workers) {
-		return 0, errors.New("dispatch pool has no unused worker")
-	}
-	next := d.disk
-	next.Threads = maps.Clone(next.Threads)
-	next.Threads[id] = index
-	if err := d.store.Save(next); err != nil {
-		return 0, errors.New("could not persist dispatch assignment")
-	}
-	d.disk = next
-	return index, nil
-}
-
 func validDispatchThreadID(id string) bool {
 	return id != "" && id != "." && id != ".." && len(id) <= 256 && !strings.ContainsAny(id, "/\\?#%\x00\r\n")
 }
 
-func (d *dispatchPOC) get(ctx context.Context, index int, path string) (map[string]any, error) {
-	return d.getFrom(ctx, d.workers[index], path)
-}
-
-func (d *dispatchPOC) getFrom(ctx context.Context, worker DispatchWorker, path string) (map[string]any, error) {
+func (d *dispatcher) getFrom(ctx context.Context, worker DispatchWorker, path string) (map[string]any, error) {
 	up, ctx, cancel, err := resolveUpstream(ctx, d.timeout, worker.Resolve)
 	if err != nil {
 		return nil, err
 	}
 	defer cancel()
 	defer closeEndpoint(up.Endpoint)
+	return fetchSnapshot(ctx, up, path)
+}
+
+// Reuse the current action's transport. The caller owns the endpoint lifetime.
+func fetchSnapshot(ctx context.Context, up Upstream, path string) (map[string]any, error) {
 	tr := transport(up.Endpoint)
 	defer tr.CloseIdleConnections()
 	rel := &http.Request{URL: &url.URL{Path: path}}
@@ -237,67 +166,10 @@ func rejectRedirect(*http.Request, []*http.Request) error { return http.ErrUseLa
 
 const dispatchShellPath = "/api/orchestration/shell"
 
-func (d *dispatchPOC) shell(ctx context.Context) (map[string]any, error) {
-	if d.onDemand != nil {
-		return d.onDemandShell(ctx)
-	}
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	rows := make([]map[string]any, len(d.workers))
-	var wg sync.WaitGroup
-	for index := range rows {
-		wg.Go(func() { rows[index], _ = d.get(ctx, index, dispatchShellPath) })
-	}
-	wg.Wait()
-	d.mu.Lock()
-	routes := maps.Clone(d.disk.Threads)
-	d.mu.Unlock()
-	return mergeDispatchShell(rows, routes, false)
-}
-
-func mergeDispatchShell(rows []map[string]any, routes map[string]int, controllerProjects bool) (map[string]any, error) {
-	result := map[string]any{"snapshotSequence": 0}
-	schema, ok := rows[0]["schemaVersion"].(float64)
-	if !ok {
-		return nil, errors.New("dispatch shell unavailable")
-	}
-	for _, key := range []string{"projects", "threads", "archivedThreads"} {
-		list := []any{}
-		seen := map[string]bool{}
-		for index, row := range rows {
-			if controllerProjects && key == "projects" && index != 0 {
-				break
-			}
-			items, ok := row[key].([]any)
-			if version, valid := row["schemaVersion"].(float64); !ok || !valid || version != schema {
-				return nil, errors.New("dispatch shell unavailable")
-			}
-			for _, item := range items {
-				obj, _ := item.(map[string]any)
-				id, _ := obj["id"].(string)
-				if id == "" || seen[id] {
-					continue
-				}
-				// Hide unmanaged threads rather than silently adopting them.
-				if key != "projects" {
-					if assigned, ok := routes[id]; !ok || assigned != index {
-						continue
-					}
-				}
-				seen[id] = true
-				list = append(list, item)
-			}
-		}
-		result[key] = list
-	}
-	result["schemaVersion"] = schema
-	return result, nil
-}
-
-func (d *dispatchPOC) serve(p *Proxy, w http.ResponseWriter, r *http.Request) {
+func (d *dispatcher) serve(p *Proxy, w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == dispatchShellPath:
-		snapshot, err := d.shell(r.Context())
+		snapshot, err := d.onDemandShell(r.Context())
 		if err != nil {
 			fail(w, http.StatusServiceUnavailable, "dispatch shell unavailable")
 			return
@@ -309,7 +181,7 @@ func (d *dispatchPOC) serve(p *Proxy, w http.ResponseWriter, r *http.Request) {
 		tail := strings.TrimPrefix(r.URL.Path, "/api/orchestration/threads/")
 		id, suffix, _ := strings.Cut(tail, "/")
 		if !slices.Contains([]string{"", "transcript", "bounded", "history"}, suffix) {
-			fail(w, http.StatusNotImplemented, "route outside dispatch POC")
+			fail(w, http.StatusNotImplemented, "route is not supported by the fleet")
 			return
 		}
 		worker, err := d.threadWorker(id)
@@ -320,7 +192,7 @@ func (d *dispatchPOC) serve(p *Proxy, w http.ResponseWriter, r *http.Request) {
 		relay := Proxy{origin: p.origin, cfg: Config{Resolve: worker.Resolve, RequestTimeout: d.timeout}}
 		relay.relay(w, r)
 	default:
-		fail(w, http.StatusNotImplemented, "route outside dispatch POC")
+		fail(w, http.StatusNotImplemented, "route is not supported by the fleet")
 	}
 }
 
@@ -329,7 +201,7 @@ type dispatchCall struct {
 	acks   chan map[string]any
 }
 
-func (d *dispatchPOC) socket(w http.ResponseWriter, r *http.Request) {
+func (d *dispatcher) socket(w http.ResponseWriter, r *http.Request) {
 	client, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
 		return
@@ -451,90 +323,21 @@ func writeDispatchFrame(ctx context.Context, conn *websocket.Conn, frame map[str
 	return conn.Write(ctx, websocket.MessageText, data)
 }
 
-func (d *dispatchPOC) call(ctx context.Context, frame map[string]any, acks <-chan map[string]any, send func(map[string]any) error) error {
+func (d *dispatcher) call(ctx context.Context, frame map[string]any, acks <-chan map[string]any, send func(map[string]any) error) error {
 	tag, _ := frame["tag"].(string)
 	payload, _ := frame["payload"].(map[string]any)
-	threadID, _ := payload["threadId"].(string)
-	id := frame["id"]
-	if d.onDemand != nil && tag != "orchestration.subscribeShell" {
-		return d.callOnDemand(ctx, tag, frame, payload, acks, send)
+	if tag == "orchestration.subscribeShell" {
+		return d.streamShell(ctx, frame["id"], payload["requestCompletionMarker"] == true, send)
 	}
-	switch tag {
-	case "orchestration.subscribeShell":
-		return d.streamShell(ctx, id, payload["requestCompletionMarker"] == true, send)
-	case "projects.mutate":
-		if payload["type"] != "project.create" {
-			return errors.New("only project creation is supported by dispatch POC")
-		}
-		// Seed the same project ID/path on all dedicated workers. A retry with
-		// the same command ID can reconcile a partial result; never retry here.
-		var primary map[string]any
-		for index := range d.workers {
-			err := d.rpc(ctx, index, frame, nil, func(reply map[string]any) error {
-				exit, _ := reply["exit"].(map[string]any)
-				if exit["_tag"] != "Success" {
-					return fmt.Errorf("worker %d rejected project creation", index+1)
-				}
-				if index == 0 {
-					primary = reply
-				}
-				return nil
-			})
-			if err != nil {
-				return err
-			}
-		}
-		if primary == nil {
-			return errors.New("project creation returned no result")
-		}
-		return send(primary)
-	case "orchestration.launchThread", "orchestration.dispatchCommand":
-		create := tag == "orchestration.launchThread" && payload["reuseExistingThread"] != true ||
-			tag == "orchestration.dispatchCommand" && payload["type"] == "thread.create"
-		if create && threadID == "" && tag == "orchestration.launchThread" {
-			var err error
-			threadID, err = randomToken()
-			if err != nil {
-				return errors.New("could not create thread identity")
-			}
-			payload["threadId"] = threadID
-		}
-		if tag == "orchestration.dispatchCommand" {
-			command, _ := payload["type"].(string)
-			if !slices.Contains([]string{"thread.create", "message.dispatch", "thread.visit", "thread.mark-unread",
-				"thread.metadata.update", "thread.archive", "thread.unarchive", "thread.settle", "thread.pin", "thread.unpin", "thread.stop",
-				"thread.turn.interrupt", "thread.approval.respond", "thread.user-input.respond"}, command) {
-				return errors.New("command outside dispatch POC")
-			}
-		}
-		index, err := d.worker(threadID, create)
-		if err != nil {
-			return err
-		}
-		return d.rpc(ctx, index, frame, acks, send)
-	case "orchestration.subscribeThread", "orchestration.getThreadProjection", "orchestration.subscribePromptSuggestion",
-		"orchestration.subscribeCommandOutput", "orchestration.getTurnItem", "orchestration.getFullThreadDiff",
-		"orchestration.getNativeChildWork", "orchestration.getThreadFamily":
-		index, err := d.worker(threadID, false)
-		if err != nil {
-			return err
-		}
-		return d.rpc(ctx, index, frame, acks, send)
-	case "server.getConfig", "server.probe", "subscribeServerConfig", "filesystem.browse", "filesystem.getMetadata",
-		"vcs.listRefs", "projects.listEntries", "projects.searchEntries", "projects.listIgnoredFiles",
-		"provider.install.subscribe":
-		return d.rpc(ctx, 0, frame, acks, send)
-	default:
-		return errors.New("RPC outside dispatch POC")
-	}
+	return d.callOnDemand(ctx, tag, frame, payload, acks, send)
 }
 
-func (d *dispatchPOC) streamShell(ctx context.Context, id any, marker bool, send func(map[string]any) error) error {
+func (d *dispatcher) streamShell(ctx context.Context, id any, marker bool, send func(map[string]any) error) error {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	var previous []byte
 	for {
-		snapshot, err := d.shell(ctx)
+		snapshot, err := d.onDemandShell(ctx)
 		if err == nil {
 			data, err := json.Marshal(snapshot)
 			if err != nil {
@@ -563,13 +366,8 @@ func (d *dispatchPOC) streamShell(ctx context.Context, id any, marker bool, send
 	}
 }
 
-// A separate upstream socket per RPC isolates request IDs and ACKs across
-// workers. This intentionally trades connections for a small proof of routing.
-func (d *dispatchPOC) rpc(parent context.Context, index int, frame map[string]any, acks <-chan map[string]any, send func(map[string]any) error) error {
-	return d.rpcTo(parent, d.workers[index], frame, acks, send)
-}
-
-func (d *dispatchPOC) rpcTo(parent context.Context, worker DispatchWorker, frame map[string]any, acks <-chan map[string]any, send func(map[string]any) error) error {
+// Open a separate upstream socket per RPC to isolate request IDs and acknowledgments.
+func (d *dispatcher) rpcTo(parent context.Context, worker DispatchWorker, frame map[string]any, acks <-chan map[string]any, send func(map[string]any) error) error {
 	up, ctx, cancel, err := resolveUpstream(parent, d.timeout, worker.Resolve)
 	if err != nil {
 		return err
@@ -624,6 +422,11 @@ func (d *dispatchPOC) rpcTo(parent context.Context, worker DispatchWorker, frame
 			if requestKey(reply["requestId"]) != key {
 				continue
 			}
+			if reply["_tag"] == "Exit" {
+				if err := d.observeThreadRPC(ctx, up, frame, reply); err != nil {
+					return err
+				}
+			}
 			d.sanitizeConfig(frame["tag"], reply)
 			if err := send(reply); err != nil {
 				return err
@@ -635,11 +438,11 @@ func (d *dispatchPOC) rpcTo(parent context.Context, worker DispatchWorker, frame
 	}
 }
 
-func (d *dispatchPOC) sanitizeConfig(tag any, reply map[string]any) {
+func (d *dispatcher) sanitizeConfig(tag any, reply map[string]any) {
 	rewrite := func(raw any) {
 		cfg, _ := raw.(map[string]any)
 		stripDirect(cfg)
-		if cfg != nil && d.onDemand != nil {
+		if cfg != nil {
 			cfg["providers"] = d.demandProviders()
 			cfg["shellOlderSettled"] = false
 			cfg["shellThreadFamilies"] = false
@@ -651,7 +454,7 @@ func (d *dispatchPOC) sanitizeConfig(tag any, reply map[string]any) {
 			d.mu.Unlock()
 			descriptor["label"] = dispatchLabel
 			if caps, ok := descriptor["capabilities"].(map[string]any); ok {
-				d.dispatchCapabilities(caps)
+				dispatchCapabilities(caps)
 			}
 		}
 	}
@@ -664,7 +467,7 @@ func (d *dispatchPOC) sanitizeConfig(tag any, reply map[string]any) {
 		for _, item := range items {
 			obj, _ := item.(map[string]any)
 			rewrite(obj["config"])
-			if d.onDemand != nil && (obj["type"] == "providerStatuses" || obj["type"] == "providerStatusDeltas") {
+			if obj["type"] == "providerStatuses" || obj["type"] == "providerStatusDeltas" {
 				obj["type"] = "providerStatuses"
 				obj["payload"] = map[string]any{"providers": d.demandProviders()}
 			}

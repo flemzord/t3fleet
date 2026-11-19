@@ -11,14 +11,12 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"namespacelabs.dev/integrations/api"
-	"namespacelabs.dev/integrations/auth"
 
 	"github.com/flemzord/t3fleet/pkg/provider"
 )
@@ -30,31 +28,40 @@ const servicePath = "/namespace.private.devbox.v1beta.DevBoxService/"
 // Config separates the control-plane endpoint from the machine's placement.
 // HTTPClient and DialSSH are injectable to test the native contracts offline.
 type Config struct {
+	TenantID     string
 	Endpoint     string
 	Site         string
 	VirtualCPU   int32
 	MemoryMB     int32
 	Architecture string
+	TokenFile    string // Optional per-instance Namespace SDK credential file.
 	TokenSource  api.TokenSource
 	HTTPClient   *http.Client
 	DialSSH      func(context.Context, SSHAuth) (Connection, error)
 }
 
-type Client struct{ config Config }
+type Client struct {
+	config Config
+	scope  string
+}
+
+var _ provider.ShapeResolver = (*Client)(nil)
+
+// NormalizeEndpoint returns the canonical Devbox Connect origin without
+// opening the Namespace token file or exchanging credentials.
+func NormalizeEndpoint(raw string) (string, error) {
+	if raw == "" {
+		raw = defaultEndpoint
+	}
+	return provider.NormalizeAPIEndpoint(raw, false)
+}
 
 func New(config Config) (*Client, error) {
-	if config.Endpoint == "" {
-		config.Endpoint = defaultEndpoint
+	endpoint, err := NormalizeEndpoint(config.Endpoint)
+	if err != nil {
+		return nil, err
 	}
-	u, err := url.Parse(config.Endpoint)
-	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
-		return nil, errors.New("namespace: invalid API endpoint")
-	}
-	loopback := u.Hostname() == "127.0.0.1" || u.Hostname() == "localhost" || u.Hostname() == "::1"
-	if u.Scheme != "https" && (u.Scheme != "http" || !loopback) {
-		return nil, errors.New("namespace: API endpoint requires HTTPS")
-	}
-	config.Endpoint = strings.TrimRight(config.Endpoint, "/")
+	config.Endpoint = endpoint
 	if config.Site == "" {
 		config.Site = "iad"
 	}
@@ -67,25 +74,24 @@ func New(config Config) (*Client, error) {
 	if config.Architecture == "" {
 		config.Architecture = "amd64"
 	}
-	if config.VirtualCPU < 1 || config.MemoryMB < 1 || (config.Architecture != "amd64" && config.Architecture != "arm64") {
+	if !validShape(provider.Shape{VirtualCPU: config.VirtualCPU, MemoryMB: config.MemoryMB, Architecture: config.Architecture}) {
 		return nil, errors.New("namespace: invalid machine shape")
 	}
-	if config.TokenSource == nil {
-		config.TokenSource, err = auth.LoadDefaults()
-		if err != nil {
-			return nil, fmt.Errorf("namespace: load credentials: %w", err)
-		}
+	if !provider.ValidAccountID(config.TenantID) {
+		return nil, errors.New("namespace: an explicit tenant ID is required")
 	}
+	config.TokenSource = tenantTokens{tenantID: config.TenantID, file: config.TokenFile, source: config.TokenSource}
 	if config.HTTPClient == nil {
 		config.HTTPClient = &http.Client{Timeout: 2 * time.Minute}
 	}
 	if config.DialSSH == nil {
 		config.DialSSH = nativeSSH(config.TokenSource)
 	}
-	return &Client{config: config}, nil
+	return &Client{config: config, scope: provider.ScopeFingerprint("namespace", endpoint, config.TenantID)}, nil
 }
 
-func (*Client) Name() string { return "namespace" }
+func (*Client) Name() string      { return "namespace" }
+func (c *Client) ScopeID() string { return c.scope }
 
 type label struct {
 	Name  string `json:"name"`
@@ -182,6 +188,10 @@ func (c *Client) Get(ctx context.Context, id string) (provider.Machine, error) {
 var validName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$`)
 var validLabelName = regexp.MustCompile(`^[a-z]([a-z0-9-.]*[a-z0-9])?$`)
 
+func (c *Client) DefaultPlacement() provider.Placement {
+	return provider.Placement{Site: c.config.Site}
+}
+
 func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provider.Machine, error) {
 	if !validName.MatchString(req.Name) || req.OperationID == "" || len(req.OperationID) > 255 {
 		return provider.Machine{}, errors.New("namespace: a valid stable name and operation ID are required")
@@ -205,6 +215,15 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 	}
 	if (t.Image == "") == (t.Source == "") {
 		return provider.Machine{}, errors.New("namespace: choose either an image or a source Devbox snapshot")
+	}
+	shape := req.Shape
+	if shape == (provider.Shape{}) {
+		var err error
+		if shape, err = c.ResolveShape(req.Size); err != nil {
+			return provider.Machine{}, err
+		}
+	} else if !validShape(shape) {
+		return provider.Machine{}, errors.New("namespace: invalid reserved machine shape")
 	}
 	// A token failure happens before sending a request and is the only
 	// Namespace failure that currently proves this attempt did not create a
@@ -237,12 +256,8 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 		labels = append(labels, label{name, value})
 	}
 	labels = append(labels, label{operationLabel, req.OperationID})
-	shape, err := c.shape(req.Size)
-	if err != nil {
-		return provider.Machine{}, err
-	}
 	method := "Create"
-	input := map[string]any{"name": req.Name, "instanceShape": shape, "labels": labels}
+	input := map[string]any{"name": req.Name, "instanceShape": map[string]any{"virtualCpu": shape.VirtualCPU, "memoryMegabytes": shape.MemoryMB, "machineArch": shape.Architecture, "os": "linux"}, "labels": labels}
 	if t.Source != "" {
 		method = "CreateFromDevbox"
 		input["fromDevbox"] = t.Source
@@ -250,7 +265,14 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 			input["snapshotId"] = t.Snapshot
 		}
 	} else {
-		input["site"] = c.config.Site
+		site := c.config.Site
+		if req.Placement != nil {
+			site = req.Placement.Site
+			if site == "" {
+				return provider.Machine{}, errors.New("namespace: reserved placement has no site")
+			}
+		}
+		input["site"] = site
 		input["activate"] = true
 		input["versionControl"] = map[string]any{}
 		name, registered := strings.CutPrefix(t.Image, "registered:")
@@ -281,22 +303,31 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 	}
 	return machine, err
 }
-func (c *Client) shape(size string) (map[string]any, error) {
+
+// ValidSize reports whether the preset is supported. Empty uses the configured shape.
+func ValidSize(size string) bool {
+	_, ok := presets[size]
+	return size == "" || ok
+}
+
+var presets = map[string]struct{ cpu, mem int32 }{
+	"s": {4, 8192}, "m": {8, 16384}, "l": {16, 32768}, "xl": {32, 65536},
+}
+
+func validShape(s provider.Shape) bool {
+	return s.VirtualCPU > 0 && s.MemoryMB > 0 && (s.Architecture == "amd64" || s.Architecture == "arm64")
+}
+
+func (c *Client) ResolveShape(size string) (provider.Shape, error) {
 	cpu, mem := c.config.VirtualCPU, c.config.MemoryMB
-	switch size {
-	case "":
-	case "s":
-		cpu, mem = 4, 8192
-	case "m":
-		cpu, mem = 8, 16384
-	case "l":
-		cpu, mem = 16, 32768
-	case "xl":
-		cpu, mem = 32, 65536
-	default:
-		return nil, fmt.Errorf("namespace: unsupported size %q", size)
+	if size != "" {
+		shape, ok := presets[size]
+		if !ok {
+			return provider.Shape{}, fmt.Errorf("namespace: unsupported size %q", size)
+		}
+		cpu, mem = shape.cpu, shape.mem
 	}
-	return map[string]any{"virtualCpu": cpu, "memoryMegabytes": mem, "machineArch": c.config.Architecture, "os": "linux"}, nil
+	return provider.Shape{VirtualCPU: cpu, MemoryMB: mem, Architecture: c.config.Architecture}, nil
 }
 func (c *Client) activate(ctx context.Context, id string, ssh bool) (response, error) {
 	var out response

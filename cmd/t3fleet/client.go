@@ -23,6 +23,12 @@ type daemonClient struct {
 	token string
 }
 
+// machineCreateRequest selects a configured instance. The daemon owns its template and size.
+type machineCreateRequest struct {
+	Name     string `json:"name"`
+	Provider string `json:"provider"`
+}
+
 func (d daemonClient) call(ctx context.Context, method, path string, body any) ([]byte, error) {
 	return callAdmin(ctx, d.cfg.Listen, d.token, method, path, body)
 }
@@ -115,9 +121,12 @@ func daemonError(status int, method, path string, data []byte) error {
 		id = ""
 	}
 	switch failure.Error {
+	case "worker_started_listing_unavailable":
+		return hinted("retry 't3fleet admin start' for this worker or use 't3fleet admin pair' to inspect it directly",
+			"the worker started, but its thread listing could not be restored")
 	case "runtime_unavailable":
 		if id != "" {
-			return hinted(fmt.Sprintf("prepare its T3 runtime, then run 't3fleet start %s'; or delete it and use a prepared t3fleet snapshot", id),
+			return hinted(fmt.Sprintf("prepare its T3 runtime, then run 't3fleet admin start %s'; or delete it and use a prepared t3fleet snapshot", id),
 				"the image is missing t3fleet-runtime-info or its required executables; machine %s remains allocated", id)
 		}
 		return hinted("use a prepared t3fleet snapshot, or prepare the machine's T3 runtime before retrying start",
@@ -133,7 +142,7 @@ func daemonError(status int, method, path string, data []byte) error {
 		}
 		description := errorDescriptions[failure.Error] + " (" + failure.Error + ")"
 		if id != "" {
-			return hinted(fmt.Sprintf("run 't3fleet inspect %s', or 't3fleet start %s' to recover", id, id),
+			return hinted(fmt.Sprintf("run 't3fleet inspect %s', or 't3fleet admin start %s' to recover", id, id),
 				"%s; machine %s remains managed", description, id)
 		}
 		if failure.Error == "unauthorized" {

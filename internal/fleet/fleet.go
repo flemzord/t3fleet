@@ -32,6 +32,10 @@ var ErrConflict = errors.New("fleet machine already exists")
 var ErrRuntimeUnavailable = errors.New("fleet: image does not provide t3fleet-runtime-info or its required executables; use a prepared t3fleet image")
 var validName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
+// Older daemons must not ignore the saved fallback operation ID and issue a
+// second creation request during recovery.
+const fleetSchema = 2
+
 type Storage interface {
 	Load(any) error
 	Save(any) error
@@ -41,6 +45,7 @@ type Options struct {
 	IdleCheckInterval time.Duration
 	Providers         map[string]provider.Provider
 	Templates         map[string]provider.Template
+	Sizes             map[string]string
 	Store             Storage
 	ExpectedVersion   string
 	ListenHost        string
@@ -69,18 +74,34 @@ type clientToken struct {
 }
 type record struct {
 	Machine
-	Template      provider.Template `json:"template"`
-	Size          string            `json:"size,omitempty"`
-	Port          int               `json:"port"`
-	Token         string            `json:"serviceToken,omitempty"`
-	EnvironmentID string            `json:"environmentId,omitempty"`
-	Clients       []clientToken     `json:"clients,omitempty"`
-	Descriptor    map[string]any    `json:"descriptor,omitempty"`
-	Session       map[string]any    `json:"session,omitempty"`
+	// Provider is the durable instance name; the driver must still match on restart.
+	Driver          string              `json:"driver,omitempty"`
+	Scope           string              `json:"scope,omitempty"`
+	CreateOperation string              `json:"createOperation,omitempty"` // first attempt and old state use the machine ID
+	Template        provider.Template   `json:"template"`
+	Size            string              `json:"size,omitempty"`
+	Placement       *provider.Placement `json:"placement,omitempty"`
+	Shape           provider.Shape      `json:"shape,omitzero"`
+	Port            int                 `json:"port"`
+	Token           string              `json:"serviceToken,omitempty"`
+	EnvironmentID   string              `json:"environmentId,omitempty"`
+	Clients         []clientToken       `json:"clients,omitempty"`
+	Descriptor      map[string]any      `json:"descriptor,omitempty"`
+	Session         map[string]any      `json:"session,omitempty"`
 
-	InstallRuntime    bool     `json:"installRuntime,omitempty"`
-	DispatchFallbacks []string `json:"dispatchFallbacks,omitzero"`
+	InstallRuntime    bool             `json:"installRuntime,omitempty"`
+	FallbackPlan      []dispatchTarget `json:"fallbackPlan,omitzero"`
+	DispatchFallbacks []string         `json:"dispatchFallbacks,omitzero"` // legacy instance names
 }
+
+func (r record) createRequest() provider.CreateRequest {
+	op := cmp.Or(r.CreateOperation, r.ID)
+	return provider.CreateRequest{
+		Name: r.Name, Template: r.Template, Size: r.Size, Shape: r.Shape, Placement: r.Placement,
+		OperationID: op, Labels: map[string]string{"t3fleet-id": op},
+	}
+}
+
 type diskState struct {
 	Schema  int                    `json:"schema"`
 	Records []record               `json:"machines"`
@@ -93,7 +114,6 @@ type machineHandle struct {
 	proxy       *proxy.Proxy
 	server      *http.Server
 	listener    net.Listener
-	checked     time.Time // protected by operation
 	initialized time.Time // independent service-authorization refresh clock
 
 	// A failed save may have already replaced the on-disk provider selection.
@@ -162,7 +182,7 @@ func New(opts Options) (*Manager, error) {
 		cancel()
 		return nil, fmt.Errorf("fleet: load state: %w", err)
 	}
-	if disk.Schema != 0 && disk.Schema != 1 {
+	if disk.Schema != 0 && disk.Schema != 1 && disk.Schema != fleetSchema {
 		cancel()
 		return nil, errors.New("fleet: unsupported state schema")
 	}
@@ -170,15 +190,56 @@ func New(opts Options) (*Manager, error) {
 	if m.batches == nil {
 		m.batches = make(map[string]batchRecord)
 	}
-	for _, r := range disk.Records {
-		if !validName.MatchString(r.Name) || len(r.ID) != 32 || opts.Providers[r.Provider] == nil || r.Port < 1 || r.Port > 65535 {
-			_ = m.Close(context.Background())
-			return nil, errors.New("fleet: invalid saved machine or missing provider")
+	migrated := false
+	ids := make(map[string]bool, len(disk.Records))
+	for i := range disk.Records {
+		r := &disk.Records[i]
+		if !validName.MatchString(r.Name) || len(r.ID) != 32 || r.Port < 1 || r.Port > 65535 {
+			cancel()
+			return nil, errors.New("fleet: invalid saved machine")
 		}
-		if _, ok := m.machines[r.ID]; ok {
-			_ = m.Close(context.Background())
+		if ids[r.ID] {
+			cancel()
 			return nil, errors.New("fleet: duplicate saved machine")
 		}
+		ids[r.ID] = true
+		host := opts.Providers[r.Provider]
+		// Before instances were named, the provider key was the driver.
+		if r.Driver == "" {
+			r.Driver = r.Provider
+		}
+		if host == nil || host.Name() != r.Driver {
+			cancel()
+			return nil, fmt.Errorf("fleet: saved worker requires provider %q with driver %q", r.Provider, r.Driver)
+		}
+		scope := providerScope(host)
+		if r.Scope != "" && r.Scope != scope {
+			cancel()
+			return nil, fmt.Errorf("fleet: restore the original account and endpoint of provider %q before managing its saved workers", r.Provider)
+		}
+		// Earlier records lack an account pin. Verify an existing remote before
+		// adopting this account; a 404 could mean the operator selected another.
+		if r.Scope == "" && scope != "" {
+			if err := verifyLegacyAccount(ctx, host, r); err != nil {
+				cancel()
+				return nil, err
+			}
+			r.Scope = scope
+			migrated = true
+		}
+		if r.Placement == nil {
+			r.Placement = providerPlacement(host)
+			migrated = migrated || r.Placement != nil
+		}
+	}
+	if migrated {
+		disk.Schema = fleetSchema
+		if err := opts.Store.Save(disk); err != nil {
+			cancel()
+			return nil, fmt.Errorf("fleet: cannot save migrated worker reservations: %w", err)
+		}
+	}
+	for _, r := range disk.Records {
 		h, err := m.listen(r)
 		if err != nil {
 			_ = m.Close(context.Background())
@@ -192,6 +253,23 @@ func New(opts Options) (*Manager, error) {
 		m.idleWG.Go(m.idleLoop)
 	}
 	return m, nil
+}
+
+// No create, start or cleanup is safe until the original account is known.
+func verifyLegacyAccount(ctx context.Context, host provider.Provider, r *record) error {
+	if r.RemoteID == "" {
+		if r.State == "planned" {
+			return nil // no allocation was attempted
+		}
+		return fmt.Errorf("fleet: cannot verify original account for worker %q with no remote ID; reconcile it with the previous daemon and configuration before upgrading", r.Name)
+	}
+	lookup, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	remote, err := host.Get(lookup, r.RemoteID)
+	if err != nil || remote.ID != r.RemoteID || remote.Name != r.Name || remote.State == provider.StateDeleted {
+		return fmt.Errorf("fleet: cannot verify worker %q in its original provider account; restore the original configuration or reconcile the worker with the previous daemon before upgrading", r.Name)
+	}
+	return nil
 }
 
 func (m *Manager) listen(r record) (*machineHandle, error) {
@@ -227,7 +305,7 @@ func (m *Manager) listen(r record) (*machineHandle, error) {
 // persistLocked serializes a complete snapshot while holding mu. No caller can
 // observe a half-applied state mutation or interleave durable writes.
 func (m *Manager) persistLocked() error {
-	disk := diskState{Schema: 1, Batches: m.batches, Records: make([]record, 0, len(m.machines))}
+	disk := diskState{Schema: fleetSchema, Batches: m.batches, Records: make([]record, 0, len(m.machines))}
 	for _, h := range m.machines {
 		disk.Records = append(disk.Records, h.record)
 	}
@@ -289,6 +367,34 @@ func (m *Manager) Get(id string) (Machine, error) {
 	return m.copy(h).Machine, nil
 }
 
+func (m *Manager) applyProviderDefaults(req *CreateRequest) (provider.Shape, error) {
+	if req.Template == (provider.Template{}) {
+		req.Template = m.opts.Templates[req.Provider]
+	}
+	if req.Size == "" {
+		req.Size = m.opts.Sizes[req.Provider]
+	}
+	if resolver, ok := m.opts.Providers[req.Provider].(provider.ShapeResolver); ok {
+		return resolver.ResolveShape(req.Size)
+	}
+	return provider.Shape{}, nil
+}
+
+func providerPlacement(host provider.Provider) *provider.Placement {
+	if placed, ok := host.(provider.PlacementProvider); ok {
+		placement := placed.DefaultPlacement()
+		return &placement
+	}
+	return nil
+}
+
+func providerScope(host provider.Provider) string {
+	if scoped, ok := host.(provider.ScopeIdentifier); ok {
+		return scoped.ScopeID()
+	}
+	return ""
+}
+
 func (m *Manager) Create(ctx context.Context, req CreateRequest) (Machine, error) {
 	if !validName.MatchString(req.Name) {
 		return Machine{}, fmt.Errorf("%w: name must match [a-z][a-z0-9-]{0,31}", ErrInvalid)
@@ -301,8 +407,9 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (Machine, error
 	if p == nil {
 		return Machine{}, fmt.Errorf("%w: unknown provider", ErrInvalid)
 	}
-	if req.Template == (provider.Template{}) {
-		req.Template = m.opts.Templates[req.Provider]
+	shape, err := m.applyProviderDefaults(&req)
+	if err != nil {
+		return Machine{}, fmt.Errorf("%w: invalid machine shape", ErrInvalid)
 	}
 	if req.Template == (provider.Template{}) {
 		return Machine{}, fmt.Errorf("%w: a prepared image or snapshot is required", ErrInvalid)
@@ -324,7 +431,8 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (Machine, error
 			return machine, ErrConflict
 		}
 	}
-	h, err := m.listen(record{Machine: Machine{ID: id, Name: req.Name, Provider: req.Provider, State: "creating"}, Template: req.Template, Size: req.Size})
+	intent := record{Machine: Machine{ID: id, Name: req.Name, Provider: req.Provider, State: "creating"}, Driver: p.Name(), Scope: providerScope(p), Template: req.Template, Size: req.Size, Shape: shape, Placement: providerPlacement(p)}
+	h, err := m.listen(intent)
 	if err != nil {
 		m.mu.Unlock()
 		return Machine{}, err
@@ -340,7 +448,7 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (Machine, error
 	m.mu.Unlock()
 	h.operation.Lock()
 	defer h.operation.Unlock()
-	remote, createErr := p.Create(ctx, provider.CreateRequest{Name: req.Name, Template: req.Template, Size: req.Size, OperationID: id, Labels: map[string]string{"t3fleet-id": id}})
+	remote, createErr := p.Create(ctx, intent.createRequest())
 	// A provider may allocate successfully and then fail activation. Retain
 	// that identity before reporting the error so recovery and deletion do not
 	// depend on replaying a billable creation request.
@@ -461,7 +569,6 @@ func (m *Manager) initialize(ctx context.Context, h *machineHandle, p provider.P
 			return errors.New("fleet: runtime identity or service credential is shared with another managed machine; use a credential-free golden template")
 		}
 	}
-	h.checked = m.opts.Now()
 	h.initialized = m.opts.Now()
 	return m.updateLocked(h, func(r *record) {
 		r.Session = cachedSession
@@ -479,6 +586,9 @@ func waitRunning(ctx context.Context, p provider.Provider, id string) error {
 	for {
 		remote, err := p.Get(ctx, id)
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return errors.New("fleet: provider readiness check failed")
 		}
 		switch remote.State {
@@ -551,7 +661,7 @@ func (m *Manager) ensure(ctx context.Context, h *machineHandle, force bool) erro
 				return err
 			}
 		}
-		remote, createErr := p.Create(ctx, provider.CreateRequest{Name: r.Name, Template: r.Template, Size: r.Size, OperationID: r.ID, Labels: map[string]string{"t3fleet-id": r.ID}})
+		remote, createErr := p.Create(ctx, r.createRequest())
 		if remote.ID != "" {
 			if err := m.update(h, func(r *record) { r.RemoteID = remote.ID; r.State = "starting" }); err != nil {
 				return err
@@ -565,9 +675,8 @@ func (m *Manager) ensure(ctx context.Context, h *machineHandle, force bool) erro
 		}
 		return m.initialize(ctx, h, p)
 	}
-	if !force && r.State == "ready" && m.opts.Now().Sub(h.checked) < 5*time.Second {
-		return nil
-	}
+	// Local readiness does not prove the provider has kept the VM awake.
+	// An explicit thread request must also recover an out-of-band suspension.
 	remote, err := p.Get(ctx, r.RemoteID)
 	if err != nil {
 		return errors.New("fleet: provider status check failed")
@@ -584,7 +693,6 @@ func (m *Manager) ensure(ctx context.Context, h *machineHandle, force bool) erro
 	if force || r.Token == "" || r.State != "ready" || m.opts.Now().Sub(h.initialized) > 10*time.Minute {
 		return m.initialize(ctx, h, p)
 	}
-	h.checked = m.opts.Now()
 	return nil
 }
 func (m *Manager) resolve(ctx context.Context, id string) (proxy.Upstream, error) {
@@ -609,8 +717,44 @@ func (m *Manager) resolve(ctx context.Context, id string) (proxy.Upstream, error
 	return proxy.Upstream{Endpoint: endpoint, Token: r.Token}, nil
 }
 
+// Background shell reads must not call ensure, Exec, or the normal Connect:
+// even opening a provider transport can implicitly activate a suspended VM.
+func (m *Manager) resolvePassive(ctx context.Context, id string) (proxy.Upstream, error) {
+	h, err := m.handle(id)
+	if err != nil {
+		return proxy.Upstream{}, err
+	}
+	if !h.operation.TryLock() {
+		return proxy.Upstream{}, errors.New("worker is busy")
+	}
+	defer h.operation.Unlock()
+	if current, err := m.handle(id); err != nil || current != h {
+		return proxy.Upstream{}, ErrNotFound
+	}
+	r := m.copy(h)
+	if r.State != "ready" || r.Token == "" || r.RemoteID == "" {
+		return proxy.Upstream{}, errors.New("worker is not ready for passive reads")
+	}
+	host := m.opts.Providers[r.Provider]
+	passive, ok := host.(provider.PassiveConnector)
+	if !ok {
+		return proxy.Upstream{}, provider.ErrUnsupported
+	}
+	// Do not trust the last local state: a provider can suspend a worker
+	// out of band. Only the passive connector may bridge the check/dial race.
+	remote, err := host.Get(ctx, r.RemoteID)
+	if err != nil || remote.State != provider.StateRunning {
+		return proxy.Upstream{}, errors.New("running worker could not be confirmed")
+	}
+	endpoint, err := passive.ConnectPassive(ctx, r.RemoteID, 3773)
+	if err != nil {
+		return proxy.Upstream{}, errors.New("passive worker connection unavailable")
+	}
+	return proxy.Upstream{Endpoint: endpoint, Token: r.Token}, nil
+}
+
 // DispatchWorker reuses the normal fleet wake and private transport paths.
-// The experimental dispatcher requires pre-provisioned, dedicated machines.
+// A reserved worker is routable once its T3 server has completed initialization.
 func (m *Manager) DispatchWorker(id string) (proxy.DispatchWorker, error) {
 	h, err := m.handle(id)
 	if err != nil {
@@ -620,8 +764,9 @@ func (m *Manager) DispatchWorker(id string) (proxy.DispatchWorker, error) {
 		return proxy.DispatchWorker{}, errors.New("dispatch worker has not completed initialization")
 	}
 	return proxy.DispatchWorker{ID: id,
-		Resolve:    func(ctx context.Context) (proxy.Upstream, error) { return m.resolve(ctx, id) },
-		Descriptor: func(ctx context.Context) (map[string]any, error) { return m.descriptor(ctx, id) },
+		Resolve:        func(ctx context.Context) (proxy.Upstream, error) { return m.resolve(ctx, id) },
+		ResolvePassive: func(ctx context.Context) (proxy.Upstream, error) { return m.resolvePassive(ctx, id) },
+		Descriptor:     func(ctx context.Context) (map[string]any, error) { return m.descriptor(ctx, id) },
 	}, nil
 }
 func (m *Manager) Stop(ctx context.Context, id string) error {
@@ -699,8 +844,8 @@ func (m *Manager) deleteMachine(ctx context.Context, id string, reconcileAbsence
 			// A previous attempt may remove the machine before its
 			// operation is acknowledged. Verify absence before retrying
 			// deletion so the dispatch slot cannot get stranded.
-			_, lookupErr := host.Get(ctx, r.RemoteID)
-			absent = errors.Is(lookupErr, provider.ErrNotFound)
+			remote, lookupErr := host.Get(ctx, r.RemoteID)
+			absent = errors.Is(lookupErr, provider.ErrNotFound) || (lookupErr == nil && remote.State == provider.StateDeleted)
 			if !absent && lookupErr != nil {
 				return errors.New("fleet: provider absence could not be checked; local state retained")
 			}
@@ -711,9 +856,20 @@ func (m *Manager) deleteMachine(ctx context.Context, id string, reconcileAbsence
 			}
 		}
 	}
+	return m.removeMachineRecord(h)
+}
+
+// Caller owns h.operation. Preserve the batch member as a durable tombstone,
+// without making another provider request.
+func (m *Manager) removeMachineRecord(h *machineHandle) error {
 	m.mu.Lock()
+	id := h.record.ID
+	if m.machines[id] != h {
+		m.mu.Unlock()
+		return ErrNotFound
+	}
 	delete(m.machines, id)
-	err = m.persistLocked()
+	err := m.persistLocked()
 	if err != nil {
 		m.machines[id] = h
 	}

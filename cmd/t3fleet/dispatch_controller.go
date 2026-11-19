@@ -28,10 +28,10 @@ const dispatchControllerID = "controller"
 // orchestration metadata protocol. Its directory and environment are separate
 // from the user's Desktop installation; no user credentials are imported.
 func startDispatchController(ctx context.Context, cfg config.Config, diagnostics io.Writer) (proxy.DispatchWorker, func(), error) {
-	if cfg.DispatchPOC == nil || cfg.DispatchPOC.OnDemand == nil {
-		return proxy.DispatchWorker{}, nil, errors.New("local dispatch controller requires onDemand configuration")
+	if cfg.Dispatch == nil {
+		return proxy.DispatchWorker{}, nil, errors.New("local dispatch controller requires dispatch configuration")
 	}
-	binary := cfg.DispatchPOC.OnDemand.T3Binary
+	binary := cfg.Dispatch.T3Binary
 	if info, err := os.Stat(binary); err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
 		return proxy.DispatchWorker{}, nil, errors.New("dispatch controller T3 binary is not executable")
 	}

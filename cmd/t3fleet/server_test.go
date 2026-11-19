@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -34,10 +35,6 @@ func (f *fakeFleet) Create(_ context.Context, r fleet.CreateRequest) (fleet.Mach
 	f.created = r
 	return fleet.Machine{ID: "machine-1"}, f.err
 }
-func (f *fakeFleet) PrepareBatch(_ context.Context, r fleet.BatchRequest) (fleet.Batch, error) {
-	return fleet.Batch{ID: r.ID}, f.err
-}
-func (f *fakeFleet) Batch(id string) (fleet.Batch, error) { return fleet.Batch{ID: id}, f.err }
 func (f *fakeFleet) List() []fleet.Machine                { return []fleet.Machine{{ID: "machine-1"}} }
 func (f *fakeFleet) Get(id string) (fleet.Machine, error) { return fleet.Machine{ID: id}, f.err }
 func (f *fakeFleet) Start(_ context.Context, id string) error {
@@ -77,7 +74,7 @@ func adminRequest(h http.Handler, method, path, token, body string) *httptest.Re
 func TestAdminAuthorizationAndHostIsolation(t *testing.T) {
 	f := &fakeFleet{}
 	h := newAdminHandler(f, "private-admin-token")
-	for _, path := range []string{"/v1/machines", "/v1/machines/x/start", "/v1/machines/x/pair"} {
+	for _, path := range []string{"/v1/machines", "/v1/machines/x/start", "/v1/machines/x/pair", "/v1/dispatch/pair", "/v1/dispatch/pair-peer"} {
 		w := adminRequest(h, http.MethodPost, path, "", "{}")
 		if w.Code != http.StatusUnauthorized {
 			t.Fatalf("%s accepted without auth: %d", path, w.Code)
@@ -125,8 +122,10 @@ func TestAdminLifecycleRoutesAndValidation(t *testing.T) {
 		{"GET", "/v1/machines/machine-1/start", "", 405},
 		{"POST", "/v1/machines/machine-1/nope", "", 404},
 		{"GET", "/missing", "", 404},
+		{"POST", "/v1/batches", "{}", 404},
 		{"POST", "/v1/machines", `{"name":"demo","provider":"boat","secret":"bad"}`, 400},
 		{"POST", "/v1/machines", `{"name":"demo"}`, 400},
+		{"POST", "/v1/machines", `{"name":"demo","provider":"primary","size":"large"}`, 400},
 		{"POST", "/v1/machines", `{} {}`, 400},
 		{"POST", "/v1/machines/machine-1/snapshot", `{}`, 400},
 	}
@@ -213,21 +212,22 @@ func TestCLIThroughAuthenticatedAdminAPI(t *testing.T) {
 	server := httptest.NewServer(newAdminHandler(fake, token))
 	defer server.Close()
 	cfg.Listen = strings.TrimPrefix(server.URL, "http://")
+	cfg.Providers = map[string]config.ProviderConfig{"primary": {Type: "boat", Template: provider.Template{Snapshot: "golden"}, Boat: config.Boat{Organization: "acme"}}}
 	commands := [][]string{
-		{"create", "--name", "demo", "--provider", "boat", "--snapshot", "golden", "--no-register"},
-		{"list"}, {"inspect", "machine-1"}, {"start", "machine-1"}, {"stop", "machine-1"}, {"snapshot", "machine-1", "--name", "copy"}, {"pair", "machine-1"}, {"delete", "machine-1"},
+		{"admin", "create", "--name", "demo", "--provider", "primary"},
+		{"list"}, {"inspect", "machine-1"}, {"admin", "start", "machine-1"}, {"admin", "stop", "machine-1"}, {"admin", "snapshot", "machine-1", "--name", "copy"}, {"admin", "pair", "machine-1"}, {"admin", "delete", "machine-1"},
 	}
 	for _, args := range commands {
 		var out bytes.Buffer
 		if err := runClient(t.Context(), cfg, args[0], args[1:], &out, io.Discard); err != nil {
 			t.Fatalf("%v: %v", args, err)
 		}
-		if args[0] == "pair" && !strings.HasPrefix(out.String(), "t3code://pair?pairingUrl=") {
+		if len(args) > 1 && args[1] == "pair" && !strings.HasPrefix(out.String(), "t3code://pair?pairingUrl=") {
 			t.Fatalf("invalid pairing deep link: %s", out.String())
 		}
 	}
-	if fake.created.Template.Snapshot != "golden" {
-		t.Fatal("template override lost")
+	if fake.created.Provider != "primary" {
+		t.Fatal("configured instance was lost")
 	}
 }
 
@@ -289,7 +289,7 @@ func TestCommandParsingAndHelp(t *testing.T) {
 		loaded = append(loaded, path)
 		return config.Config{}, errors.New("stop after load")
 	}}
-	if err := capture.execute(t.Context(), []string{"snapshot", "x", "--config", "/tmp/config.json", "--name", "golden"}); err == nil || !slices.Equal(loaded, []string{"/tmp/config.json"}) {
+	if err := capture.execute(t.Context(), []string{"admin", "snapshot", "x", "--config", "/tmp/config.json", "--name", "golden"}); err == nil || !slices.Equal(loaded, []string{"/tmp/config.json"}) {
 		t.Fatalf("interspersed --config was not honored: %v %v", loaded, err)
 	}
 	t.Setenv("T3FLEET_CONFIG", "/tmp/from-env.json")
@@ -324,18 +324,32 @@ func TestServeLifecycleAndPrivateState(t *testing.T) {
 	t.Setenv("BOAT_API_KEY", "fixture-only-key")
 	cfg := config.Default()
 	cfg.StateDir = filepath.Join(t.TempDir(), "state")
-	cfg.Providers.Boat = &config.Boat{}
+	cfg.Providers = map[string]config.ProviderConfig{"primary": {Type: "boat", Template: provider.Template{Snapshot: "test"}, Boat: config.Boat{Organization: "acme", BaseURL: "http://127.0.0.1:1"}}}
+	t3Listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Dispatch = &config.Dispatch{Listen: t3Listener.Addr().String(), T3Binary: "/test/bin/t3", ProviderOrder: []string{"primary"}}
+	defer func() { _ = t3Listener.Close() }()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg.Listen = listener.Addr().String()
 	_ = listener.Close()
+	_ = t3Listener.Close()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	ready := &readyWriter{ready: make(chan struct{})}
 	done := make(chan error, 1)
-	go func() { done <- serve(ctx, cfg, ready) }()
+	controller := func(context.Context, config.Config, io.Writer) (proxy.DispatchWorker, func(), error) {
+		return proxy.DispatchWorker{ID: "controller", Resolve: func(context.Context) (proxy.Upstream, error) {
+			return proxy.Upstream{}, errors.New("no live upstream in fixture")
+		}, Descriptor: func(context.Context) (map[string]any, error) {
+			return map[string]any{"environmentId": "controller"}, nil
+		}}, func() {}, nil
+	}
+	go func() { done <- serveWithController(ctx, cfg, ready, controller) }()
 	select {
 	case <-ready.ready:
 	case err := <-done:
@@ -351,8 +365,13 @@ func TestServeLifecycleAndPrivateState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "fixture-only-key") {
-		t.Fatal("list leaked account credentials")
+	var machines []fleet.Machine
+	if err := json.Unmarshal(data, &machines); err != nil || len(machines) != 0 {
+		t.Fatalf("expected empty fleet at startup: %s", data)
+	}
+	pair, err := callAdmin(t.Context(), cfg.Listen, token, "POST", "/v1/dispatch/pair", nil)
+	if err != nil || !strings.Contains(string(pair), cfg.Dispatch.Listen) {
+		t.Fatalf("could not pair with T3 listener: %v", err)
 	}
 	for _, path := range []string{"/_healthcheck", "/_info"} {
 		if _, err := callAdmin(t.Context(), cfg.Listen, "", "GET", path, nil); err != nil {
@@ -428,37 +447,5 @@ func TestClientRejectsRedirectsAndMalformedResponses(t *testing.T) {
 	defer invalid.Close()
 	if _, err := callAdmin(t.Context(), strings.TrimPrefix(invalid.URL, "http://"), "token", "GET", "/v1/machines", nil); err == nil {
 		t.Fatal("oversized response accepted")
-	}
-}
-
-// Batch preparation is an admin-only operation, just like cloud allocation.
-type fakeBatchFleet struct {
-	fakeFleet
-	preparations int
-}
-
-func (f *fakeBatchFleet) PrepareBatch(_ context.Context, r fleet.BatchRequest) (fleet.Batch, error) {
-	f.preparations++
-	return fleet.Batch{ID: r.ID}, nil
-}
-func (f *fakeBatchFleet) Batch(id string) (fleet.Batch, error) { return fleet.Batch{ID: id}, nil }
-func TestBatchAdminAuthAndStrictInput(t *testing.T) {
-	f := &fakeBatchFleet{}
-	h := newAdminHandler(f, "token")
-	for _, path := range []string{"/v1/batches", "/v1/batches/abc", "/v1/machines/one"} {
-		for _, method := range []string{"POST", "GET", "DELETE"} {
-			if w := adminRequest(h, method, path, "", `{}`); w.Code != 401 {
-				t.Fatal("missing auth accepted", path, w.Code)
-			}
-		}
-	}
-	if f.preparations != 0 || len(f.calls) != 0 {
-		t.Fatal("unauthorized mutation")
-	}
-	if w := adminRequest(h, "POST", "/v1/batches", "token", `{"id":"x","unknown":true}`); w.Code != 400 {
-		t.Fatal("unknown batch field accepted")
-	}
-	if w := adminRequest(h, "POST", "/v1/batches", "token", `{"id":"x","name":"test","provider":"mock","count":10}`); w.Code != 200 || f.preparations != 1 {
-		t.Fatal("batch route failed")
 	}
 }

@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/flemzord/t3fleet/internal/config"
-	"github.com/flemzord/t3fleet/internal/fleet"
 	"github.com/flemzord/t3fleet/pkg/provider"
 )
 
@@ -55,24 +54,6 @@ func TestLogProgressHasNoTerminalEscapesOrErrorContents(t *testing.T) {
 	}
 }
 
-func TestProgressDistinguishesSnapshotAndImage(t *testing.T) {
-	cfg := config.Default()
-	cfg.Templates["boat"] = provider.Template{Snapshot: "configured-base"}
-	for _, tc := range []struct {
-		request fleet.CreateRequest
-		want    string
-	}{
-		{fleet.CreateRequest{Provider: "boat"}, "Boat machine from snapshot"},
-		{fleet.CreateRequest{Provider: "boat", Template: provider.Template{Image: "explicit-image"}}, "Boat machine from image"},
-		{fleet.CreateRequest{Provider: "namespace", Template: provider.Template{Source: "golden-source"}}, "Namespace machine from snapshot"},
-	} {
-		messages := operationProgress(cfg, "create", tc.request)
-		if !strings.Contains(messages.pending, tc.want) {
-			t.Fatalf("incorrect template indication: %s", messages.pending)
-		}
-	}
-}
-
 type progressBuffer struct {
 	mu     sync.Mutex
 	buffer bytes.Buffer
@@ -93,7 +74,7 @@ func (b *progressBuffer) String() string {
 func TestCreateShowsProgressWhileDaemonIsStillWorking(t *testing.T) {
 	cfg := config.Default()
 	cfg.StateDir = t.TempDir()
-	cfg.Templates["boat"] = provider.Template{Snapshot: "golden"}
+	cfg.Providers["boat"] = config.ProviderConfig{Type: "boat", Template: provider.Template{Snapshot: "golden"}}
 	if _, err := ensureAdminToken(cfg.StateDir); err != nil {
 		t.Fatal(err)
 	}
@@ -111,14 +92,14 @@ func TestCreateShowsProgressWhileDaemonIsStillWorking(t *testing.T) {
 	var out, diagnostics progressBuffer
 	done := make(chan error, 1)
 	go func() {
-		done <- runClient(t.Context(), cfg, "create", []string{"--name", "demo", "--provider", "boat", "--no-register", "--json"}, &out, &diagnostics)
+		done <- runClient(t.Context(), cfg, "admin", []string{"create", "--name", "demo", "--provider", "boat", "--json"}, &out, &diagnostics)
 	}()
 	select {
 	case <-requested:
 	case <-time.After(2 * time.Second):
 		t.Fatal("CLI did not call the daemon")
 	}
-	if !strings.Contains(diagnostics.String(), "Boat machine from snapshot") || strings.Contains(diagnostics.String(), "Machine ready") {
+	if !strings.Contains(diagnostics.String(), "machine on boat from snapshot") || strings.Contains(diagnostics.String(), "Machine ready") {
 		t.Fatal("CLI did not show activity before the cloud operation finished")
 	}
 	if out.String() != "" {

@@ -37,7 +37,7 @@ func TestLiveDispatchController(t *testing.T) {
 	}
 	cfg := config.Default()
 	cfg.StateDir = t.TempDir()
-	cfg.DispatchPOC = &config.DispatchPOC{OnDemand: &config.DispatchOnDemand{T3Binary: binary}}
+	cfg.Dispatch = &config.Dispatch{T3Binary: binary}
 	worker, stop, err := startDispatchController(t.Context(), cfg, io.Discard)
 	if err != nil {
 		t.Fatal(err)

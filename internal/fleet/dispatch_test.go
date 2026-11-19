@@ -14,15 +14,110 @@ import (
 
 type dispatchProvider struct {
 	*mockProvider
+	driver       string
+	scope        string
+	placement    provider.Placement
 	createErrors []error
+	lastRequest  provider.CreateRequest
 	onCreate     func()
 	attempts     int
 	checkouts    int
 	bootstrap    int
+	getErr       error
+	deletes      int
+}
+
+func (p *dispatchProvider) Name() string                         { return p.driver }
+func (p *dispatchProvider) ScopeID() string                      { return p.scope }
+func (p *dispatchProvider) DefaultPlacement() provider.Placement { return p.placement }
+
+func (p *dispatchProvider) Get(ctx context.Context, id string) (provider.Machine, error) {
+	if p.getErr != nil {
+		return provider.Machine{}, p.getErr
+	}
+	return p.mockProvider.Get(ctx, id)
+}
+
+func (p *dispatchProvider) Delete(ctx context.Context, id string) error {
+	p.deletes++
+	return p.mockProvider.Delete(ctx, id)
+}
+
+type shapedDispatchProvider struct {
+	*dispatchProvider
+	shape provider.Shape
+}
+
+func (p *shapedDispatchProvider) ResolveShape(string) (provider.Shape, error) { return p.shape, nil }
+
+type passiveDispatchProvider struct {
+	*dispatchProvider
+	passiveDials int
+}
+
+func (p *passiveDispatchProvider) ConnectPassive(ctx context.Context, id string, port int) (provider.Endpoint, error) {
+	p.passiveDials++
+	return p.Connect(ctx, id, port)
+}
+
+func TestPassiveDispatchReadNeverStartsStoppedWorker(t *testing.T) {
+	f := newFleet(t)
+	host := &passiveDispatchProvider{dispatchProvider: &dispatchProvider{mockProvider: f.p, driver: "mock"}}
+	f.options.Providers["mock"] = host
+	f.restart(t)
+	worker, _, err := f.m.ProvisionDispatchWorker(t.Context(), strings.Repeat("a", 32), "https://github.com/octocat/Hello-World.git", []string{"mock"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worker.ResolvePassive(t.Context()); err != nil || host.passiveDials != 1 {
+		t.Fatalf("running worker did not use its passive connector: %v", err)
+	}
+	machine, err := f.m.Get(worker.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The local state still says ready after the provider stops the machine.
+	if err := host.Stop(t.Context(), machine.RemoteID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worker.ResolvePassive(t.Context()); err == nil || host.passiveDials != 1 || host.starts != 0 || host.allocations != 1 {
+		t.Fatalf("passive read changed a sleeping worker: err=%v, dials=%d, starts=%d", err, host.passiveDials, host.starts)
+	}
+	if _, err := worker.Resolve(t.Context()); err != nil || host.starts != 1 {
+		t.Fatalf("explicit thread request did not wake the selected worker: %v", err)
+	}
+	if err := f.m.Stop(t.Context(), machine.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worker.ResolvePassive(t.Context()); err == nil || host.passiveDials != 1 || host.starts != 1 {
+		t.Fatalf("passive read changed a manually stopped worker: %v", err)
+	}
+}
+
+func TestNoPassiveConnectorDoesNotPreventExplicitWake(t *testing.T) {
+	f, host, _ := dispatchProviders(t)
+	worker, _, err := f.m.ProvisionDispatchWorker(t.Context(), strings.Repeat("a", 32), "https://github.com/octocat/Hello-World.git", []string{"boat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, err := f.m.Get(worker.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.Stop(t.Context(), machine.RemoteID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worker.ResolvePassive(t.Context()); !errors.Is(err, provider.ErrUnsupported) || host.starts != 0 {
+		t.Fatalf("passive read used a provider without a safe transport: %v", err)
+	}
+	if _, err := worker.Resolve(t.Context()); err != nil || host.starts != 1 {
+		t.Fatalf("explicit request did not wake a just-suspended worker: %v", err)
+	}
 }
 
 func (p *dispatchProvider) Create(ctx context.Context, req provider.CreateRequest) (provider.Machine, error) {
 	p.attempts++
+	p.lastRequest = req
 	if p.onCreate != nil {
 		p.onCreate()
 	}
@@ -53,8 +148,8 @@ func (p *dispatchProvider) Exec(ctx context.Context, id string, req provider.Exe
 func dispatchProviders(t *testing.T) (*fixture, *dispatchProvider, *dispatchProvider) {
 	t.Helper()
 	f := newFleet(t)
-	boat := &dispatchProvider{mockProvider: f.p}
-	namespace := &dispatchProvider{mockProvider: newProvider(t)}
+	boat := &dispatchProvider{mockProvider: f.p, driver: "boat"}
+	namespace := &dispatchProvider{mockProvider: newProvider(t), driver: "namespace"}
 	f.options.Providers["boat"] = boat
 	f.options.Providers["namespace"] = namespace
 	f.options.Templates["boat"] = provider.Template{Snapshot: "golden"}
@@ -144,12 +239,141 @@ func TestDispatchHonorsNamespaceAsPrimary(t *testing.T) {
 	}
 }
 
+func TestNamedProvidersKeepTheirOwnPlacementAcrossRestart(t *testing.T) {
+	f := newFleet(t)
+	primary := &dispatchProvider{mockProvider: f.p, driver: "boat"}
+	secondary := &dispatchProvider{mockProvider: newProvider(t), driver: "boat"}
+	oldBoat := provider.Placement{Environment: "original"}
+	secondary.placement = oldBoat
+	oldSite := provider.Placement{Site: "sfo"}
+	oldShape := provider.Shape{VirtualCPU: 12, MemoryMB: 24576, Architecture: "arm64"}
+	newShape := provider.Shape{VirtualCPU: 4, MemoryMB: 8192, Architecture: "amd64"}
+	last := &shapedDispatchProvider{dispatchProvider: &dispatchProvider{mockProvider: newProvider(t), driver: "namespace"}, shape: oldShape}
+	last.placement = oldSite
+	f.options.Providers = map[string]provider.Provider{"fast": primary, "spare": secondary, "burst": last}
+	f.options.Templates = map[string]provider.Template{
+		"fast": {Snapshot: "first"}, "spare": {Snapshot: "second"}, "burst": {Image: "registered:org/worker"},
+	}
+	f.options.Sizes = map[string]string{"fast": "large", "spare": "small"} // burst uses an explicit physical shape
+	f.restart(t)
+	key := strings.Repeat("a", 32)
+	const remote = "https://github.com/octocat/Hello-World.git"
+	order := []string{"fast", "spare", "burst"}
+
+	// Cancellation after confirmed refusal leaves an unattempted reservation.
+	// Editing configuration before retry must not change the saved launch.
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	primary.onCreate = cancel
+	primary.createErrors = []error{provider.ErrCreateRejected}
+	if _, _, err := f.m.ProvisionDispatchWorker(ctx, key, remote, order); err == nil {
+		t.Fatal("expected an interrupted launch")
+	}
+	primary.onCreate = nil
+	last.shape = newShape
+	last.placement = provider.Placement{Site: "new-site"}
+	primary.placement = provider.Placement{Environment: "do-not-inject"}
+	secondary.placement = provider.Placement{Environment: "changed"}
+	f.options.Sizes["burst"] = "s"
+	f.options.Templates["burst"] = provider.Template{Image: "registered:org/different"}
+	f.restart(t)
+	var attempts []string
+	primary.onCreate = func() { attempts = append(attempts, "fast") }
+	secondary.onCreate = func() { attempts = append(attempts, "spare") }
+	last.onCreate = func() { attempts = append(attempts, "burst") }
+	primary.createErrors = []error{provider.ErrCreateRejected}
+	secondary.createErrors = []error{provider.ErrCreateRejected}
+	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, []string{"burst"}); err != nil {
+		t.Fatal(err)
+	}
+	if primary.lastRequest.Placement == nil || *primary.lastRequest.Placement != (provider.Placement{}) ||
+		secondary.lastRequest.Placement == nil || *secondary.lastRequest.Placement != oldBoat ||
+		primary.lastRequest.Size != "large" || primary.lastRequest.Template.Snapshot != "first" ||
+		secondary.lastRequest.Size != "small" || secondary.lastRequest.Template.Snapshot != "second" {
+		t.Fatalf("Boat instances shared settings: primary %+v, secondary %+v", primary.lastRequest, secondary.lastRequest)
+	}
+	if primary.lastRequest.OperationID == secondary.lastRequest.OperationID || secondary.lastRequest.OperationID == last.lastRequest.OperationID {
+		t.Fatal("distinct requests reused a rejected idempotency key")
+	}
+	if !slices.Equal(attempts, order) || len(last.requests) != 1 || last.requests[0].Size != "" || last.requests[0].Shape != oldShape ||
+		last.requests[0].Placement == nil || *last.requests[0].Placement != oldSite ||
+		last.requests[0].Template.Image != "registered:org/worker" || last.bootstrap != 1 {
+		t.Fatalf("saved placement lost: attempts %v, requests %+v, bootstraps %d", attempts, last.requests, last.bootstrap)
+	}
+	batch, err := f.m.Batch(key)
+	if err != nil || len(batch.Machines) != 1 || batch.Machines[0].Provider != "burst" {
+		t.Fatalf("saved provider instance not visible: %+v, %v", batch, err)
+	}
+	f.restart(t)
+	if err := f.m.ReleaseDispatchWorker(t.Context(), key); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh reservation picks up the new configuration.
+	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), strings.Repeat("b", 32), remote, []string{"burst"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(last.requests) != 2 || last.requests[1].Size != "s" || last.requests[1].Shape != newShape || last.requests[1].Template.Image != "registered:org/different" || last.requests[1].Placement == nil || *last.requests[1].Placement != last.placement {
+		t.Fatalf("fresh reservation used stale settings: %+v", last.requests)
+	}
+}
+
+func TestDispatchRefusesReboundProviderInstance(t *testing.T) {
+	f := newFleet(t)
+	f.options.Providers["primary"] = &dispatchProvider{mockProvider: f.p, driver: "boat", scope: "account-a"}
+	f.options.Templates["primary"] = provider.Template{Snapshot: "golden"}
+	f.restart(t)
+	key := strings.Repeat("c", 32)
+	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, "https://github.com/octocat/Hello-World.git", []string{"primary"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.m.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	replacement := &dispatchProvider{mockProvider: newProvider(t), driver: "namespace"}
+	f.options.Providers["primary"] = replacement
+	if _, err := fleet.New(f.options); err == nil || !strings.Contains(err.Error(), "requires provider") || replacement.attempts != 0 {
+		t.Fatalf("startup did not reject a reassigned provider: %v", err)
+	}
+	replacement.driver, replacement.scope = "boat", "account-b"
+	if _, err := fleet.New(f.options); err == nil || !strings.Contains(err.Error(), "original account") || replacement.attempts != 0 {
+		t.Fatalf("startup did not reject a reassigned account: %v", err)
+	}
+}
+
+func TestFallbackRefusesReboundAccount(t *testing.T) {
+	f, primary, backup := dispatchProviders(t)
+	backup.scope = "account-a"
+	order := []string{"boat", "namespace"}
+	key := strings.Repeat("d", 32)
+	const remote = "https://github.com/octocat/Hello-World.git"
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	primary.onCreate = cancel
+	primary.createErrors = []error{provider.ErrCreateRejected}
+	if _, _, err := f.m.ProvisionDispatchWorker(ctx, key, remote, order); err == nil {
+		t.Fatal("expected cancelled launch after reservation")
+	}
+	primary.onCreate = nil
+	primary.createErrors = []error{provider.ErrCreateRejected}
+	backup.scope = "account-b"
+	f.restart(t)
+	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, order); err == nil || backup.attempts != 0 {
+		t.Fatalf("retried a fallback in a different account: %v", err)
+	}
+	backup.scope = "account-a"
+	primary.createErrors = []error{provider.ErrCreateRejected}
+	f.restart(t)
+	if _, _, err := f.m.ProvisionDispatchWorker(t.Context(), key, remote, order); err != nil || backup.attempts != 1 {
+		t.Fatalf("restoring fallback account did not recover reservation: %v", err)
+	}
+}
+
 func TestDispatchTriesFallbacksInOrder(t *testing.T) {
 	f, boat, namespace := dispatchProviders(t)
 	var calls []string
 	boat.onCreate = func() { calls = append(calls, "boat") }
 	namespace.onCreate = func() { calls = append(calls, "namespace") }
-	third := &dispatchProvider{mockProvider: newProvider(t), onCreate: func() { calls = append(calls, "third") }}
+	third := &dispatchProvider{mockProvider: newProvider(t), driver: "boat", onCreate: func() { calls = append(calls, "third") }}
 	f.options.Providers["third"] = third
 	f.options.Templates["third"] = provider.Template{Image: "third-image"}
 	f.restart(t)
@@ -178,6 +402,17 @@ func TestDispatchUpgradesUnattemptedLegacyReservation(t *testing.T) {
 		ID: key, Count: 1, CreateRequest: fleet.CreateRequest{Name: "thread-" + key[:12], Provider: "boat"},
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	var old map[string]any
+	if err := f.store.Load(&old); err != nil {
+		t.Fatal(err)
+	}
+	old["schema"] = 1
+	for _, entry := range old["machines"].([]any) {
+		delete(entry.(map[string]any), "driver")
+	}
+	if err := f.store.Save(old); err != nil {
 		t.Fatal(err)
 	}
 	f.restart(t)
@@ -321,6 +556,11 @@ func TestDispatchWorkerLostRequiresConfirmedAbsence(t *testing.T) {
 	if lost, err := f.m.DispatchWorkerLost(ctx, key); lost || err != nil {
 		t.Fatalf("a running worker was reported lost: %v %v", lost, err)
 	}
+	boat.getErr = errors.New("provider unavailable")
+	if lost, err := f.m.DispatchWorkerLost(ctx, key); lost || err == nil {
+		t.Fatalf("an uncertain worker was reported lost: %v %v", lost, err)
+	}
+	boat.getErr = nil
 	if err := f.m.Stop(ctx, worker.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -328,12 +568,16 @@ func TestDispatchWorkerLostRequiresConfirmedAbsence(t *testing.T) {
 		t.Fatalf("a stopped worker was reported lost: %v %v", lost, err)
 	}
 	// Removed outside t3fleet, for example from the provider console.
-	if err := boat.Delete(ctx, worker.RemoteID); err != nil {
+	if err := boat.mockProvider.Delete(ctx, worker.RemoteID); err != nil {
 		t.Fatal(err)
 	}
 	if lost, err := f.m.DispatchWorkerLost(ctx, key); !lost || err != nil {
 		t.Fatalf("a removed worker was not reported lost: %v %v", lost, err)
 	}
+	if _, err := f.m.Get(worker.ID); !errors.Is(err, fleet.ErrNotFound) || boat.deletes != 0 {
+		t.Fatalf("loss check did not retire only local state: err=%v, provider deletes=%d", err, boat.deletes)
+	}
+	f.restart(t)
 	boat.deleteFails = true
 	if err := f.m.ReleaseDispatchWorker(ctx, key); err != nil {
 		t.Fatalf("a lost worker could not be released: %v", err)

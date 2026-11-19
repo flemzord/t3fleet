@@ -35,6 +35,7 @@ const defaultDeleteTimeout = 10 * time.Minute
 
 // Config contains runtime credentials, never image-building credentials.
 type Config struct {
+	APIKeySource func() (string, error) // Load the current credential for this organization when sending a request.
 	APIKey       string
 	Organization string
 	// Environment explicitly opts in to Boat-managed repositories and secrets.
@@ -49,8 +50,9 @@ type Config struct {
 
 type Client struct {
 	base          string
-	key           string
+	apiKey        func() (string, error)
 	organization  string
+	scope         string
 	environment   string
 	http          *http.Client
 	accessHTTP    *http.Client
@@ -61,18 +63,20 @@ type Client struct {
 var _ provider.Provider = (*Client)(nil)
 var _ provider.Snapshotter = (*Client)(nil)
 
+// NormalizeBaseURL returns the canonical API base used for both validation
+// and account scoping. An empty value selects the hosted Boat API.
+func NormalizeBaseURL(raw string) (string, error) {
+	return provider.NormalizeAPIEndpoint(cmp.Or(raw, defaultBaseURL), true)
+}
+
 // New validates the API origin and keeps credentials only in memory. Plain HTTP
 // is accepted for loopback test servers; production endpoints require HTTPS.
 func New(cfg Config) (*Client, error) {
-	base := cmp.Or(cfg.BaseURL, defaultBaseURL)
-	u, err := url.Parse(base)
-	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return nil, errors.New("boat: invalid API base URL")
+	base, err := NormalizeBaseURL(cfg.BaseURL)
+	if err != nil {
+		return nil, err
 	}
-	if u.Scheme != "https" && (u.Scheme != "http" || !slices.Contains([]string{"localhost", "127.0.0.1", "::1"}, u.Hostname())) {
-		return nil, errors.New("boat: API base URL requires HTTPS")
-	}
-	if cfg.APIKey == "" || strings.ContainsAny(cfg.APIKey+cfg.Organization+cfg.Environment, "\r\n\x00") {
+	if !provider.ValidAccountID(cfg.Organization) || (cfg.APIKey == "") == (cfg.APIKeySource == nil) || strings.ContainsAny(cfg.APIKey+cfg.Environment, "\r\n\x00") {
 		return nil, errors.New("boat: invalid credentials or organization")
 	}
 	hc := http.Client{Timeout: 70 * time.Second}
@@ -87,10 +91,15 @@ func New(cfg Config) (*Client, error) {
 	}
 	access.Jar = nil
 	access.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Client{base: strings.TrimRight(base, "/"), key: cfg.APIKey, organization: cfg.Organization, environment: cfg.Environment, http: &hc, accessHTTP: &access, pollInterval: time.Second, deleteTimeout: defaultDeleteTimeout}, nil
+	apiKey := cfg.APIKeySource
+	if apiKey == nil {
+		apiKey = func() (string, error) { return cfg.APIKey, nil }
+	}
+	return &Client{base: base, scope: provider.ScopeFingerprint("boat", base, "org:"+cfg.Organization), apiKey: apiKey, organization: cfg.Organization, environment: cfg.Environment, http: &hc, accessHTTP: &access, pollInterval: time.Second, deleteTimeout: defaultDeleteTimeout}, nil
 }
 
-func (*Client) Name() string { return "boat" }
+func (*Client) Name() string      { return "boat" }
+func (c *Client) ScopeID() string { return c.scope }
 
 // APIError deliberately excludes the vendor message and response body, which
 // may contain private command output, credentials, or token-bearing URLs.
@@ -132,10 +141,12 @@ func (c *Client) request(ctx context.Context, method, path string, body any, hea
 		// refusal on the second request. Reconcile in Create instead.
 		req.GetBody = nil
 	}
-	req.Header.Set("Authorization", "Bearer "+c.key)
-	if c.organization != "" {
-		req.Header.Set("X-Boat-Org", c.organization)
+	key, err := c.apiKey()
+	if err != nil || key == "" || strings.ContainsAny(key, "\r\n\x00") {
+		return errAPIKeyUnavailable
 	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("X-Boat-Org", c.organization)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -203,6 +214,24 @@ func sandboxPath(id string) (string, error) {
 	return "/sandboxes/" + url.PathEscape(id), nil
 }
 
+// ValidSize reports whether Boat accepts a size (empty uses the provider default).
+func ValidSize(size string) bool {
+	return size == "" || slices.Contains([]string{"small", "default", "large", "xlarge"}, size)
+}
+
+func (c *Client) DefaultPlacement() provider.Placement {
+	return provider.Placement{Environment: c.environment}
+}
+
+var errAPIKeyUnavailable = errors.New("boat: API key unavailable for configured organization")
+
+func localCreateError(ctx context.Context, err error) error {
+	if ctx.Err() == nil && errors.Is(err, errAPIKeyUnavailable) {
+		return fmt.Errorf("%w: %w", provider.ErrCreateRejected, err)
+	}
+	return err
+}
+
 func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provider.Machine, error) {
 	template := cmp.Or(req.Template.Snapshot, req.Template.Image)
 	if template == "" || (req.Template.Snapshot != "" && req.Template.Image != "" && req.Template.Snapshot != req.Template.Image) {
@@ -211,7 +240,10 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 	if req.OperationID == "" || len(req.OperationID) > 256 || strings.ContainsAny(req.OperationID, "\r\n\x00") {
 		return provider.Machine{}, errors.New("boat: operation id is required")
 	}
-	if req.Size != "" && !slices.Contains([]string{"small", "default", "large", "xlarge"}, req.Size) {
+	if req.Shape != (provider.Shape{}) {
+		return provider.Machine{}, errors.New("boat: explicit CPU, memory and architecture are not supported")
+	}
+	if !ValidSize(req.Size) {
 		return provider.Machine{}, errors.New("boat: unsupported machine size")
 	}
 	labels := maps.Clone(req.Labels)
@@ -227,10 +259,14 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 	// machine. Refuse uncertainty rather than creating on a failed lookup.
 	existing, err := c.findOperation(ctx, req.OperationID)
 	if err != nil {
-		return provider.Machine{}, err
+		return provider.Machine{}, localCreateError(ctx, err)
 	}
 	if existing != nil {
 		return existing.machine(), nil
+	}
+	environment := c.environment
+	if req.Placement != nil {
+		environment = req.Placement.Environment
 	}
 	body := struct {
 		From        string            `json:"from"`
@@ -240,7 +276,7 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 		Environment string            `json:"environment,omitempty"`
 		NoEnv       bool              `json:"noEnv"`
 		Labels      map[string]string `json:"labels,omitzero"`
-	}{template, req.Name, req.Size, "private", c.environment, c.environment == "", labels}
+	}{template, req.Name, req.Size, "private", environment, environment == "", labels}
 	var res struct {
 		Sandbox sandbox `json:"sandbox"`
 	}
@@ -254,7 +290,7 @@ func (c *Client) Create(ctx context.Context, req provider.CreateRequest) (provid
 				(apiErr.Status == http.StatusServiceUnavailable && (apiErr.Code == "out_of_capacity" || apiErr.Code == "no_ready_machine"))) {
 			err = fmt.Errorf("%w: %w", provider.ErrCreateRejected, err)
 		}
-		return provider.Machine{}, err
+		return provider.Machine{}, localCreateError(ctx, err)
 	}
 	if res.Sandbox.ID == "" {
 		return provider.Machine{}, errors.New("boat: create response has no sandbox id")

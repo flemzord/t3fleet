@@ -44,13 +44,14 @@ func TestCloudLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	templates := cfg.ProviderTemplates()
 	for name := range strings.SplitSeq(selection, ",") {
 		t.Run(name, func(t *testing.T) {
 			p := providers[name]
 			if p == nil {
 				t.Fatal("selected provider is not configured")
 			}
-			if cfg.Templates[name] == (provider.Template{}) {
+			if templates[name] == (provider.Template{}) {
 				t.Fatal("selected provider has no prepared template")
 			}
 			disk, err := state.Open(filepath.Join(cfg.StateDir, "canary-"+name))
@@ -59,7 +60,7 @@ func TestCloudLifecycle(t *testing.T) {
 			}
 			defer func() { _ = disk.Close() }()
 			providers[name] = diagnosticProvider{Provider: p, t: t}
-			m, err := fleet.New(fleet.Options{Providers: providers, Templates: cfg.Templates, Store: disk, ExpectedVersion: cfg.ExpectedVersion, ReadyTimeout: 5 * time.Minute})
+			m, err := fleet.New(fleet.Options{Providers: providers, Templates: templates, Sizes: cfg.ProviderSizes(), Store: disk, ExpectedVersion: cfg.ExpectedVersion, ReadyTimeout: 5 * time.Minute})
 			if err != nil {
 				t.Fatal(err)
 			}

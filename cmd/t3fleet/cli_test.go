@@ -144,7 +144,7 @@ func TestMachineCommandsResolveReferences(t *testing.T) {
 	cfg := config.Default()
 	cfg.StateDir = t.TempDir()
 	calls := machineServer(t, &cfg)
-	for _, args := range [][]string{{"stop", "agent"}, {"start", "3f9d"}, {"delete", "t3fleet-worker"}} {
+	for _, args := range [][]string{{"admin", "stop", "agent"}, {"admin", "start", "3f9d"}, {"admin", "delete", "t3fleet-worker"}} {
 		if err := runClient(t.Context(), cfg, args[0], args[1:], io.Discard, io.Discard); err != nil {
 			t.Fatalf("%v: %v", args, err)
 		}
@@ -154,7 +154,7 @@ func TestMachineCommandsResolveReferences(t *testing.T) {
 		t.Fatalf("calls = %v, want %v", *calls, want)
 	}
 	*calls = nil
-	if err := runClient(t.Context(), cfg, "delete", []string{"3f9c"}, io.Discard, io.Discard); err == nil || len(*calls) != 0 {
+	if err := runClient(t.Context(), cfg, "admin", []string{"delete", "3f9c"}, io.Discard, io.Discard); err == nil || len(*calls) != 0 {
 		t.Fatalf("delete accepted an ID prefix: %v %v", err, *calls)
 	}
 }
@@ -162,7 +162,7 @@ func TestMachineCommandsResolveReferences(t *testing.T) {
 func TestCreateUsesTheOnlyConfiguredProvider(t *testing.T) {
 	cfg := config.Default()
 	cfg.StateDir = t.TempDir()
-	cfg.Providers.Namespace = &config.Namespace{}
+	cfg.Providers["compute-west"] = config.ProviderConfig{Type: "namespace"}
 	token := mustAdminToken(t, cfg.StateDir)
 	var got fleet.CreateRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -174,14 +174,14 @@ func TestCreateUsesTheOnlyConfiguredProvider(t *testing.T) {
 	defer server.Close()
 	cfg.Listen = strings.TrimPrefix(server.URL, "http://")
 	var out, diag bytes.Buffer
-	if err := runClient(t.Context(), cfg, "create", []string{"-n", "agent", "--no-register"}, &out, &diag); err != nil {
+	if err := runClient(t.Context(), cfg, "admin", []string{"create", "-n", "agent"}, &out, &diag); err != nil {
 		t.Fatal(err)
 	}
-	if got.Provider != "namespace" || !strings.Contains(out.String(), "Created t3fleet-agent") || !strings.Contains(diag.String(), "t3fleet open t3fleet-agent") {
+	if got.Provider != "compute-west" || !strings.Contains(out.String(), "Created t3fleet-agent") {
 		t.Fatalf("provider=%q out=%q diag=%q", got.Provider, out.String(), diag.String())
 	}
-	cfg.Providers.Boat = &config.Boat{}
-	if err := runClient(t.Context(), cfg, "create", []string{"--name", "agent"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "--provider") {
+	cfg.Providers["primary"] = config.ProviderConfig{Type: "boat"}
+	if err := runClient(t.Context(), cfg, "admin", []string{"create", "--name", "agent"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "--provider") {
 		t.Fatalf("ambiguous provider choice was not reported: %v", err)
 	}
 }
@@ -189,13 +189,14 @@ func TestCreateUsesTheOnlyConfiguredProvider(t *testing.T) {
 func TestStatusReportsDaemonAndMachines(t *testing.T) {
 	cfg := config.Default()
 	cfg.StateDir = t.TempDir()
-	cfg.Providers.Boat = &config.Boat{}
+	cfg.Providers["primary"] = config.ProviderConfig{Type: "boat"}
+	cfg.Dispatch = &config.Dispatch{Listen: "127.0.0.1:47733", ProviderOrder: []string{"primary"}, MaxWorkers: 17}
 	machineServer(t, &cfg)
 	var out bytes.Buffer
 	if err := runClient(t.Context(), cfg, "status", nil, &out, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Providers:", "boat", "running on", "2 (1 ready, 1 stopped)"} {
+	for _, want := range []string{"Providers:", "primary", "47733", "Worker limit:", "17", "running on", "2 (1 ready, 1 stopped)"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("status misses %q:\n%s", want, out.String())
 		}
@@ -215,33 +216,36 @@ func TestStatusReportsDaemonAndMachines(t *testing.T) {
 	}
 }
 
-func TestDispatchPairAndDeprecatedAlias(t *testing.T) {
+func TestPairTargetsTheFleetWithZeroMachines(t *testing.T) {
 	cfg := config.Default()
 	cfg.StateDir = t.TempDir()
-	mustAdminToken(t, cfg.StateDir)
+	token := mustAdminToken(t, cfg.StateDir)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/dispatch-poc/pair" {
-			t.Error("unexpected path", r.URL.Path)
+		if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer "+token {
+			t.Error("expected authenticated POST")
 		}
-		_, _ = io.WriteString(w, `{"url":"http://127.0.0.1:47801/pair#token=one-time"}`)
+		switch r.URL.Path {
+		case "/v1/dispatch/pair":
+			_, _ = io.WriteString(w, `{"url":"http://127.0.0.1:47801/pair#token=one-time"}`)
+		case "/v1/dispatch/pair-peer":
+			var req struct{ Access string }
+			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Access != "approval-required" {
+				t.Error("wrong access")
+			}
+			_, _ = io.WriteString(w, `{"credential":"test-code"}`)
+		default:
+			t.Errorf("unexpected call %s", r.URL.Path)
+		}
 	}))
 	defer server.Close()
 	cfg.Listen = strings.TrimPrefix(server.URL, "http://")
-	for _, args := range [][]string{{"dispatch", "pair"}, {"pair-dispatch"}} {
-		var out bytes.Buffer
-		if err := runClient(t.Context(), cfg, args[0], args[1:], &out, io.Discard); err != nil || !strings.HasPrefix(out.String(), "t3code://pair?pairingUrl=") {
-			t.Fatalf("%v: %v %q", args, err, out.String())
-		}
+	var out bytes.Buffer
+	if err := runClient(t.Context(), cfg, "pair", nil, &out, io.Discard); err != nil || !strings.HasPrefix(out.String(), "t3code://pair?pairingUrl=") {
+		t.Fatalf("%v %q", err, out.String())
 	}
-
-	notEnabled := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, `{"error":"not_found"}`)
-	}))
-	defer notEnabled.Close()
-	cfg.Listen = strings.TrimPrefix(notEnabled.URL, "http://")
-	if err := runClient(t.Context(), cfg, "dispatch", []string{"pair"}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "dispatch is not enabled") {
-		t.Fatalf("disabled dispatch not explained: %v", err)
+	out.Reset()
+	if err := runClient(t.Context(), cfg, "pair", []string{"--peer-access", "approval-required", "--json"}, &out, io.Discard); err != nil || !strings.Contains(out.String(), `"credential": "test-code"`) {
+		t.Fatalf("%v %q", err, out.String())
 	}
 }
 
@@ -264,8 +268,8 @@ func TestErrorsAreRenderedWithHints(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.StateDir = t.TempDir()
-	err = runClient(t.Context(), cfg, "start", []string{"--bad"}, io.Discard, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "t3fleet start --help") {
+	err = runClient(t.Context(), cfg, "admin", []string{"start", "--bad"}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "t3fleet admin start --help") {
 		t.Fatalf("flag error has no help hint: %v", err)
 	}
 }
@@ -275,16 +279,21 @@ func TestHelpGroupsCommandsAndShowsExamples(t *testing.T) {
 	if err := run(t.Context(), []string{"--help"}, &out, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Machine commands:", "T3 Code access:", "Setup and daemon:", "init", "T3FLEET_CONFIG"} {
+	for _, want := range []string{"Fleet service:", "Worker inventory and recovery:", "init", "T3FLEET_CONFIG", "t3fleet pair"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("root help misses %q", want)
 		}
 	}
-	if strings.Contains(out.String(), "pair-dispatch") {
-		t.Fatal("deprecated alias is listed in help")
+	for _, removed := range []string{"create", "delete", "open", "dispatch", "pair-dispatch"} {
+		if strings.Contains(out.String(), "\n  "+removed+" ") {
+			t.Errorf("%s exposed at root", removed)
+		}
+		if err := run(t.Context(), []string{removed}, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "unknown command") {
+			t.Errorf("%s still callable at root: %v", removed, err)
+		}
 	}
 	out.Reset()
-	if err := run(t.Context(), []string{"create", "--help"}, &out, io.Discard); err != nil || !strings.Contains(out.String(), "Examples:") || !strings.Contains(out.String(), "--no-register") {
+	if err := run(t.Context(), []string{"admin", "create", "--help"}, &out, io.Discard); err != nil || !strings.Contains(out.String(), "Examples:") || !strings.Contains(out.String(), "--provider") || strings.Contains(out.String(), "--count") || strings.Contains(out.String(), "--snapshot") {
 		t.Fatalf("create help incomplete: %v\n%s", err, out.String())
 	}
 	out.Reset()
