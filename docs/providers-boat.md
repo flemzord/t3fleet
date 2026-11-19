@@ -21,6 +21,13 @@ the Boat account's repositories, secrets, and agent credentials. Setting
 `Config.Environment` explicitly opts in to the named Boat environment instead.
 Use credential-free, versioned golden snapshots independently of this option.
 
+The Boat API key authorizes sandbox operations. To clone a private repository,
+Git on the worker also needs read access to that repository. To check a failed
+HTTPS checkout, run `GIT_TERMINAL_PROMPT=0 git ls-remote URL HEAD` as the
+worker user, using the same credential-free URL registered in the project.
+Reading a public repository or signing in to GitHub on the controller does not
+verify access on the worker.
+
 ## Lifecycle
 
 | t3fleet operation | Boat API |

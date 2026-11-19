@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -27,9 +28,39 @@ func TestDispatchRemoteDoesNotAcceptCredentials(t *testing.T) {
 	}
 }
 
+func TestDispatchKeepsHostPolicyWhenDisablingUpdates(t *testing.T) {
+	policy := map[string]any{
+		"organization": "Platform", "supportUrl": "https://example.org/support", "lockedSettings": []any{"example"},
+		"limits": map[string]any{"connect": false, "updates": map[string]any{"mode": "auto", "allowNightly": false}},
+	}
+	cfg := map[string]any{"managedPolicy": policy}
+	dispatchUpdatePolicy(cfg)
+	want := map[string]any{
+		"organization": "Platform", "supportUrl": "https://example.org/support", "lockedSettings": []any{"example"},
+		"limits": map[string]any{"connect": false, "updates": map[string]any{"mode": "off", "allowNightly": false}},
+	}
+	if !reflect.DeepEqual(cfg["managedPolicy"], want) {
+		t.Fatalf("fleet changed the host policy beyond update mode: %#v", cfg["managedPolicy"])
+	}
+}
+
+func checkFleetUpdateDescriptor(t *testing.T, descriptor map[string]any, version any) {
+	t.Helper()
+	caps, ok := descriptor["capabilities"].(map[string]any)
+	if !ok || version == nil || descriptor["serverVersion"] != version {
+		t.Fatal("fleet lost the controller version or capability map")
+	}
+	for _, key := range []string{"serverSelfUpdate", "serverInstallation", "npmReleaseLookup", "desktopAppUpdate",
+		"desktopAppChannelSwitch", "serverSelfUpdateProgress", "serverUpdateStaging", "serverUpdateThreadContinuation"} {
+		if _, advertised := caps[key]; advertised {
+			t.Errorf("fleet advertises unsupported capability %s", key)
+		}
+	}
+}
+
 func TestLiveOnDemandDispatch(t *testing.T) {
 	setup := setupDispatchReplay(t)
-	controllerURL, controllerToken, _ := startLiveT3(t, nil)
+	controllerURL, controllerToken, controllerDescriptor := startLiveT3(t, nil)
 	controller := DispatchWorker{ID: "controller", Resolve: func(context.Context) (Upstream, error) {
 		return Upstream{Endpoint: provider.Endpoint{URL: controllerURL}, Token: controllerToken}, nil
 	}}
@@ -122,6 +153,29 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 		environment["environmentId"] != discovery["environmentId"] {
 		t.Fatal("virtual environment name or identity differs between discovery and configuration")
 	}
+	t.Run("operator manages updates across discovery and config snapshots", func(t *testing.T) {
+		version := controllerDescriptor["serverVersion"]
+		checkFleetUpdateDescriptor(t, discovery, version)
+		sub := newDispatchTestClient(t, ctx, server.URL, token)
+		defer func() { _ = sub.conn.CloseNow() }()
+		sub.send("cfg", "subscribeServerConfig", nil)
+		items, _ := sub.next("cfg")["values"].([]any)
+		if len(items) == 0 {
+			t.Fatal("missing initial config event")
+		}
+		event, _ := items[0].(map[string]any)
+		snapshot, _ := event["config"].(map[string]any)
+		for _, cfg := range []map[string]any{config, snapshot} {
+			env, _ := cfg["environment"].(map[string]any)
+			checkFleetUpdateDescriptor(t, env, version)
+			policy, _ := cfg["managedPolicy"].(map[string]any)
+			limits, _ := policy["limits"].(map[string]any)
+			updates, _ := limits["updates"].(map[string]any)
+			if updates["mode"] != "off" || policy["organization"] == "" || policy["organization"] == nil || policy["lockedSettings"] == nil {
+				t.Fatal("missing managed update policy in fleet config")
+			}
+		}
+	})
 	providers, _ := config["providers"].([]any)
 	if len(providers) != 1 {
 		t.Fatal("expected a single virtual Codex provider")
