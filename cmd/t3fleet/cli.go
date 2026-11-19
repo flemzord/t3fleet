@@ -438,7 +438,9 @@ func (a *app) deleteCommand() *cobra.Command {
 
 With one argument, delete that machine. The argument must be a full ID or an
 exact name: ID prefixes are refused for deletion.
-Without an argument, select machines from a list and confirm by typing delete.
+Without an argument, use the arrow keys to move and Space to check or uncheck
+workers. Press Enter to review the selection, then type delete to confirm.
+Esc or Ctrl+C cancels the selection.
 In scripts, pass explicit managed IDs with --ids and confirm with --yes.`,
 		Example: `  t3fleet admin delete agent
   t3fleet admin delete
