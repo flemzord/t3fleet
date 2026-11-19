@@ -8,6 +8,8 @@ After pairing with `t3fleet pair`, use **Add to another machine** on a GitHub pr
 
 Registering a project writes metadata only. The folder on the controller represents the project; it contains no Git checkout. On the first text message, the worker clones the selected remote using its own Git credentials. A retry of checkout on the same reservation reuses the checkout if its origin matches. A new thread gets a new worker, even in the same project. Changes that exist only in another worker’s checkout are not transferred.
 
+For a private GitHub repository over HTTPS, the worker can use its existing Git credential helper or a signed-in GitHub CLI (`gh`). If the worker has `gh` and no matching helper is configured, the fleet lets Git ask `gh` for credentials for that clone only. It leaves SSH, URL rewrites, and explicit helper settings (including an empty helper) alone. Later fetches and pushes use the worker’s usual Git configuration.
+
 The fleet’s project and thread list does not wake workers. When a provider has no guaranteed passive connection, the list uses the last navigation metadata observed on an explicit thread action. Opening a thread can wake its worker; loading its messages still requires the worker.
 
 ## Launch from another T3 server
