@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -98,14 +99,7 @@ func (a *app) daemon() (daemonClient, error) {
 }
 
 func configuredProviders(cfg config.Config) []string {
-	var names []string
-	if cfg.Providers.Boat != nil {
-		names = append(names, "boat")
-	}
-	if cfg.Providers.Namespace != nil {
-		names = append(names, "namespace")
-	}
-	return names
+	return slices.Sorted(maps.Keys(cfg.Providers))
 }
 
 func defaultProvider(cfg config.Config) (string, error) {
@@ -114,7 +108,7 @@ func defaultProvider(cfg config.Config) (string, error) {
 	case 1:
 		return names[0], nil
 	case 0:
-		return "", hinted("add a provider to the configuration (see examples/config.json), or pass --provider", "no provider is configured")
+		return "", hinted("add a named instance under providers in the configuration", "no provider is configured")
 	default:
 		return "", hinted("pass --provider "+strings.Join(names, " or --provider "), "several providers are configured")
 	}
@@ -171,17 +165,16 @@ func newRootCommand(a *app) *cobra.Command {
 	defaultPath := config.DefaultPath()
 	root := &cobra.Command{
 		Use:   "t3fleet",
-		Short: "Run T3 Code on persistent cloud machines through a local daemon",
-		Long: `t3fleet runs T3 Code on persistent Boat sandboxes and Namespace Devboxes.
+		Short: "Run one T3 environment backed by on-demand cloud workers",
+		Long: `t3fleet runs one T3 environment. Pair it once with T3 Code Desktop or
+another T3 server. Register projects from T3; starting a thread allocates
+a worker using the provider order in the configuration.
 
-Start the daemon with 't3fleet serve', then manage machines from another
-terminal. Designate a machine by name (with or without the t3fleet- prefix),
-full ID, or a unique ID prefix of at least 4 characters.
+Start with 't3fleet init', 't3fleet serve', then 't3fleet pair' from
+another terminal. Stopping the daemon does not release allocated workers.
 
 Configuration is read from --config, then $T3FLEET_CONFIG, then
-` + defaultPath + `.
-Cloud machines keep billing until you stop or delete them, even when the
-daemon is not running.`,
+` + defaultPath + `.`,
 		Version:       version,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -198,19 +191,44 @@ daemon is not running.`,
 		return hinted(fmt.Sprintf("run '%s --help'", cmd.CommandPath()), "%v", err)
 	})
 	root.AddGroup(
-		&cobra.Group{ID: "machines", Title: "Machine commands:"},
-		&cobra.Group{ID: "access", Title: "T3 Code access:"},
-		&cobra.Group{ID: "daemon", Title: "Setup and daemon:"},
+		&cobra.Group{ID: "daemon", Title: "Fleet service:"},
+		&cobra.Group{ID: "machines", Title: "Worker inventory and recovery:"},
 	)
 	root.AddCommand(
-		a.createCommand(), a.listCommand(), a.inspectCommand(),
-		a.powerCommand("start"), a.powerCommand("stop"),
-		a.deleteCommand(), a.snapshotCommand(),
-		a.openCommand(), a.pairCommand(), a.dispatchCommand(), a.legacyPairDispatchCommand(),
-		a.initCommand(), a.serveCommand(), a.statusCommand(),
-		a.versionCommand(),
+		a.initCommand(), a.validateCommand(), a.serveCommand(), a.fleetPairCommand(), a.statusCommand(),
+		a.listCommand(), a.inspectCommand(), a.adminCommand(), a.versionCommand(),
 	)
 	return root
+}
+
+func (a *app) validateCommand() *cobra.Command {
+	return &cobra.Command{
+		Use: "validate", Short: "Check the fleet configuration without contacting providers",
+		GroupID: "daemon", Args: noArgs, ValidArgsFunction: cobra.NoFileCompletions,
+		RunE: func(*cobra.Command, []string) error {
+			if _, err := a.config(); err != nil {
+				return err
+			}
+			if a.configMissing {
+				return errNoConfiguration
+			}
+			path, _ := a.configLocation()
+			fmt.Fprintf(a.stdout, "Valid configuration: %s\n", path)
+			return nil
+		},
+	}
+}
+
+func (a *app) adminCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use: "admin", Short: "Recover or maintain individual workers", GroupID: "machines",
+		Long: "Operate on individual machines directly. New T3 threads allocate workers automatically.",
+		Args: noArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
+	}
+	cmd.AddCommand(a.createCommand(), a.deleteCommand(), a.powerCommand("start"),
+		a.powerCommand("stop"), a.snapshotCommand(), a.machinePairCommand(false), a.machinePairCommand(true))
+	return cmd
 }
 
 func (a *app) serveCommand() *cobra.Command {
@@ -220,9 +238,9 @@ func (a *app) serveCommand() *cobra.Command {
 		GroupID: "daemon",
 		Long: `Run the local fleet daemon in the foreground.
 
-The daemon loads cloud credentials, owns the state directory, and relays
-T3 Code traffic to the machines. Other commands talk to it over loopback.
-Stopping the daemon does not stop or delete cloud machines.`,
+Start the local T3 server and expose the fleet endpoint for paired clients.
+Worker allocation starts when a thread needs one. Other CLI commands use
+the separate loopback admin endpoint. Stopping the daemon does not delete workers.`,
 		Example:           "  t3fleet serve\n  t3fleet serve --config ~/.config/t3fleet/config.json",
 		Args:              noArgs,
 		ValidArgsFunction: cobra.NoFileCompletions,
@@ -240,116 +258,60 @@ Stopping the daemon does not stop or delete cloud machines.`,
 }
 
 func (a *app) createCommand() *cobra.Command {
-	var request fleet.CreateRequest
-	var count, concurrency int
-	var batchID, resume string
-	var noRegister, asJSON bool
+	var request machineCreateRequest
+	var asJSON bool
 	cmd := &cobra.Command{
-		Use:     "create --name NAME",
-		Short:   "Create a machine from a template and open it in T3 Code",
-		GroupID: "machines",
-		Long: `Create a machine from the configured template, wait for T3 readiness,
-then open T3 Code Desktop to confirm the association.
-
-New names receive the t3fleet- prefix once; the full name is limited to 32
-characters. --provider is optional when only one provider is configured.
-
-With --count, t3fleet creates a durable batch named t3fleet-NAME-01,
-t3fleet-NAME-02, ... and prints a batch ID. Resume an interrupted batch with
---resume BATCH_ID.`,
-		Example: `  t3fleet create --name agent
-  t3fleet create --name agent --provider namespace --size large
-  t3fleet create --name agent --snapshot my-golden --no-register
-  t3fleet create --name workers --count 10 --concurrency 3 --no-register
-  t3fleet create --resume 0123456789abcdef0123456789abcdef`,
+		Use:               "create --name NAME",
+		Short:             "Allocate one machine for manual recovery or diagnostics",
+		Long:              "Allocate one machine with the selected provider instance's configured size and template. This machine is independent of on-demand thread placement.",
+		Example:           "  t3fleet admin create --name diagnostics --provider primary",
 		Args:              noArgs,
 		ValidArgsFunction: cobra.NoFileCompletions,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if request.Name == "" {
+				return hinted("example: t3fleet admin create --name diagnostics", "create needs --name")
+			}
 			cfg, err := a.config()
 			if err != nil {
 				return err
-			}
-			ctx := cmd.Context()
-			if resume != "" {
-				for _, name := range []string{"name", "provider", "batch-id", "count", "size", "image", "snapshot", "source"} {
-					if cmd.Flags().Changed(name) {
-						return hinted("example: t3fleet create --resume BATCH_ID --concurrency 3", "--resume accepts only --concurrency, --no-register and --json (got --%s)", name)
-					}
-				}
-				return runBatchWithInput(ctx, cfg, fleet.BatchRequest{ID: resume}, concurrency, true, !noRegister, asJSON, a.stdin, a.stdinTTY, a.stdout, a.stderr)
-			}
-			if request.Name == "" {
-				return hinted("example: t3fleet create --name agent", "create needs --name")
 			}
 			if request.Provider == "" {
 				if request.Provider, err = defaultProvider(cfg); err != nil {
 					return err
 				}
 			}
-			if count != 1 || batchID != "" {
-				return runBatchWithInput(ctx, cfg, fleet.BatchRequest{ID: batchID, CreateRequest: request, Count: count}, concurrency, false, !noRegister, asJSON, a.stdin, a.stdinTTY, a.stdout, a.stderr)
+			if _, ok := cfg.Providers[request.Provider]; !ok {
+				return hinted("select a configured provider instance", "unknown provider %q", request.Provider)
 			}
-			if concurrency < 1 || concurrency > fleet.MaxConcurrency {
-				return errors.New("--concurrency must be between 1 and 10")
+			d, err := a.daemon()
+			if err != nil {
+				return err
 			}
-			return a.createOne(ctx, request, !noRegister, asJSON)
+			finish := startProgress(a.stderr, createProgress(request.Provider, cfg.Providers[request.Provider].Template), interactiveProgress(a.stderr))
+			data, err := d.call(cmd.Context(), http.MethodPost, "/v1/machines", request)
+			finish(err)
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				return printRawJSON(a.stdout, data)
+			}
+			var machine fleet.Machine
+			if json.Unmarshal(data, &machine) != nil || machine.ID == "" {
+				return errors.New("invalid daemon response")
+			}
+			fmt.Fprintf(a.stdout, "Created %s (%s) on %s\n", displayName(machine), machine.ID, orDash(machine.Provider))
+			return nil
 		},
 	}
-	flags := cmd.Flags()
-	flags.SortFlags = false
-	flags.StringVarP(&request.Name, "name", "n", "", "machine name")
-	flags.StringVarP(&request.Provider, "provider", "p", "", "boat or namespace (default: the only configured provider)")
-	flags.StringVar(&request.Size, "size", "", "provider machine size")
-	flags.StringVar(&request.Template.Image, "image", "", "prepared image reference (overrides the template)")
-	flags.StringVar(&request.Template.Snapshot, "snapshot", "", "prepared snapshot reference (overrides the template)")
-	flags.StringVar(&request.Template.Source, "source", "", "golden Namespace Devbox to fork (overrides the template)")
-	flags.BoolVar(&noRegister, "no-register", false, "do not open T3 Code; associate later with 't3fleet open'")
-	flags.IntVar(&count, "count", 1, "number of identical machines, 1-100 (creates a batch)")
-	flags.IntVar(&concurrency, "concurrency", 3, "maximum concurrent starts in a batch, 1-10")
-	flags.StringVar(&batchID, "batch-id", "", "stable batch ID (32 hex characters) for request replay")
-	flags.StringVar(&resume, "resume", "", "resume an existing batch by ID")
-	flags.BoolVar(&asJSON, "json", false, "print the result as JSON")
+	cmd.Flags().StringVarP(&request.Name, "name", "n", "", "machine name")
+	cmd.Flags().StringVarP(&request.Provider, "provider", "p", "", "provider instance (default: the only configured instance)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print the result as JSON")
 	_ = cmd.RegisterFlagCompletionFunc("provider", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
-		cfg, err := a.config()
-		if names := configuredProviders(cfg); err == nil && len(names) > 0 {
-			return names, cobra.ShellCompDirectiveNoFileComp
-		}
-		return []string{"boat", "namespace"}, cobra.ShellCompDirectiveNoFileComp
+		cfg, _ := a.config()
+		return configuredProviders(cfg), cobra.ShellCompDirectiveNoFileComp
 	})
 	return cmd
-}
-
-func (a *app) createOne(ctx context.Context, request fleet.CreateRequest, register, asJSON bool) error {
-	d, err := a.daemon()
-	if err != nil {
-		return err
-	}
-	finish := startProgress(a.stderr, operationProgress(d.cfg, "create", request), interactiveProgress(a.stderr))
-	data, err := d.call(ctx, http.MethodPost, "/v1/machines", request)
-	finish(err)
-	if err != nil {
-		return err
-	}
-	var machine fleet.Machine
-	if json.Unmarshal(data, &machine) != nil {
-		return errors.New("invalid daemon response")
-	}
-	// Print the identity before the desktop handoff: a failed handoff must
-	// still leave the caller with the created machine.
-	if asJSON {
-		if err := printRawJSON(a.stdout, data); err != nil {
-			return err
-		}
-	} else {
-		fmt.Fprintf(a.stdout, "Created %s (%s) on %s\n", displayName(machine), machine.ID, orDash(machine.Provider))
-	}
-	if !register {
-		if !asJSON {
-			fmt.Fprintf(a.stderr, "Open it in T3 Code with: t3fleet open %s\n", machineRef(machine))
-		}
-		return nil
-	}
-	return registerCreatedMachine(ctx, d.cfg, d.token, data, a.stderr)
 }
 
 func (a *app) listCommand() *cobra.Command {
@@ -379,7 +341,7 @@ func (a *app) listCommand() *cobra.Command {
 				return errors.New("invalid daemon response")
 			}
 			if len(machines) == 0 {
-				fmt.Fprintln(a.stderr, "No managed machines. Create one with: t3fleet create --name NAME")
+				fmt.Fprintln(a.stderr, "No workers yet. Start a thread in the paired T3 environment to allocate one.")
 				return nil
 			}
 			printMachineTable(a.stdout, machines, colorEnabled(a.stdout))
@@ -428,14 +390,13 @@ func (a *app) inspectCommand() *cobra.Command {
 
 func (a *app) powerCommand(action string) *cobra.Command {
 	var asJSON bool
-	short, example := "Start a machine and wait for T3 readiness", "  t3fleet start agent"
+	short, example := "Start a machine and wait for T3 readiness", "  t3fleet admin start agent"
 	if action == "stop" {
-		short, example = "Stop a machine", "  t3fleet stop agent"
+		short, example = "Stop a machine", "  t3fleet admin stop agent"
 	}
 	cmd := &cobra.Command{
 		Use:               action + " MACHINE",
 		Short:             short,
-		GroupID:           "machines",
 		Example:           example,
 		Args:              oneMachine,
 		ValidArgsFunction: a.completeMachines,
@@ -473,16 +434,15 @@ func (a *app) deleteCommand() *cobra.Command {
 		Use:     "delete [MACHINE]",
 		Aliases: []string{"rm"},
 		Short:   "Delete one machine, or select several interactively",
-		GroupID: "machines",
 		Long: `Permanently delete managed machines and their cloud resources.
 
 With one argument, delete that machine. The argument must be a full ID or an
 exact name: ID prefixes are refused for deletion.
 Without an argument, select machines from a list and confirm by typing delete.
 In scripts, pass explicit managed IDs with --ids and confirm with --yes.`,
-		Example: `  t3fleet delete agent
-  t3fleet delete
-  t3fleet delete --ids ID1,ID2 --yes`,
+		Example: `  t3fleet admin delete agent
+  t3fleet admin delete
+  t3fleet admin delete --ids ID1,ID2 --yes`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 1 {
 				return hinted("pass one machine, or use --ids ID,ID --yes for several", "delete accepts at most one machine")
@@ -512,14 +472,13 @@ func (a *app) snapshotCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:               "snapshot MACHINE --name NAME",
 		Short:             "Capture a provider snapshot of a machine",
-		GroupID:           "machines",
-		Long:              "Capture a snapshot of a machine where the provider supports it (Boat).\nUse the snapshot later with 't3fleet create --snapshot'.",
-		Example:           "  t3fleet snapshot agent --name golden-2026-11",
+		Long:              "Capture a snapshot of a machine where the provider supports it (Boat).\nTo use the snapshot for new workers, update the provider template in the configuration.",
+		Example:           "  t3fleet admin snapshot agent --name golden-2026-11",
 		Args:              oneMachine,
 		ValidArgsFunction: a.completeMachines,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if name == "" {
-				return hinted("example: t3fleet snapshot "+args[0]+" --name golden", "snapshot needs --name")
+				return hinted("example: t3fleet admin snapshot "+args[0]+" --name golden", "snapshot needs --name")
 			}
 			ctx := cmd.Context()
 			d, err := a.daemon()
@@ -556,62 +515,23 @@ func (a *app) snapshotCommand() *cobra.Command {
 	return cmd
 }
 
-func (a *app) openCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:     "open MACHINE",
-		Short:   "Open a machine in T3 Code Desktop",
-		GroupID: "access",
-		Long: `Prepare a one-time pairing link and hand it to T3 Code Desktop on this
-computer. Confirm the association in T3 to finish. Use 'pair' instead on a
-headless host.`,
-		Example:           "  t3fleet open agent",
-		Args:              oneMachine,
-		ValidArgsFunction: a.completeMachines,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			d, err := a.daemon()
-			if err != nil {
-				return err
-			}
-			machine, err := d.resolve(ctx, args[0], true)
-			if err != nil {
-				return err
-			}
-			payload, err := json.Marshal(map[string]string{"id": machine.ID})
-			if err != nil {
-				return err
-			}
-			finish := startProgress(a.stderr, machineProgress("pair", displayName(machine)), interactiveProgress(a.stderr))
-			// The handoff writes nothing while the spinner runs; report afterwards.
-			err = registerCreatedMachine(ctx, d.cfg, d.token, payload, io.Discard)
-			finish(err)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintln(a.stderr, "T3 Code opened. Confirm the backend association in T3 to finish.")
-			return nil
-		},
-	}
-}
-
-func (a *app) pairCommand() *cobra.Command {
+// Machine links are recovery tools. The user-facing pair command always targets the fleet.
+func (a *app) machinePairCommand(open bool) *cobra.Command {
 	var asJSON bool
+	name, short := "pair", "Print a one-time link to this machine"
+	if open {
+		name, short = "open", "Open this machine directly in T3 Code Desktop"
+	}
 	cmd := &cobra.Command{
-		Use:     "pair MACHINE",
-		Short:   "Print a one-time T3 Code pairing link",
-		GroupID: "access",
-		Long: `Print a short-lived T3 Code pairing deep link for a machine. Use it on a
-headless host, or when 'open' cannot launch T3 Code Desktop.
-Keep the link private: it grants access to the machine until it expires.`,
-		Example:           "  t3fleet pair agent",
-		Args:              oneMachine,
+		Use: name + " MACHINE", Short: short,
+		Example: "  t3fleet admin " + name + " diagnostics", Args: oneMachine,
 		ValidArgsFunction: a.completeMachines,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
 			d, err := a.daemon()
 			if err != nil {
 				return err
 			}
+			ctx := cmd.Context()
 			machine, err := d.resolve(ctx, args[0], true)
 			if err != nil {
 				return err
@@ -626,6 +546,14 @@ Keep the link private: it grants access to the machine until it expires.`,
 			if err != nil {
 				return err
 			}
+			if open {
+				if err := openT3(ctx, link); err != nil {
+					// Launcher errors can include the credential-bearing URL.
+					return hinted("use 't3fleet admin pair MACHINE' to print a new link", "T3 Code Desktop could not be opened")
+				}
+				fmt.Fprintln(a.stderr, "Confirm the machine association in T3 Code Desktop.")
+				return nil
+			}
 			if asJSON {
 				return printJSON(a.stdout, map[string]string{"link": link})
 			}
@@ -633,45 +561,23 @@ Keep the link private: it grants access to the machine until it expires.`,
 			return err
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "print the link as JSON")
-	return cmd
-}
-
-func (a *app) dispatchCommand() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:     "dispatch",
-		Short:   "Experimental dispatch commands",
-		GroupID: "access",
-		Long:    "Commands for the experimental dispatch endpoint (fixed pools and on-demand workers).\nEnable it with dispatchPOC in the configuration; see docs/dispatch-poc.md.",
-		Args:    noArgs,
-	}
-	cmd.AddCommand(a.dispatchPairCommand("pair"))
-	return cmd
-}
-
-func (a *app) legacyPairDispatchCommand() *cobra.Command {
-	cmd := a.dispatchPairCommand("pair-dispatch")
-	cmd.Hidden = true
-	cmd.GroupID = ""
-	// cobra's Deprecated notice goes to the output stream; keep stdout for the link.
-	runE := cmd.RunE
-	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		fmt.Fprintln(a.stderr, "Warning: 'pair-dispatch' is deprecated; use 't3fleet dispatch pair'.")
-		return runE(cmd, args)
+	if !open {
+		cmd.Flags().BoolVar(&asJSON, "json", false, "print the link as JSON")
 	}
 	return cmd
 }
 
-func (a *app) dispatchPairCommand(use string) *cobra.Command {
+func (a *app) fleetPairCommand() *cobra.Command {
 	var peerAccess string
 	var asJSON bool
 	cmd := &cobra.Command{
-		Use:   use,
-		Short: "Print the dispatch pairing link, or a Linked Environments code",
-		Long: `Print a T3 Code Desktop pairing link for the dispatch endpoint.
+		Use:     "pair",
+		GroupID: "daemon",
+		Short:   "Pair the fleet with T3 Code Desktop or another T3 server",
+		Long: `Print a T3 Code Desktop pairing link for the fleet.
 With --peer-access, print a Linked Environments code instead, for launching
-on-demand threads from another T3 server.`,
-		Example:           "  t3fleet dispatch pair\n  t3fleet dispatch pair --peer-access LEVEL",
+on-demand threads from another T3 server. Keep the link or code private.`,
+		Example:           "  t3fleet pair\n  t3fleet pair --peer-access approval-required",
 		Args:              noArgs,
 		ValidArgsFunction: cobra.NoFileCompletions,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -679,13 +585,13 @@ on-demand threads from another T3 server.`,
 			if err != nil {
 				return err
 			}
-			path, body := "/v1/dispatch-poc/pair", any(nil)
+			path, body := "/v1/dispatch/pair", any(nil)
 			if peerAccess != "" {
-				path, body = "/v1/dispatch-poc/pair-peer", map[string]string{"access": peerAccess}
+				path, body = "/v1/dispatch/pair-peer", map[string]string{"access": peerAccess}
 			}
 			data, err := d.call(cmd.Context(), http.MethodPost, path, body)
 			if hasDaemonCode(err, "not_found") {
-				return hinted("enable dispatchPOC in the configuration and restart 't3fleet serve'", "dispatch is not enabled on this daemon")
+				return hinted("check the daemon version and restart 't3fleet serve' using the same configuration", "the fleet pairing endpoint is unavailable")
 			}
 			if err != nil {
 				return err
@@ -712,21 +618,24 @@ on-demand threads from another T3 server.`,
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&peerAccess, "peer-access", "", "issue a Linked Environments code at this access level")
+	cmd.Flags().StringVar(&peerAccess, "peer-access", "", "issue a Linked Environments code: read-only, approval-required, auto-accept-edits, auto, or full-access")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the result as JSON")
 	return cmd
 }
 
 type statusReport struct {
-	Config       string         `json:"config"`
-	ConfigSource string         `json:"configSource"`
-	ConfigFound  bool           `json:"configFound"`
-	StateDir     string         `json:"stateDir"`
-	Listen       string         `json:"listen"`
-	Providers    []string       `json:"providers"`
-	Daemon       daemonStatus   `json:"daemon"`
-	Machines     map[string]int `json:"machines,omitempty"`
-	Total        int            `json:"total"`
+	FleetListen   string         `json:"fleetListen,omitempty"`
+	ProviderOrder []string       `json:"providerOrder,omitempty"`
+	MaxWorkers    int            `json:"maxWorkers,omitempty"`
+	Config        string         `json:"config"`
+	ConfigSource  string         `json:"configSource"`
+	ConfigFound   bool           `json:"configFound"`
+	StateDir      string         `json:"stateDir"`
+	Listen        string         `json:"listen"`
+	Providers     []string       `json:"providers"`
+	Daemon        daemonStatus   `json:"daemon"`
+	Machines      map[string]int `json:"machines,omitempty"`
+	Total         int            `json:"total"`
 }
 
 type daemonStatus struct {
@@ -740,7 +649,7 @@ func (a *app) statusCommand() *cobra.Command {
 		Use:               "status",
 		Short:             "Show the configuration, daemon and machine summary",
 		GroupID:           "daemon",
-		Long:              "Show which configuration is in use, whether the daemon answers, and how many\nmachines it manages by state. Exits with an error when the daemon is not running.",
+		Long:              "Show settings from the selected file, whether the daemon answers, and how many\nmachines it manages by state. Restart the daemon after editing the file. Exits with an error when the daemon is not running.",
 		Example:           "  t3fleet status\n  t3fleet status --json",
 		Args:              noArgs,
 		ValidArgsFunction: cobra.NoFileCompletions,
@@ -751,6 +660,9 @@ func (a *app) statusCommand() *cobra.Command {
 			}
 			path, source := a.configLocation()
 			report := statusReport{Config: path, ConfigSource: source, ConfigFound: !a.configMissing, StateDir: cfg.StateDir, Listen: cfg.Listen, Providers: configuredProviders(cfg)}
+			if d := cfg.Dispatch; d != nil && !a.configMissing {
+				report.FleetListen, report.ProviderOrder, report.MaxWorkers = d.Listen, d.ProviderOrder, d.MaxWorkerCount()
+			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 3*time.Second)
 			defer cancel()
 			if data, err := callAdmin(ctx, cfg.Listen, "", http.MethodGet, "/_info", nil); err == nil {
@@ -801,6 +713,9 @@ func (a *app) printStatus(r statusReport) {
 		providers = "none configured"
 	}
 	fmt.Fprintf(tw, "Providers:\t%s\n", providers)
+	if r.FleetListen != "" {
+		fmt.Fprintf(tw, "Fleet endpoint:\t%s\nPlacement order:\t%s\nWorker limit:\t%d\n", r.FleetListen, strings.Join(r.ProviderOrder, " -> "), r.MaxWorkers)
+	}
 	if r.Daemon.Running {
 		daemon := "running on " + r.Listen
 		if r.Daemon.Version != "" {

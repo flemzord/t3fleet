@@ -29,7 +29,7 @@ func TestLiveWorkerNativePeer(t *testing.T) {
 	worker := DispatchWorker{Resolve: func(context.Context) (Upstream, error) {
 		return Upstream{Endpoint: provider.Endpoint{URL: origin}, Token: service}, nil
 	}}
-	d := &dispatchPOC{timeout: 10 * time.Second}
+	d := &dispatcher{timeout: 10 * time.Second}
 	token, err := d.mintWorkerPeer(t.Context(), worker, "approval-required", "t3fleet worker test")
 	if err != nil {
 		t.Fatal(err)

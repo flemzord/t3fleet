@@ -16,24 +16,24 @@ type demandArchive struct {
 	Released bool
 }
 
-func (d *dispatchPOC) demandWriteLock(id string) *sync.Mutex {
+func (d *dispatcher) demandWriteLock(id string) *sync.Mutex {
 	h := sha256.Sum256([]byte(id))
 	return &d.demandWrites[int(h[0])%len(d.demandWrites)]
 }
 
-func (d *dispatchPOC) lockDemandWrite(id string) func() {
+func (d *dispatcher) lockDemandWrite(id string) func() {
 	lock := d.demandWriteLock(id)
 	lock.Lock()
 	return lock.Unlock
 }
 
-func (d *dispatchPOC) handlesDemandArchive(id string) bool {
+func (d *dispatcher) handlesDemandArchive(id string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.onDemand.Release != nil || d.disk.OnDemand.Routes[id].Archive != nil
 }
 
-func (d *dispatchPOC) demandRoute(id string) demandRoute {
+func (d *dispatcher) demandRoute(id string) demandRoute {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.disk.OnDemand.Routes[id]
@@ -92,7 +92,7 @@ func peerAlreadyArchived(reply map[string]any, id string) bool {
 // releaseArchivedWorker is called with the thread's write lock held. Persist
 // the native acknowledgement before deleting anything, and release capacity
 // only once the provider and the dispatcher have both committed the deletion.
-func (d *dispatchPOC) releaseArchivedWorker(ctx context.Context, id string, sequence uint64) (uint64, error) {
+func (d *dispatcher) releaseArchivedWorker(ctx context.Context, id string, sequence uint64) (uint64, error) {
 	d.mu.Lock()
 	route, ok := d.disk.OnDemand.Routes[id]
 	if !ok || !route.Ready {
@@ -144,7 +144,7 @@ func (d *dispatchPOC) releaseArchivedWorker(ctx context.Context, id string, sequ
 // and releases ready workers that their provider no longer has.
 func (p *Proxy) RunDispatchCleanup(ctx context.Context, report func(error)) {
 	d := p.dispatch
-	if d == nil || d.onDemand == nil || (d.onDemand.Release == nil && d.onDemand.Reclaim == nil) {
+	if d == nil || (d.onDemand.Release == nil && d.onDemand.Reclaim == nil && d.onDemand.Lost == nil) {
 		return
 	}
 	ticker := time.NewTicker(time.Minute)
@@ -157,7 +157,7 @@ func (p *Proxy) RunDispatchCleanup(ctx context.Context, report func(error)) {
 		if d.onDemand.Reclaim != nil {
 			d.reclaimDispatchLaunches(ctx, time.Now().UTC(), report)
 		}
-		if d.onDemand.Release != nil && d.onDemand.Lost != nil && !time.Now().Before(nextLostSweep) {
+		if d.onDemand.Lost != nil && !time.Now().Before(nextLostSweep) {
 			d.releaseLostWorkers(ctx, report)
 			nextLostSweep = time.Now().Add(lostWorkerSweepInterval)
 		}
@@ -169,7 +169,7 @@ func (p *Proxy) RunDispatchCleanup(ctx context.Context, report func(error)) {
 	}
 }
 
-func (d *dispatchPOC) retryDispatchArchives(ctx context.Context, report func(error)) {
+func (d *dispatcher) retryDispatchArchives(ctx context.Context, report func(error)) {
 	d.mu.Lock()
 	var ids []string
 	for id, route := range d.disk.OnDemand.Routes {
@@ -194,7 +194,7 @@ func (d *dispatchPOC) retryDispatchArchives(ctx context.Context, report func(err
 	}
 }
 
-func (d *dispatchPOC) archiveDemandRPC(ctx context.Context, id string, frame map[string]any, send func(map[string]any) error) error {
+func (d *dispatcher) archiveDemandRPC(ctx context.Context, id string, frame map[string]any, send func(map[string]any) error) error {
 	var sequence uint64
 	if d.demandRoute(id).Archive == nil {
 		worker, err := d.threadWorker(id)
@@ -235,7 +235,7 @@ func (d *dispatchPOC) archiveDemandRPC(ctx context.Context, id string, frame map
 
 // Recover an archive whose native reply was lost, or an explicit archive
 // request for a thread archived before worker cleanup was enabled.
-func (d *dispatchPOC) demandNativeArchived(ctx context.Context, worker DispatchWorker, id string) bool {
+func (d *dispatcher) demandNativeArchived(ctx context.Context, worker DispatchWorker, id string) bool {
 	frame := map[string]any{
 		"_tag": "Request", "id": "dispatch-verify-archive", "tag": "orchestration.getThreadProjection",
 		"headers": []any{}, "payload": map[string]any{"threadId": id},
@@ -252,7 +252,7 @@ func (d *dispatchPOC) demandNativeArchived(ctx context.Context, worker DispatchW
 	return err == nil && confirmed
 }
 
-func (d *dispatchPOC) archiveDemandPeer(w http.ResponseWriter, r *http.Request, request peerRequest, tool peerTool, id string, route demandRoute) {
+func (d *dispatcher) archiveDemandPeer(w http.ResponseWriter, r *http.Request, request peerRequest, tool peerTool, id string, route demandRoute) {
 	var sequence uint64
 	if route.Archive == nil {
 		worker, err := d.threadWorker(id)

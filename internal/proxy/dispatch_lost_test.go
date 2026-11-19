@@ -3,9 +3,9 @@ package proxy
 import (
 	"context"
 	"errors"
-	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/flemzord/t3fleet/internal/state"
 )
@@ -14,11 +14,11 @@ func TestLostReadyWorkerReleasesCapacity(t *testing.T) {
 	t.Parallel()
 	const lostID, liveID, archivedID, newID, projectID = "lost-thread", "live-thread", "archived-thread", "new-thread", "project"
 	coldFailure := errors.New("worker never became ready")
-	unconfirmed := errors.New("provider deletion not confirmed")
 	statusFailure := errors.New("provider status unknown")
-	var checked, released, provisioned []string
+	var checked, provisioned []string
 	lost := map[string]bool{}
-	var lostErr, releaseErr error
+	var lostErr error
+	var cancelSweep context.CancelFunc
 	s, err := state.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -31,14 +31,14 @@ func TestLostReadyWorkerReleasesCapacity(t *testing.T) {
 			provisioned = append(provisioned, key)
 			return DispatchWorker{}, "", coldFailure
 		},
-		Lookup:  func(string) (DispatchWorker, error) { return DispatchWorker{}, nil },
-		Reclaim: func(context.Context, string) error { t.Fatal("unexpected reclaim"); return nil },
-		Release: func(_ context.Context, key string) error {
-			released = append(released, key)
-			return releaseErr
-		},
+		Lookup: func(string) (DispatchWorker, error) { return DispatchWorker{}, nil },
+		// Default configuration keeps workers when their threads are archived.
+		Release: nil,
 		Lost: func(_ context.Context, key string) (bool, error) {
 			checked = append(checked, key)
+			if lost[key] && lostErr == nil && cancelSweep != nil {
+				cancelSweep()
+			}
 			return lost[key], lostErr
 		},
 	})
@@ -47,7 +47,7 @@ func TestLostReadyWorkerReleasesCapacity(t *testing.T) {
 	}
 	d := p.dispatch
 	ctx := t.Context()
-	d.disk.OnDemand.Project = &demandProject{ID: projectID, Title: "Project", Remote: "https://github.com/octocat/Hello-World.git"}
+	d.disk.OnDemand.Projects[projectID] = demandProject{ID: projectID, Title: "Project", Remote: "https://github.com/octocat/Hello-World.git"}
 	if err := d.store.Save(d.disk); err != nil {
 		t.Fatal(err)
 	}
@@ -89,42 +89,26 @@ func TestLostReadyWorkerReleasesCapacity(t *testing.T) {
 	lost["lost-key"] = true
 	d.releaseLostWorkers(ctx, mustNotReport)
 	unlock()
-	if d.demandRoute(lostID).Lost != nil || d.demandRoute(liveID).Lost != nil || len(released) != 0 {
+	if d.demandRoute(lostID).Lost != nil || d.demandRoute(liveID).Lost != nil {
 		t.Fatal("released a live or locked worker")
 	}
 	requireFull()
 
-	// Confirmed absence fences the route even when cleanup fails.
-	releaseErr = unconfirmed
-	reported = nil
-	d.releaseLostWorkers(ctx, func(err error) { reported = err })
-	if !errors.Is(reported, unconfirmed) {
-		t.Fatalf("expected the cleanup failure to be reported, got %v", reported)
+	// The real cleanup loop checks and releases missing workers even though
+	// delete-on-archive is disabled. Cancel after the first confirmed loss.
+	if d.handlesDemandArchive(liveID) {
+		t.Fatal("archiving a live worker would delete it")
 	}
-	if route := d.demandRoute(lostID); route.Lost == nil || route.Lost.Released {
-		t.Fatalf("lost route was not fenced before cleanup: %+v", route)
-	}
-	if err := attempt(lostID); !errors.Is(err, errWorkerLost) {
-		t.Fatalf("lost route could be relaunched: %v", err)
-	}
-	if _, err := d.threadWorker(lostID); !errors.Is(err, errWorkerLost) {
-		t.Fatalf("lost route still resolves a worker: %v", err)
-	}
-	requireFull()
-
-	// The retry does not ask the provider again, then frees the slot.
-	releaseErr = nil
-	before := len(checked)
-	d.releaseLostWorkers(ctx, mustNotReport)
+	sweep, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	cancelSweep = cancel
+	p.RunDispatchCleanup(sweep, mustNotReport)
 	route := d.demandRoute(lostID)
 	if route.Lost == nil || !route.Lost.Released || route.Peer == nil || route.Peer.WorkerToken != "" || route.Peer.Grant != "grant" {
 		t.Fatalf("lost route was not released cleanly: %+v", route)
 	}
-	if got := checked[before:]; !reflect.DeepEqual(got, []string{"live-key"}) {
-		t.Fatalf("unexpected provider checks after fencing: %v", got)
-	}
-	if !reflect.DeepEqual(released, []string{"lost-key", "lost-key"}) {
-		t.Fatalf("unexpected releases: %v", released)
+	if _, err := d.threadWorker(lostID); !errors.Is(err, errWorkerLost) {
+		t.Fatalf("lost route still resolves a worker: %v", err)
 	}
 	if err := attempt(newID); !errors.Is(err, coldFailure) || len(provisioned) != 1 {
 		t.Fatalf("freed capacity was not available: %v %v", err, provisioned)

@@ -19,7 +19,7 @@ func reclaimableLaunch(route demandRoute) bool {
 		(route.Abandoned == nil || !route.Abandoned.Released)
 }
 
-func (d *dispatchPOC) reclaimDispatchLaunches(ctx context.Context, now time.Time, report func(error)) {
+func (d *dispatcher) reclaimDispatchLaunches(ctx context.Context, now time.Time, report func(error)) {
 	d.mu.Lock()
 	var ids []string
 	for id, route := range d.disk.OnDemand.Routes {
@@ -45,7 +45,7 @@ func (d *dispatchPOC) reclaimDispatchLaunches(ctx context.Context, now time.Time
 }
 
 // The caller holds the same write lock as both launch entrypoints.
-func (d *dispatchPOC) reclaimDispatchLaunch(ctx context.Context, id string, now time.Time) error {
+func (d *dispatcher) reclaimDispatchLaunch(ctx context.Context, id string, now time.Time) error {
 	d.mu.Lock()
 	route, ok := d.disk.OnDemand.Routes[id]
 	if !ok || !reclaimableLaunch(route) || d.preparing[id] != nil {

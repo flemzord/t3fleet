@@ -21,7 +21,7 @@ const (
 
 // The worker must see a genuine peer session. Sending a thread launch through
 // the service account (or via the Desktop WebSocket) loses the link fence.
-func (d *dispatchPOC) mintWorkerPeer(ctx context.Context, worker DispatchWorker, access, label string) (string, error) {
+func (d *dispatcher) mintWorkerPeer(ctx context.Context, worker DispatchWorker, access, label string) (string, error) {
 	frame := map[string]any{
 		"_tag": "Request", "id": "peer-settings", "tag": "server.updateSettings", "headers": []any{},
 		"payload": map[string]any{"patch": map[string]any{"linkedEnvironmentsEnabled": true}},
@@ -38,7 +38,7 @@ func (d *dispatchPOC) mintWorkerPeer(ctx context.Context, worker DispatchWorker,
 	return d.mintNativeWorkerPeer(ctx, worker, access, label)
 }
 
-func (d *dispatchPOC) mintNativeWorkerPeer(parent context.Context, worker DispatchWorker, access, label string) (string, error) {
+func (d *dispatcher) mintNativeWorkerPeer(parent context.Context, worker DispatchWorker, access, label string) (string, error) {
 	ctx, stop := context.WithTimeout(parent, d.timeout)
 	defer stop()
 	up, ctx, cancel, err := resolveUpstream(ctx, d.timeout, worker.Resolve)
@@ -185,10 +185,7 @@ func workerPeerJSON(ctx context.Context, client *http.Client, up Upstream, token
 
 // Keep the worker's authorization and caller limits together. The session ID
 // belongs to the native worker MCP transport; never forward the controller ID.
-func (d *dispatchPOC) callWorkerPeer(parent context.Context, worker DispatchWorker, token string, headers http.Header, body []byte) ([]byte, error) {
-	if !validWorkerPeerCredential(token) {
-		return nil, errors.New("missing worker peer credential")
-	}
+func (d *dispatcher) callWorkerPeer(parent context.Context, worker DispatchWorker, token string, headers http.Header, body []byte) ([]byte, error) {
 	ctx, stop := context.WithTimeout(parent, d.timeout)
 	defer stop()
 	up, ctx, cancel, err := resolveUpstream(ctx, d.timeout, worker.Resolve)
@@ -197,6 +194,13 @@ func (d *dispatchPOC) callWorkerPeer(parent context.Context, worker DispatchWork
 	}
 	defer cancel()
 	defer closeEndpoint(up.Endpoint)
+	return callWorkerPeerAt(ctx, up, token, headers, body)
+}
+
+func callWorkerPeerAt(ctx context.Context, up Upstream, token string, headers http.Header, body []byte) ([]byte, error) {
+	if !validWorkerPeerCredential(token) {
+		return nil, errors.New("missing worker peer credential")
+	}
 	tr := transport(up.Endpoint)
 	tr.ResponseHeaderTimeout = 0 // A native tool may wait; the request context still has a deadline.
 	defer tr.CloseIdleConnections()

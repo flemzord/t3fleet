@@ -3,6 +3,8 @@
 , flakeRef ? if builtins.pathExists ../../.git then "git+file://${toString ../..}" else "path:${toString ../..}"
 , homeDirectory ? "/tmp/t3fleet-test"
 , listenPort ? "47730"
+, dispatchPort ? "47733"
+, darwinT3Binary ? "/opt/test/t3"
 , namespaceTokenFile ? "/run/user/1000/t3fleet token%file"
 }:
 
@@ -34,11 +36,27 @@ let
           environment.T3FLEET_TEST_ENV = extraValue;
           settings = {
             listen = "127.0.0.1:${listenPort}";
-            providers.boat = {
+            providers.primary = {
+              type = "boat";
+              template.snapshot = "test-template";
               apiKeyEnv = "T3FLEET_TEST_BOAT_KEY";
-              apiKeyFile = "${homeDirectory}/boat-key";
               organization = "t3fleet-test";
               baseURL = "http://127.0.0.1:1";
+            };
+            # A missing credential for an unused backup must not block the controller.
+            providers.reserve = {
+              type = "namespace";
+              tenantId = "test-tenant";
+              tokenFile = "${homeDirectory}/missing-namespace-token";
+              endpoint = "http://127.0.0.1:1";
+              template.image = "registered:example/worker";
+            };
+            dispatch = {
+              listen = "127.0.0.1:${dispatchPort}";
+              providerOrder = [ "primary" "reserve" ];
+              maxWorkers = 2;
+            } // pkgs.lib.optionalAttrs darwin {
+              t3Binary = darwinT3Binary;
             };
           };
         };
@@ -61,6 +79,8 @@ let
 in
 assert builtins.elem package cfg.home.packages;
 assert cfg.services.t3fleet.settings.stateDir == "${expectedState}/t3fleet";
+assert cfg.services.t3fleet.settings.dispatch.t3Binary ==
+  (if darwin then darwinT3Binary else "${fleet.packages.${system}.t3-server}/bin/t3");
 assert if darwin then job.ProgramArguments == command && job.RunAtLoad && job.KeepAlive
   && job.Umask == 63
   && job.StandardOutPath == logFile && job.StandardErrorPath == logFile

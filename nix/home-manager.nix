@@ -6,7 +6,11 @@ let
   home = config.home.homeDirectory;
   configHome = if host.isDarwin then "${home}/Library/Application Support" else config.xdg.configHome;
   settingsFormat = pkgs.formats.json { };
-  configFile = settingsFormat.generate "t3fleet-config.json" cfg.settings;
+  rendered = settingsFormat.generate "t3fleet-settings.json" cfg.settings;
+  configFile = pkgs.runCommand "t3fleet-config.json" { } ''
+    ${lib.getExe cfg.package} validate --config ${rendered}
+    cp ${rendered} "$out"
+  '';
   command = [ (lib.getExe cfg.package) "serve" "--config" (toString configFile) ];
   logFile = "${home}/Library/Logs/t3fleet.log";
   environment = cfg.environment // lib.optionalAttrs (cfg.namespaceTokenFile != null) {
@@ -29,10 +33,20 @@ in
     settings = lib.mkOption {
       inherit (settingsFormat) type;
       default = { };
+      apply = settings:
+        if host.isLinux && builtins.isAttrs (settings.dispatch or null)
+          && !(settings.dispatch ? t3Binary)
+        then settings // {
+          dispatch = settings.dispatch // {
+            t3Binary = lib.getExe self.packages.${host.system}.t3-server;
+          };
+        } else settings;
       description = ''
-        Fleet configuration as in examples/config.json. This JSON is written
-        to the Nix store. Use absolute string paths to credential files;
-        never put secrets or Nix path literals here.
+        On-demand fleet configuration as in examples/config.json. On Linux,
+        dispatch.t3Binary defaults to the T3 server pinned by this flake.
+        On macOS, set it to the absolute path of a matching T3 executable.
+        This JSON is written to the Nix store. Use absolute string paths
+        to credential files; never put secrets or Nix path literals here.
       '';
     };
 
@@ -60,9 +74,8 @@ in
 
   config = lib.mkIf cfg.enable {
     assertions = [ {
-      assertion = (cfg.settings.providers.boat or null) != null
-        || (cfg.settings.providers.namespace or null) != null;
-      message = "services.t3fleet.settings.providers must configure Boat or Namespace.";
+      assertion = builtins.isAttrs (cfg.settings.providers or null) && cfg.settings.providers != { };
+      message = "services.t3fleet.settings.providers must contain at least one named provider instance.";
     } {
       assertion = lib.all (name: builtins.match "[A-Za-z_][A-Za-z0-9_]*" name != null)
         (builtins.attrNames cfg.environment);

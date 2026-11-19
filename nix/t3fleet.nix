@@ -49,7 +49,7 @@ buildGo127Module {
   '';
 
   meta = {
-    description = "Manage remote T3 Code machines";
+    description = "Run T3 Code workers on demand";
     homepage = "https://github.com/flemzord/t3fleet";
     license = lib.licenses.mit;
     mainProgram = "t3fleet";

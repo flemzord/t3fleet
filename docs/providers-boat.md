@@ -5,10 +5,9 @@ The API contract was checked against the official OpenAPI schema on 2026-11-18.
 
 ## Authentication and account scope
 
-Supply an API key and an explicit organization to `boat.New`. Credentials stay in
-memory and are sent as an `Authorization: Bearer` header. The organization is sent
-as `X-Boat-Org`. If the organization is omitted, Boat uses the account's active
-wallet. The adapter never changes that wallet.
+Each named Boat instance requires an explicit `organization`. Its API requests send
+that organization as `X-Boat-Org` and its credential as an `Authorization: Bearer`
+header. Changing the credential source cannot change the configured wallet.
 
 The production base URL is `https://boat.dev/api/v1`. A custom base URL must use
 HTTPS, except for loopback HTTP servers used by tests. Redirects are refused so
@@ -74,8 +73,7 @@ descriptor and validate its version after the sandbox is running. Restoring a
 snapshot does not reinstall T3; boot services in the prepared image must start it.
 
 Boat's default auto-stop policy applies because the create request does not
-override `ttlSeconds`. Keep this provider policy separate from any future
-t3fleet's opt-in agent-aware [idle policy](idle-lifecycle.md).
+override `ttlSeconds`. This provider policy is independent of the fleet's archive cleanup.
 
 ## Private transport
 

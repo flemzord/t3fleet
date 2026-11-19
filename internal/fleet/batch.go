@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"slices"
 
 	"github.com/flemzord/t3fleet/pkg/provider"
 )
@@ -51,14 +50,22 @@ func (m *Manager) prepareBatch(ctx context.Context, req BatchRequest, dispatchOr
 	if req.Count < 1 || req.Count > MaxBatchCount || m.opts.Providers[req.Provider] == nil {
 		return Batch{}, ErrInvalid
 	}
-	if req.Template == (provider.Template{}) {
-		req.Template = m.opts.Templates[req.Provider]
+	shape, err := m.applyProviderDefaults(&req.CreateRequest)
+	if err != nil {
+		return Batch{}, fmt.Errorf("%w: invalid machine shape", ErrInvalid)
 	}
 	if req.Template == (provider.Template{}) {
 		return Batch{}, ErrInvalid
 	}
 	if req.Template.Source != "" && req.Template.Snapshot == "" {
 		return Batch{}, fmt.Errorf("%w: batch creation requires an explicit snapshot for a source machine", ErrInvalid)
+	}
+	var fallbacks []dispatchTarget
+	if len(dispatchOrder) > 0 {
+		fallbacks, err = m.dispatchTargets(dispatchOrder[1:])
+		if err != nil {
+			return Batch{}, err
+		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -107,10 +114,11 @@ func (m *Manager) prepareBatch(ctx context.Context, req BatchRequest, dispatchOr
 			return Batch{}, err
 		}
 		id := hex.EncodeToString(raw[:])
-		r := record{Machine: Machine{ID: id, Name: name, Provider: req.Provider, State: "planned"}, Template: req.Template, Size: req.Size}
+		host := m.opts.Providers[req.Provider]
+		r := record{Machine: Machine{ID: id, Name: name, Provider: req.Provider, State: "planned"}, Driver: host.Name(), Scope: providerScope(host), Template: req.Template, Size: req.Size, Shape: shape, Placement: providerPlacement(host)}
 		if len(dispatchOrder) > 0 {
-			r.InstallRuntime = req.Provider == "namespace"
-			r.DispatchFallbacks = slices.Clone(dispatchOrder[1:])
+			r.InstallRuntime = r.Driver == "namespace"
+			r.FallbackPlan = fallbacks
 		}
 		h, err := m.listen(r)
 		if err != nil {

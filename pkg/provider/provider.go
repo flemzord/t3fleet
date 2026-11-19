@@ -34,7 +34,23 @@ type Template struct {
 	Source   string `json:"source,omitempty"`
 }
 
+// Shape is the concrete hardware selected when a reservation is written.
+// An empty value means the adapter uses its native size (e.g. Boat's type).
+type Shape struct {
+	VirtualCPU   int32  `json:"virtualCPU"`
+	MemoryMB     int32  `json:"memoryMB"`
+	Architecture string `json:"architecture"`
+}
+
+// ShapeResolver is optional. Adapters with configurable CPU, memory and
+// architecture implement it so retries do not pick up later profile changes.
+type ShapeResolver interface {
+	ResolveShape(size string) (Shape, error)
+}
+
 type CreateRequest struct {
+	Placement   *Placement
+	Shape       Shape
 	Name        string
 	Template    Template
 	Size        string
@@ -67,6 +83,13 @@ type Endpoint struct {
 	Headers     http.Header
 	DialContext func(context.Context, string, string) (net.Conn, error)
 	Close       func() error
+}
+
+// PassiveConnector is optional. Implement only if obtaining the connection
+// cannot start, provision or activate a stopped or missing machine. A read
+// must use cached state when an adapter cannot guarantee this.
+type PassiveConnector interface {
+	ConnectPassive(context.Context, string, int) (Endpoint, error)
 }
 
 // Provider owns vendor-specific lifecycle and private transport. Methods must

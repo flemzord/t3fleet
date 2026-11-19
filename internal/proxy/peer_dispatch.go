@@ -38,7 +38,7 @@ func peerModeRank(mode string) int {
 	}
 }
 
-func (d *dispatchPOC) savePeerGrant(token, access string, expiresAt time.Time) error {
+func (d *dispatcher) savePeerGrant(token, access string, expiresAt time.Time) error {
 	claims, ok := parsePeerNativeSession(token)
 	if !ok || (access != "read-only" && peerModeRank(access) == 0) || !time.Now().Before(expiresAt) {
 		return errors.New("invalid native peer grant")
@@ -61,7 +61,7 @@ func (d *dispatchPOC) savePeerGrant(token, access string, expiresAt time.Time) e
 	return nil
 }
 
-func (d *dispatchPOC) hasPeerSession(sid string) bool {
+func (d *dispatcher) hasPeerSession(sid string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	for _, grant := range d.disk.PeerGrants {
@@ -84,8 +84,8 @@ type peerTool struct {
 	Arguments map[string]any `json:"arguments"`
 }
 
-func (d *dispatchPOC) controllerMCPRequest(r *http.Request, body []byte) (*http.Response, func(), error) {
-	up, ctx, cancel, err := resolveUpstream(r.Context(), d.timeout, d.workers[0].Resolve)
+func (d *dispatcher) controllerMCPRequest(r *http.Request, body []byte) (*http.Response, func(), error) {
+	up, ctx, cancel, err := resolveUpstream(r.Context(), d.timeout, d.onDemand.Controller.Resolve)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -119,7 +119,7 @@ func (d *dispatchPOC) controllerMCPRequest(r *http.Request, body []byte) (*http.
 	return res, func() { _ = res.Body.Close(); cleanup() }, nil
 }
 
-func (d *dispatchPOC) diskOrigin() string {
+func (d *dispatcher) diskOrigin() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.disk.Origin
@@ -142,7 +142,7 @@ func peerToolError(w http.ResponseWriter, id json.RawMessage, code, message stri
 	}})
 }
 
-func (d *dispatchPOC) servePeerMCP(w http.ResponseWriter, r *http.Request) {
+func (d *dispatcher) servePeerMCP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost || r.Header.Get("Origin") != "" || r.URL.RawQuery != "" {
 		fail(w, http.StatusForbidden, "unsupported peer MCP request")
 		return
@@ -208,7 +208,7 @@ func (d *dispatchPOC) servePeerMCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch tool.Name {
-	case "t3_environment_read", "t3_project_list", "orchestrator_capabilities":
+	case "t3_environment_read", "t3_project_list", "t3_project_read", "orchestrator_capabilities":
 		request.Params, _ = json.Marshal(tool)
 		body, _ := json.Marshal(request)
 		res, closeRes, err := d.controllerMCPRequest(r, body)
@@ -222,6 +222,17 @@ func (d *dispatchPOC) servePeerMCP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		d.writePeerToolResult(w, res.Body, tool.Name)
+	case "t3_project_clone", "t3_project_create":
+		if grant.Access != "full-access" || r.Header.Get("T3-Mode-Limit") != "full-access/default" {
+			peerToolError(w, request.ID, "capability_denied", "Registering a repository needs a full-access link and a full-access/default caller.")
+			return
+		}
+		result, err := d.peerProject(r.Context(), tool)
+		if err != nil {
+			peerToolError(w, request.ID, "invalid_request", err.Error())
+			return
+		}
+		d.writePeerResult(w, map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": map[string]any{"structuredContent": result}}, tool.Name)
 	case "t3_thread_launch":
 		d.launchPeerThread(w, r, request, tool, key, grant)
 	case "t3_thread_read", "t3_thread_wait", "t3_thread_send", "t3_thread_interrupt", "t3_thread_organize":
@@ -252,7 +263,7 @@ func peerResponseJSON(b []byte) []byte {
 	return workerPeerResponseJSON(b, "text/event-stream")
 }
 
-func (d *dispatchPOC) launchPeerThread(w http.ResponseWriter, r *http.Request, request peerRequest, tool peerTool, key string, grant peerGrant) {
+func (d *dispatcher) launchPeerThread(w http.ResponseWriter, r *http.Request, request peerRequest, tool peerTool, key string, grant peerGrant) {
 	failTool := func(code, message string) { peerToolError(w, request.ID, code, message) }
 	if grant.Access == "read-only" {
 		failTool("capability_denied", "This link is read-only.")
@@ -372,7 +383,7 @@ func (d *dispatchPOC) launchPeerThread(w http.ResponseWriter, r *http.Request, r
 	d.writePeerResult(w, res, tool.Name)
 }
 
-func (d *dispatchPOC) publishPeerThread(slot, id, nativeID string) error {
+func (d *dispatcher) publishPeerThread(slot, id, nativeID string) error {
 	if id == nativeID {
 		return nil
 	}
@@ -400,7 +411,7 @@ func (d *dispatchPOC) publishPeerThread(slot, id, nativeID string) error {
 	return nil
 }
 
-func (d *dispatchPOC) callPeerThread(w http.ResponseWriter, r *http.Request, request peerRequest, tool peerTool, key string, grant peerGrant) {
+func (d *dispatcher) callPeerThread(w http.ResponseWriter, r *http.Request, request peerRequest, tool peerTool, key string, grant peerGrant) {
 	id, _ := tool.Arguments["threadId"].(string)
 	if tool.Name != "t3_thread_read" && tool.Name != "t3_thread_wait" {
 		unlock := d.lockDemandWrite(id)
@@ -434,19 +445,42 @@ func (d *dispatchPOC) callPeerThread(w http.ResponseWriter, r *http.Request, req
 	d.writePeerResult(w, res, tool.Name)
 }
 
-func (d *dispatchPOC) sendPeerWorkerTool(r *http.Request, worker DispatchWorker, token string, request peerRequest, tool peerTool) (map[string]any, error) {
+func (d *dispatcher) sendPeerWorkerTool(r *http.Request, worker DispatchWorker, token string, request peerRequest, tool peerTool) (map[string]any, error) {
 	delete(tool.Arguments, "environmentId")
 	request.Params, _ = json.Marshal(tool)
 	body, _ := json.Marshal(request)
 	ctx, cancel := context.WithTimeout(r.Context(), d.timeout)
 	defer cancel()
-	data, err := d.callWorkerPeer(ctx, worker, token, r.Header, body)
+	up, ctx, stop, err := resolveUpstream(ctx, d.timeout, worker.Resolve)
+	if err != nil {
+		return nil, err
+	}
+	defer stop()
+	defer closeEndpoint(up.Endpoint)
+	data, err := callWorkerPeerAt(ctx, up, token, r.Header, body)
 	if err != nil {
 		return nil, err
 	}
 	var reply map[string]any
 	if json.Unmarshal(peerResponseJSON(data), &reply) != nil || reply["jsonrpc"] != "2.0" {
 		return nil, errors.New("invalid worker MCP result")
+	}
+	if result := peerStructuredResult(reply); result != nil {
+		id, _ := tool.Arguments["threadId"].(string)
+		routeID := id
+		if tool.Name == "t3_thread_launch" {
+			id, _ = result["threadId"].(string)
+			slot, _ := tool.Arguments["clientRequestId"].(string)
+			d.mu.Lock()
+			routeID = d.disk.OnDemand.PeerThreads[slot]
+			d.mu.Unlock()
+			if routeID == "" {
+				routeID = slot
+			}
+		}
+		if err := d.observeThreadListing(ctx, up, routeID, id, tool.Name == "t3_thread_launch"); err != nil {
+			return nil, err
+		}
 	}
 	return reply, nil
 }
@@ -460,7 +494,7 @@ func peerStructuredResult(reply map[string]any) map[string]any {
 	return data
 }
 
-func (d *dispatchPOC) writePeerToolResult(w http.ResponseWriter, body io.Reader, tool string) {
+func (d *dispatcher) writePeerToolResult(w http.ResponseWriter, body io.Reader, tool string) {
 	data, err := io.ReadAll(io.LimitReader(body, maxJSON+1))
 	var reply map[string]any
 	if err != nil || len(data) > maxJSON || json.Unmarshal(peerResponseJSON(data), &reply) != nil || reply == nil {
@@ -470,19 +504,27 @@ func (d *dispatchPOC) writePeerToolResult(w http.ResponseWriter, body io.Reader,
 	d.writePeerResult(w, reply, tool)
 }
 
-func (d *dispatchPOC) peerModel() string {
+func (d *dispatcher) peerModel() string {
 	if d.onDemand.Model != "" {
 		return d.onDemand.Model
 	}
 	return "gpt-5.4"
 }
 
-func (d *dispatchPOC) writePeerResult(w http.ResponseWriter, reply map[string]any, tool string) {
+func (d *dispatcher) writePeerResult(w http.ResponseWriter, reply map[string]any, tool string) {
 	if data := peerStructuredResult(reply); data != nil {
 		d.mu.Lock()
 		env := d.disk.EnvironmentID
 		d.mu.Unlock()
 		switch tool {
+		case "t3_project_list":
+			projects, _ := data["projects"].([]any)
+			for _, item := range projects {
+				project, _ := item.(map[string]any)
+				d.decorateProject(project)
+			}
+		case "t3_project_read", "t3_project_create":
+			d.decorateProject(data)
 		case "t3_environment_read":
 			data["environmentId"], data["label"] = env, dispatchLabel
 		case "orchestrator_capabilities":

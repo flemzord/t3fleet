@@ -168,15 +168,15 @@ func TestLiveLinkedDispatch(t *testing.T) {
 	}
 	var pairing struct{ Credential string }
 	if err := workerPeerJSON(ctx, http.DefaultClient, publicUp, desktop, http.MethodPost, "/api/auth/pairing-token",
-		map[string]string{"purpose": "peer-link", "access": "approval-required"}, &pairing); err != nil || pairing.Credential == "" {
+		map[string]string{"purpose": "peer-link", "access": "full-access"}, &pairing); err != nil || pairing.Credential == "" {
 		t.Fatalf("could not mint gateway pairing code: %v", err)
 	}
 	sourceWS := newDispatchTestClient(t, ctx, sourceOrigin, sourceBearer)
 	defer sourceWS.conn.CloseNow()
 	link := sourceWS.rpc("peerLinks.link", map[string]any{
-		"url": origin, "pairingCode": pairing.Credential, "access": "approval-required",
+		"url": origin, "pairingCode": pairing.Credential, "access": "full-access",
 	})
-	if link["environmentId"] != descriptor["environmentId"] || link["access"] != "approval-required" {
+	if link["environmentId"] != descriptor["environmentId"] || link["access"] != "full-access" {
 		t.Fatal("the source linked an unexpected environment or access level")
 	}
 	sourceToken, err := gateway.dispatch.mintWorkerPeer(ctx, source, "full-access", "test source CLI")
@@ -222,14 +222,46 @@ func TestLiveLinkedDispatch(t *testing.T) {
 		}
 		return got
 	}
+	// The source brings a missing project using the same two native calls it
+	// uses with another T3 server. Neither call may allocate a worker.
+	cloned := remote("t3_project_clone", map[string]any{"repository": "other-org/Hello-World", "destinationPath": "~/hello"})
+	if cloned["cwd"] == project["cwd"] || cloned["remoteUrl"] != "https://github.com/other-org/Hello-World.git" {
+		t.Fatalf("distinct linked project was not prepared: %#v", cloned)
+	}
+	created := remote("t3_project_create", map[string]any{"workspaceRoot": cloned["cwd"], "title": "Other"})
+	otherProject, _ := created["id"].(string)
+	if otherProject == "" || otherProject == "demo" {
+		t.Fatal("missing second project")
+	}
+	listed := remote("t3_project_list", map[string]any{})
+	projectRows, _ := listed["projects"].([]any)
+	identities := map[string]any{}
+	for _, v := range projectRows {
+		row := v.(map[string]any)
+		identity, _ := row["repositoryIdentity"].(map[string]any)
+		identities[row["id"].(string)] = identity["canonicalKey"]
+	}
+	if identities["demo"] != "github.com/octocat/hello-world" || identities[otherProject] != "github.com/other-org/hello-world" {
+		t.Fatalf("native list did not preserve project identities: %#v", identities)
+	}
+	mu.Lock()
+	cold := attempts == 0
+	mu.Unlock()
+	if !cold {
+		t.Fatal("project registration allocated a worker")
+	}
 	launch := func(key string) string {
 		t.Helper()
+		projectID := "demo"
+		if key == "second-linked-canary" {
+			projectID = otherProject
+		}
 		got := remote("t3_thread_launch", map[string]any{
-			"projectId": "demo", "title": key, "message": "First replay turn", "clientRequestId": key,
+			"projectId": projectID, "title": key, "message": "First replay turn", "clientRequestId": key,
 			"runtimeMode": "approval-required", "workspaceStrategy": map[string]any{"type": "root"},
 		})
 		id, _ := got["threadId"].(string)
-		if id == "" || got["link"] == nil {
+		if id == "" || got["link"] == nil || got["projectId"] != projectID {
 			t.Fatalf("launch of %s did not return a thread and link: %#v", key, got)
 		}
 		return id
@@ -261,7 +293,7 @@ func TestLiveLinkedDispatch(t *testing.T) {
 		}
 		thread := threads[0].(map[string]any)
 		found = append(found, thread["id"].(string))
-		if fence, _ := thread["linkOrigin"].(map[string]any); fence["access"] != "approval-required" || fence["sessionId"] == "" {
+		if fence, _ := thread["linkOrigin"].(map[string]any); fence["access"] != "full-access" || fence["sessionId"] == "" {
 			t.Fatalf("%s did not persist the native peer fence", worker.worker.ID)
 		}
 	}
@@ -296,6 +328,9 @@ func TestLiveLinkedDispatch(t *testing.T) {
 	other, err := gateway.dispatch.mintNativeWorkerPeer(ctx, public, "approval-required", "unrelated canary peer")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, failure := tool(public, other, "t3_project_clone", map[string]any{"repository": "other-org/private", "destinationPath": "~/private"}); failure == "" {
+		t.Fatal("a restricted link could register a repository")
 	}
 	if _, failure := tool(public, other, "t3_thread_send", map[string]any{"threadId": first, "message": "Must not be sent"}); failure == "" {
 		t.Fatal("another linked session mutated the first session's thread")

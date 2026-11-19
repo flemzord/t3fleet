@@ -76,7 +76,7 @@ type ticket struct {
 type Proxy struct {
 	cfg      Config
 	origin   *url.URL
-	dispatch *dispatchPOC
+	dispatch *dispatcher
 	mu       sync.Mutex
 	pairing  credential
 	tickets  map[string]ticket
@@ -142,7 +142,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
-	if p.dispatch != nil && p.dispatch.onDemand != nil {
+	if p.dispatch != nil {
 		if p.dispatch.servePeerOAuth(p, w, r) {
 			return
 		}

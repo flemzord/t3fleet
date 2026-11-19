@@ -10,6 +10,7 @@ connection through Namespace's authenticated TLS gateway. It does not spawn
 
 | Field | Default | Purpose |
 | --- | --- | --- |
+| `TenantID` | Required in fleet configuration | Namespace tenant expected in every issued credential. |
 | `Endpoint` | `https://private-api.iad.namespaceapis.com` | Devbox control plane; independent of machine placement. |
 | `Site` | `iad` | Site used when creating a Devbox from an image. |
 | `VirtualCPU` | `4` | CPU count when a request has no named size. |
@@ -35,8 +36,9 @@ shared user session. On macOS that file is
 `os.UserConfigDir()/ns/token.json`. A session is exchanged for a short-lived
 tenant token by the SDK. The session file is not a raw bearer token.
 
-For unattended operation, prefer a workload identity or an explicitly scoped
-Namespace token. `auth.LoadDefaults()` checks `NSC_TOKEN_FILE`, then
+Set `providers.<name>.tenantId` to the Namespace tenant that owns the workers. Each issued token must identify that tenant before the adapter uses it for an API or SSH connection. Rotating credentials for the same tenant is supported. A credential for another tenant is rejected before sending a request; it cannot make existing workers appear to be missing.
+
+Use `providers.<name>.tokenFile` to select the credential source. Without it, the daemon uses the SDK’s default selection. For unattended operation, prefer a workload identity or an explicitly scoped Namespace token. `auth.LoadDefaults()` checks `NSC_TOKEN_FILE`, then
 `/var/run/nsc/token.json`, then the user credential. Secrets stay outside
 configuration committed to this repository. The adapter neither prints API
 response bodies on errors nor writes returned SSH private keys to disk.
@@ -66,9 +68,7 @@ Namespace Devbox API exposes list, restore, and fork, but no explicit
 `provider.Snapshotter`. A capture-on-stop workflow needs live confirmation
 before an operator treats it as a guarantee.
 
-For [on-demand dispatch](dispatch-poc.md#fall-back-to-namespace), Namespace must
-use an image. If the image includes Nix but lacks the runtime hook, t3fleet can
-install the pinned runtime on first use.
+For [on-demand dispatch](dispatch.md), configure an image or a source with an explicit completed snapshot. If the machine includes Nix but lacks the runtime hook, t3fleet can install the pinned runtime on first use.
 
 ## Lifecycle and retry behavior
 

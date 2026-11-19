@@ -2,12 +2,15 @@ package namespace
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -17,17 +20,27 @@ import (
 	"github.com/flemzord/t3fleet/pkg/provider"
 )
 
+// Synthetic Namespace token for testing account routing; the loopback
+// server substitutes for Namespace authentication.
+func fixtureToken(tenant, actor string) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256"}`))
+	payload, _ := json.Marshal(map[string]string{"tenant_id": tenant, "actor_id": actor})
+	return "nsct_" + header + "." + base64.RawURLEncoding.EncodeToString(payload) + ".test"
+}
+
+const testTenant = "test-tenant"
+
 type testToken struct{}
 
 func (testToken) IssueToken(context.Context, time.Duration, bool) (string, error) {
-	return "test-token", nil
+	return fixtureToken(testTenant, "tester"), nil
 }
 
 func newTestClient(t *testing.T, handler http.HandlerFunc, dial func(context.Context, SSHAuth) (Connection, error)) *Client {
 	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	client, err := New(Config{Endpoint: server.URL, TokenSource: testToken{}, DialSSH: dial})
+	client, err := New(Config{TenantID: testTenant, Endpoint: server.URL, TokenSource: testToken{}, DialSSH: dial})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +67,7 @@ func TestCreateAndReconcileOperation(t *testing.T) {
 	var stored map[string]any
 	creates := 0
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer test-token" {
+		if r.Header.Get("Authorization") != "Bearer "+fixtureToken(testTenant, "tester") {
 			t.Error("missing bearer")
 		}
 		if r.Header.Get("Connect-Protocol-Version") != "1" {
@@ -107,6 +120,54 @@ func TestCreateAndReconcileOperation(t *testing.T) {
 	req.OperationID = "other"
 	if _, err := client.Create(t.Context(), req); err == nil {
 		t.Fatal("adopted another operation's Devbox")
+	}
+}
+
+func TestCreateUsesReservedShapeAfterChangingProfile(t *testing.T) {
+	want := provider.Shape{VirtualCPU: 12, MemoryMB: 24576, Architecture: "arm64"}
+	first, err := New(Config{TenantID: testTenant, VirtualCPU: want.VirtualCPU, MemoryMB: want.MemoryMB, Architecture: want.Architecture, TokenSource: testToken{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := first.ResolveShape("")
+	if err != nil || reserved != want {
+		t.Fatalf("custom profile resolved to %v, %v", reserved, err)
+	}
+	rotatedToken := filepath.Join(t.TempDir(), "token.json")
+	if err := os.WriteFile(rotatedToken, []byte(`{"bearer_token":"`+fixtureToken(testTenant, "instance")+`"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NSC_TOKEN_FILE", filepath.Join(t.TempDir(), "not-selected"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+fixtureToken(testTenant, "instance") {
+			t.Error("wrong Namespace credential")
+		}
+		switch strings.TrimPrefix(r.URL.Path, servicePath) {
+		case "Fetch":
+			w.WriteHeader(http.StatusNotFound)
+		case "Create":
+			s := body(t, r)["instanceShape"].(map[string]any)
+			if s["virtualCpu"] != float64(want.VirtualCPU) || s["memoryMegabytes"] != float64(want.MemoryMB) || s["machineArch"] != want.Architecture {
+				t.Errorf("used current defaults instead of the reservation: %v", s)
+			}
+			reply(t, w, map[string]any{"devbox": map[string]string{"id": "devbox-1", "name": "worker"}, "instanceId": "inst-1"})
+		default:
+			t.Errorf("unexpected Namespace method %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	next, err := New(Config{TenantID: testTenant, Endpoint: srv.URL, VirtualCPU: 16, MemoryMB: 32768, Architecture: "amd64", TokenFile: rotatedToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := provider.CreateRequest{Name: "worker", OperationID: "op", Shape: reserved, Template: provider.Template{Image: "registered:org/base"}}
+	if _, err = next.Create(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	request.Shape.MemoryMB = -1
+	if _, err = next.Create(t.Context(), request); err == nil {
+		t.Fatal("invalid reserved shape accepted")
 	}
 }
 
@@ -492,7 +553,7 @@ func TestCreateFallbackRequiresConfirmedNoAllocation(t *testing.T) {
 				client.config.TokenSource = tokenFunc(func(context.Context, time.Duration, bool) (string, error) {
 					calls++
 					if calls == 1 {
-						return "test-token", nil // allow the initial lookup
+						return fixtureToken(testTenant, "tester"), nil // allow the initial lookup
 					}
 					return "", errors.New("test token unavailable")
 				})
@@ -503,5 +564,65 @@ func TestCreateFallbackRequiresConfirmedNoAllocation(t *testing.T) {
 				t.Fatalf("unexpected create result: %+v, %v", m, err)
 			}
 		})
+	}
+}
+
+func TestTenantPinRejectsReplacedTokenBeforeAnyDevboxRequest(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "token.json")
+	var seen int
+	var lastToken string
+	var rotateOnFetch bool
+	write := func(token string) error {
+		b, err := json.Marshal(map[string]string{"bearer_token": token})
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(file, b, 0600)
+	}
+	// Rotate between the ownership check and create. The second request must
+	// re-check the token from the same file instead of trusting its location.
+	foreign := fixtureToken("another-tenant", "user")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen++
+		lastToken = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if rotateOnFetch && strings.HasSuffix(r.URL.Path, "/Fetch") {
+			if err := write(foreign); err != nil {
+				t.Error(err)
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	client, err := New(Config{TenantID: testTenant, Endpoint: srv.URL, TokenFile: file})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range []string{"malformed-token", fixtureToken("", "user"), foreign} {
+		if err := write(token); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := client.Get(t.Context(), "id"); err == nil || errors.Is(err, provider.ErrNotFound) || strings.Contains(err.Error(), token) {
+			t.Fatalf("incorrect credential was sent, reported as absence, or exposed: %v", err)
+		}
+	}
+	if seen != 0 {
+		t.Fatal("foreign or malformed credentials reached Namespace")
+	}
+	for _, actor := range []string{"old-local-key", "new-local-key"} {
+		token := fixtureToken(testTenant, actor)
+		if err := write(token); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := client.Get(t.Context(), "id"); !errors.Is(err, provider.ErrNotFound) {
+			t.Fatalf("correct tenant was not contacted: %v", err)
+		}
+		if lastToken != token {
+			t.Fatal("credential rotation in same tenant was ignored")
+		}
+	}
+	rotateOnFetch = true
+	_, err = client.Create(t.Context(), provider.CreateRequest{Name: "worker", OperationID: "op", Template: provider.Template{Image: "base"}})
+	if !errors.Is(err, provider.ErrCreateRejected) || seen != 3 {
+		t.Fatalf("tenant changed between fetch and create: issued %d calls, error %v", seen, err)
 	}
 }

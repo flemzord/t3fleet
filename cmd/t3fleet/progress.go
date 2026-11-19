@@ -9,8 +9,6 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/flemzord/t3fleet/internal/config"
-	"github.com/flemzord/t3fleet/internal/fleet"
 	"github.com/flemzord/t3fleet/pkg/provider"
 )
 
@@ -20,28 +18,12 @@ type progressMessages struct {
 	failure string
 }
 
-func operationProgress(cfg config.Config, command string, body any) progressMessages {
-	switch command {
-	case "create":
-		req := body.(fleet.CreateRequest)
-		cloud := map[string]string{"boat": "Boat", "namespace": "Namespace"}[req.Provider]
-		if cloud == "" {
-			cloud = "cloud"
-		}
-		template := req.Template
-		if template == (provider.Template{}) {
-			template = cfg.Templates[req.Provider]
-		}
-		base := "prepared template"
-		if template.Snapshot != "" || template.Source != "" {
-			base = "snapshot"
-		} else if template.Image != "" {
-			base = "image"
-		}
-		return progressMessages{"Creating " + cloud + " machine from " + base + "; waiting for T3 readiness", "Machine ready", "Creation did not complete"}
-	default:
-		return progressMessages{}
+func createProgress(instance string, template provider.Template) progressMessages {
+	base := "snapshot"
+	if template.Image != "" {
+		base = "image"
 	}
+	return progressMessages{"Creating machine on " + instance + " from " + base + "; waiting for T3 readiness", "Machine ready", "Creation did not complete"}
 }
 
 // machineProgress names the machine an operation acts on, so a long wait

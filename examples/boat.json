@@ -1,0 +1,19 @@
+{
+  "providers": {
+    "primary": {
+      "type": "boat",
+      "organization": "YOUR_BOAT_ORGANIZATION",
+      "apiKeyEnv": "BOAT_API_KEY",
+      "template": {
+        "snapshot": "YOUR_READY_BOAT_SNAPSHOT"
+      }
+    }
+  },
+  "dispatch": {
+    "listen": "127.0.0.1:47733",
+    "t3Binary": "/absolute/path/to/t3",
+    "providerOrder": [
+      "primary"
+    ]
+  }
+}

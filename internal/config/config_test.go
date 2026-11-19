@@ -1,12 +1,15 @@
 package config
 
 import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/flemzord/t3fleet/pkg/provider"
 )
@@ -20,150 +23,229 @@ func writeConfig(t *testing.T, content string) string {
 	return p
 }
 
-func TestLoadDefaultsAndStrictJSON(t *testing.T) {
+const fixture = `{"providers":{"fast":{"type":"boat","organization":"fast-org","template":{"snapshot":"golden"},"size":"large","apiKeyEnv":"FAST_TOKEN"},"burst":{"type":"boat","organization":"burst-org","template":{"snapshot":"burst-base"},"size":"xlarge","apiKeyEnv":"BURST_TOKEN"},"eu":{"type":"namespace","tenantId":"acme","template":{"image":"registered:acme/t3"},"virtualCPU":12,"memoryMB":32768,"architecture":"arm64","tokenFile":"/run/creds/namespace"}},"dispatch":{"listen":"127.0.0.1:47733","t3Binary":"/opt/t3","providerOrder":["burst","fast","eu"]}}`
+
+func TestLoadNamedProviders(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	cfg, err := Load(writeConfig(t, `{"providers":{"boat":{"apiKeyEnv":"MY_BOAT_TOKEN"}},"templates":{"boat":{"snapshot":"golden"}}}`))
+	cfg, err := Load(writeConfig(t, fixture))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Listen != "127.0.0.1:47730" || cfg.ExpectedVersion != DefaultVersion || cfg.Templates["boat"].Snapshot != "golden" {
-		t.Fatalf("unexpected config: %#v", cfg)
+	if cfg.Listen != "127.0.0.1:47730" || cfg.ExpectedVersion != DefaultVersion || cfg.Providers["eu"].Type != "namespace" || cfg.Providers["eu"].VirtualCPU != 12 || cfg.Providers["eu"].TokenFile != "/run/creds/namespace" || cfg.Dispatch.MaxWorkerCount() != 8 || !slices.Equal(cfg.Dispatch.ProviderOrder, []string{"burst", "fast", "eu"}) {
+		t.Fatalf("configuration not preserved: %+v", cfg)
 	}
-	for _, input := range []string{`{"secret":"never-print-this"}`, `{"providers":{"boat":{"apiKey":"never-print-this"}}}`, `{} {}`, `{"listen":`, `null`, `[]`} {
-		_, err := Load(writeConfig(t, input))
-		if err == nil {
-			t.Fatalf("accepted invalid config %q", input)
-		}
-		if strings.Contains(err.Error(), "never-print-this") {
-			t.Fatal("configuration error leaked input")
-		}
+	if cfg.ProviderTemplates()["fast"].Snapshot != "golden" || cfg.ProviderTemplates()["burst"].Snapshot != "burst-base" || cfg.ProviderSizes()["burst"] != "xlarge" || cfg.ProviderSizes()["fast"] != "large" {
+		t.Fatal("allocation profile lost")
 	}
-}
-
-func TestValidateLoopbackAndTemplates(t *testing.T) {
-	tests := []struct {
-		name   string
-		modify func(*Config)
-	}{
-		{"public-listen", func(c *Config) { c.Listen = "0.0.0.0:47730" }},
-		{"dns-listen", func(c *Config) { c.Listen = "localhost:47730" }},
-		{"missing-port", func(c *Config) { c.Listen = "127.0.0.1" }},
-		{"public-machine-host", func(c *Config) { c.MachineHost = "0.0.0.0" }},
-		{"relative-state", func(c *Config) { c.StateDir = "state" }},
-		{"root-state", func(c *Config) { c.StateDir = "/" }},
-		{"missing-version", func(c *Config) { c.ExpectedVersion = "" }},
-		{"unknown-provider", func(c *Config) { c.Templates["other"] = c.Templates["boat"] }},
-		{"conflicting-template", func(c *Config) {
-			v := c.Templates["boat"]
-			v.Image = "image"
-			v.Snapshot = "snapshot"
-			c.Templates["boat"] = v
-		}},
-		{"namespace-snapshot-without-source", func(c *Config) { v := c.Templates["boat"]; v.Snapshot = "snap"; c.Templates["namespace"] = v }},
-		{"relative-key", func(c *Config) { c.Providers.Boat = &Boat{APIKeyFile: "key"} }},
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := Default()
-			tt.modify(&c)
-			if c.Validate() == nil {
-				t.Fatal("invalid config accepted")
-			}
-		})
+	if _, err := Load(writeConfig(t, string(encoded))); err != nil {
+		t.Fatalf("serialized configuration cannot be loaded: %v", err)
 	}
 }
 
-func TestDispatchOnDemandConfiguration(t *testing.T) {
-	base := func() Config {
-		cfg := Default()
-		cfg.DispatchPOC = &DispatchPOC{
-			Listen:   "127.0.0.1:47731",
-			OnDemand: &DispatchOnDemand{T3Binary: "/opt/t3/bin/t3"},
-		}
-		cfg.Providers.Boat = &Boat{}
-		cfg.Templates["boat"] = provider.Template{Snapshot: "golden"}
-		return cfg
-	}
-	cfg := base()
-	if err := cfg.Validate(); err != nil || cfg.DispatchPOC.OnDemand.MaxWorkerCount() != 8 {
-		t.Fatalf("zero-worker on-demand config rejected or wrong limit: %v", err)
-	}
-	largePool := base()
-	largePool.DispatchPOC.OnDemand.MaxWorkers = 100
-	if err := largePool.Validate(); err != nil || largePool.DispatchPOC.OnDemand.MaxWorkerCount() != 100 {
-		t.Fatalf("explicit dispatch capacity of 100 rejected or changed: %v", err)
-	}
-	cfg.DispatchPOC.OnDemand.NamespaceFallback = true
-	cfg.Providers.Namespace = &Namespace{}
-	cfg.Templates["namespace"] = provider.Template{Image: "registered:example-org/t3-worker"}
-	if err := cfg.Validate(); err != nil || !slices.Equal(cfg.DispatchPOC.OnDemand.OrderedProviders(), []string{"boat", "namespace"}) {
-		t.Fatalf("legacy Namespace fallback configuration rejected: %v", err)
-	}
-	cfg.DispatchPOC.OnDemand.NamespaceFallback = false
-	for _, order := range [][]string{{"namespace", "boat"}, {"boat", "namespace"}, {"namespace"}} {
-		cfg.DispatchPOC.OnDemand.ProviderOrder = order
-		if len(order) == 1 {
-			cfg.Providers.Boat = nil
-			delete(cfg.Templates, "boat")
-		}
-		if err := cfg.Validate(); err != nil || !slices.Equal(cfg.DispatchPOC.OnDemand.OrderedProviders(), order) {
-			t.Fatalf("provider order %v rejected: %v", order, err)
-		}
-	}
-	tests := []struct {
-		name   string
-		modify func(*Config)
-	}{
-		{"empty provider order", func(c *Config) { c.DispatchPOC.OnDemand.ProviderOrder = []string{} }},
-		{"duplicate provider", func(c *Config) { c.DispatchPOC.OnDemand.ProviderOrder = []string{"boat", "boat"} }},
-		{"unknown provider", func(c *Config) { c.DispatchPOC.OnDemand.ProviderOrder = []string{"boat", "other"} }},
-		{"unconfigured provider", func(c *Config) { c.DispatchPOC.OnDemand.ProviderOrder = []string{"boat", "namespace"} }},
-		{"both policy formats", func(c *Config) {
-			c.DispatchPOC.OnDemand.ProviderOrder = []string{"boat"}
-			c.DispatchPOC.OnDemand.NamespaceFallback = true
-		}},
-		{"fallback without provider", func(c *Config) { c.DispatchPOC.OnDemand.NamespaceFallback = true }},
-		{"fallback without image", func(c *Config) {
-			c.DispatchPOC.OnDemand.NamespaceFallback = true
-			c.Providers.Namespace = &Namespace{}
-		}},
-		{"mixed with fixed workers", func(c *Config) { c.DispatchPOC.Workers = []string{"a", "b"} }},
-		{"no Boat config", func(c *Config) { c.Providers.Boat = nil }},
-		{"no Boat template", func(c *Config) { delete(c.Templates, "boat") }},
-		{"relative binary", func(c *Config) { c.DispatchPOC.OnDemand.T3Binary = "t3" }},
-		{"negative capacity", func(c *Config) { c.DispatchPOC.OnDemand.MaxWorkers = -1 }},
-		{"idle management", func(c *Config) { c.IdleTimeout = "2m" }},
-	}
-	for _, tc := range tests {
+func TestRejectInvalidConfiguration(t *testing.T) {
+	for _, tc := range []struct{ name, old, new string }{
+		{"missing wallet", `"organization":"fast-org",`, ""},
+		{"missing tenant", `"tenantId":"acme",`, ""},
+		{"invalid wallet", `"organization":"fast-org"`, `"organization":" "`},
+		{"invalid tenant", `"tenantId":"acme"`, `"tenantId":" "`},
+		{"duplicate name", `"fast":{`, `"fast":{},"fast":{`},
+		{"alias without driver", `"type":"boat",`, ""},
+		{"unrecognized driver", `"type":"boat"`, `"type":"custom"`},
+		{"wrong driver field even when zero", `"type":"boat"`, `"type":"boat","virtualCPU":0`},
+		{"unknown nested template field", `"snapshot":"golden"`, `"snapshot":"golden","typo":true`},
+		{"empty alias", `"burst":{`, `"":{`},
+		{"dangling reference", `["burst","fast","eu"]`, `["missing"]`},
+		{"repeated reference", `["burst","fast","eu"]`, `["fast","fast"]`},
+		{"empty order", `["burst","fast","eu"]`, `[]`},
+		{"missing order", `,"providerOrder":["burst","fast","eu"]`, ""},
+		{"no dispatch", `,"dispatch":`, `,"oldDispatch":`},
+		{"public dispatch", `127.0.0.1:47733`, `0.0.0.0:47733`},
+		{"admin collision", `127.0.0.1:47733`, `127.0.0.1:47730`},
+		{"invalid admin", `"dispatch":{`, `"listen":"0.0.0.0:1234","dispatch":{`},
+		{"relative controller", `"/opt/t3"`, `"t3"`},
+		{"invalid model", `"t3Binary":`, `"model":"wrong model","t3Binary":`},
+		{"negative capacity", `"t3Binary":`, `"maxWorkers":-1,"t3Binary":`},
+		{"unknown Boat size", `"large"`, `"xl"`},
+		{"unknown Namespace size", `"virtualCPU":12,"memoryMB":32768`, `"size":"large"`},
+		{"Namespace size and custom CPU", `"virtualCPU":12`, `"size":"l","virtualCPU":12`},
+		{"negative RAM", `"memoryMB":32768`, `"memoryMB":-1`},
+		{"Namespace architecture", `"arm64"`, `"sparc"`},
+		{"unusable image", `"registered:acme/t3"`, `"registered:"`},
+		{"empty template", `"snapshot":"golden"`, ""},
+		{"conflicting template", `"snapshot":"golden"`, `"snapshot":"golden","image":"image"`},
+		{"Namespace source without snapshot", `"image":"registered:acme/t3"`, `"source":"base"`},
+		{"Namespace snapshot without source", `"image":"registered:acme/t3"`, `"snapshot":"id"`},
+		{"relative token", `"/run/creds/namespace"`, `"token"`},
+		{"conflicting credential selectors", `"apiKeyEnv":"FAST_TOKEN"`, `"apiKeyEnv":"FAST_TOKEN","apiKeyFile":"/run/key"`},
+		{"relative credential", `"apiKeyEnv":"FAST_TOKEN"`, `"apiKeyFile":"key"`},
+		{"raw secret", `"apiKeyEnv":"FAST_TOKEN"`, `"apiKey":"never-print-this"`},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := base()
-			tc.modify(&c)
-			if err := c.Validate(); err == nil {
-				t.Fatal("incompatible on-demand configuration accepted")
+			_, err := Load(writeConfig(t, strings.Replace(fixture, tc.old, tc.new, 1)))
+			if err == nil || strings.Contains(err.Error(), "never-print-this") {
+				t.Fatal("configuration was accepted or error leaked input")
 			}
 		})
+	}
+	for _, input := range []string{`{}`, `null`, `[]`, fixture + fixture, `{"dispatchPOC":{"workers":["a","b"]}}`, `{"dispatchPOC":{"onDemand":{}}}`, `{"templates":{"boat":{"snapshot":"golden"}}}`} {
+		if _, err := Load(writeConfig(t, input)); err == nil {
+			t.Fatal("missing, old, or invalid configuration accepted")
+		}
+	}
+}
+
+func TestValidateProviderEndpointsWithoutCredentials(t *testing.T) {
+	for _, tc := range []struct{ instance, field, endpoint string }{
+		{"fast", "baseURL", "not-an-absolute-url"},
+		{"fast", "baseURL", "https://user:never-print-this@example.org/api/v1"},
+		{"fast", "baseURL", "https://example.org/api/v1?token=never-print-this"},
+		{"fast", "baseURL", "http://example.org"},
+		{"eu", "endpoint", "https://example.org/devbox"},
+		{"eu", "endpoint", "https://example.org#never-print-this"},
+		{"eu", "endpoint", "https://:443"},
+		{"eu", "endpoint", "https://api.example:65536"},
+		{"eu", "endpoint", "ftp://api.example"},
+	} {
+		t.Run(tc.instance+"_"+tc.field, func(t *testing.T) {
+			// No credentials are available: Load and validate must report the
+			// configuration error before attempting to resolve any login.
+			raw := strings.Replace(fixture, `"`+tc.instance+`":{`, `"`+tc.instance+`":{"`+tc.field+`":"`+tc.endpoint+`",`, 1)
+			_, err := Load(writeConfig(t, raw))
+			if err == nil || !strings.Contains(err.Error(), "providers."+tc.instance+": "+tc.field) || strings.Contains(err.Error(), "never-print-this") {
+				t.Fatalf("expected redacted endpoint error, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestProviderScopeTracksConnectionWithoutPinningSecrets(t *testing.T) {
+	cfg, err := Load(writeConfig(t, fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAST_TOKEN", "original")
+	t.Setenv("OTHER_TOKEN", "original")
+	scope := func(p ProviderConfig) string {
+		t.Helper()
+		cfg.Providers = map[string]ProviderConfig{"target": p}
+		clients, err := cfg.BuildProviders()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return clients["target"].(provider.ScopeIdentifier).ScopeID()
+	}
+	b, n := cfg.Providers["fast"], cfg.Providers["eu"]
+	b.BaseURL, b.Organization = "https://BOAT.example:443/api/v1/", "first-org"
+	first := scope(b)
+	t.Setenv("FAST_TOKEN", "rotated")
+	b.BaseURL = "https://boat.example/api/v1"
+	if first != scope(b) {
+		t.Fatal("credential rotation or equivalent endpoint spelling changed account scope")
+	}
+	b.Organization = "second-org"
+	if first == scope(b) {
+		t.Fatal("new wallet still owns previous reservation")
+	}
+	b.Organization = "first-org"
+	b.BaseURL = "https://other.example/api/v1"
+	if first == scope(b) {
+		t.Fatal("new control plane still owns previous reservation")
+	}
+	b.BaseURL = "https://boat.example/api/v1"
+	b.APIKeyEnv = "OTHER_TOKEN"
+	if first != scope(b) {
+		t.Fatal("rotation of the credential selector changed the wallet scope")
+	}
+	ns := scope(n)
+	n.VirtualCPU = 99
+	if ns != scope(n) {
+		t.Fatal("changing shape changed account scope")
+	}
+	n.TokenFile = "/run/credentials/new-account"
+	if ns != scope(n) {
+		t.Fatal("credential selector changed tenant identity")
+	}
+	n.TenantID = "other-tenant"
+	if ns == scope(n) {
+		t.Fatal("a different Namespace tenant kept the same scope")
+	}
+}
+
+func TestIndependentBoatInstances(t *testing.T) {
+	t.Setenv("BOAT_API_KEY", "ambient")
+	t.Setenv("FAST_TOKEN", "token-fast")
+	t.Setenv("BURST_TOKEN", "token-burst")
+	cfg, err := Load(writeConfig(t, fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			_, err := w.Write([]byte(`{"ok":true,"sandboxes":[]}`))
+			if err != nil {
+				t.Error(err)
+			}
+		case http.MethodPost:
+			var body struct{ Type, From string }
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			seen = append(seen, strings.Join([]string{r.Header.Get("Authorization"), r.Header.Get("X-Boat-Org"), body.From, body.Type}, "/"))
+			_, err := w.Write([]byte(`{"ok":true,"sandbox":{"id":"box","name":"box","state":"running"}}`))
+			if err != nil {
+				t.Error(err)
+			}
+		}
+	}))
+	defer srv.Close()
+	for _, name := range []string{"fast", "burst"} {
+		p := cfg.Providers[name]
+		p.BaseURL = srv.URL
+		p.Organization = "org-" + name
+		cfg.Providers[name] = p
+	}
+	ps, err := cfg.BuildProviders()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"fast", "burst"} {
+		if ps[name].Name() != "boat" {
+			t.Fatal("lost driver kind")
+		}
+		if _, err := ps[name].Create(t.Context(), provider.CreateRequest{Name: "worker", OperationID: name, Size: cfg.ProviderSizes()[name], Template: cfg.ProviderTemplates()[name]}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !slices.Equal(seen, []string{"Bearer token-fast/org-fast/golden/large", "Bearer token-burst/org-burst/burst-base/xlarge"}) {
+		t.Fatalf("wrong per-instance requests: %v", seen)
 	}
 }
 
 func TestBoatCredentialsPriorityAndRedaction(t *testing.T) {
 	t.Setenv("BOAT_API_KEY", "from-env")
-	key, org, err := (Boat{Organization: "wallet"}).credentials()
-	if err != nil || key != "from-env" || org != "wallet" {
-		t.Fatalf("env credentials: %q %q %v", key, org, err)
+	key, err := (Boat{Organization: "wallet"}).apiKey()
+	if err != nil || key != "from-env" {
+		t.Fatalf("env credentials: %q %v", key, err)
 	}
-	t.Setenv("BOAT_API_KEY", "")
+	t.Setenv("BOAT_API_KEY", "ambient-must-not-override-explicit-file")
 	file := filepath.Join(t.TempDir(), "key")
 	if err := os.WriteFile(file, []byte("from-file\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	key, _, err = (Boat{APIKeyFile: file}).credentials()
+	key, err = (Boat{APIKeyFile: file}).apiKey()
 	if err != nil || key != "from-file" {
 		t.Fatalf("file credentials: %q %v", key, err)
 	}
 	if err := os.Chmod(file, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = (Boat{APIKeyFile: file}).credentials()
+	_, err = (Boat{APIKeyFile: file}).apiKey()
 	if err == nil || strings.Contains(err.Error(), "from-file") {
 		t.Fatal("unsafe key file accepted or leaked")
 	}
@@ -174,67 +256,63 @@ func TestBoatCredentialsPriorityAndRedaction(t *testing.T) {
 	if err := os.Symlink(file, link); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err = (Boat{APIKeyFile: link}).credentials(); err == nil {
+	if _, err = (Boat{APIKeyFile: link}).apiKey(); err == nil {
 		t.Fatal("symlink key accepted")
 	}
 	saved := writeConfig(t, `{"token":"cli-session","org":"saved-wallet"}`)
-	key, org, err = (Boat{CredentialFile: saved}).credentials()
-	if err != nil || key != "cli-session" || org != "saved-wallet" {
-		t.Fatalf("saved credentials: %q %q %v", key, org, err)
-	}
-	_, org, err = (Boat{CredentialFile: saved, Organization: "explicit-wallet"}).credentials()
-	if err != nil || org != "explicit-wallet" {
-		t.Fatal("explicit wallet not used")
+	key, err = (Boat{CredentialFile: saved, Organization: "explicit-wallet"}).apiKey()
+	if err != nil || key != "cli-session" {
+		t.Fatalf("saved credentials: %v", err)
 	}
 }
 
-func TestBuildProvidersWithoutCredentialsOrSecrets(t *testing.T) {
-	if _, err := Default().BuildProviders(); err == nil {
-		t.Fatal("empty providers accepted")
-	}
-	t.Setenv("BOAT_API_KEY", "test-key")
-	c := Default()
-	c.Providers.Boat = &Boat{}
-	ps, err := c.BuildProviders()
+func TestMissingBackupCredentialDoesNotBlockFleetOrAnotherAccount(t *testing.T) {
+	cfg, err := Load(writeConfig(t, fixture))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ps) != 1 || ps["boat"].Name() != "boat" {
-		t.Fatal("Boat missing")
+	t.Setenv("FAST_TOKEN", "primary-key")
+	t.Setenv("BURST_TOKEN", "")
+	t.Setenv("NSC_TOKEN_FILE", filepath.Join(t.TempDir(), "missing-sdk-login"))
+	seen := make(chan string, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Get("X-Boat-Org") + "/" + r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"ok":true,"sandbox":{"id":"worker","name":"worker","state":"running"}}`))
+	}))
+	defer srv.Close()
+	for _, id := range []string{"fast", "burst"} {
+		b := cfg.Providers[id]
+		b.BaseURL = srv.URL
+		cfg.Providers[id] = b
 	}
-	c.Providers.Boat.BaseURL = "https://bad.example/?secret=test-key"
-	_, err = c.BuildProviders()
-	if err == nil || strings.Contains(err.Error(), "test-key") {
-		t.Fatal("bad endpoint accepted or leaked")
+	ns := cfg.Providers["eu"]
+	ns.TokenFile = ""
+	cfg.Providers["eu"] = ns
+	clients, err := cfg.BuildProviders()
+	if err != nil {
+		t.Fatalf("reading unused provider credentials at startup: %v", err)
 	}
-}
+	if _, err := clients["fast"].Get(t.Context(), "worker"); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-seen; got != "fast-org/Bearer primary-key" {
+		t.Fatalf("unexpected primary account: %q", got)
+	}
 
-func TestIdleTimeoutConfiguration(t *testing.T) {
-	for _, tc := range []struct {
-		value string
-		valid bool
-		want  time.Duration
-	}{
-		{"", true, 0}, {"0", true, 0}, {"0s", true, 0}, {"30m", true, 30 * time.Minute}, {"1m", true, time.Minute},
-		{"-1m", false, 0}, {"59s", false, 0}, {"forever", false, 0}, {"999999999999999999h", false, 0},
-	} {
-		t.Run(tc.value, func(t *testing.T) {
-			cfg := Default()
-			cfg.IdleTimeout = tc.value
-			d, err := cfg.IdleDuration()
-			if (err == nil) != tc.valid || err == nil && d != tc.want {
-				t.Fatal(d, err)
-			}
-			if (cfg.Validate() == nil) != tc.valid {
-				t.Fatal("validation disagrees")
-			}
-		})
+	if _, err := clients["burst"].Get(t.Context(), "worker"); err == nil || errors.Is(err, provider.ErrNotFound) {
+		t.Fatalf("absent credentials must not report machine absence: %v", err)
 	}
-	cfg, err := Load(writeConfig(t, `{"idleTimeout":"30m"}`))
-	if err != nil || cfg.IdleTimeout != "30m" {
-		t.Fatal(cfg, err)
+	if _, err := clients["burst"].Create(t.Context(), provider.CreateRequest{Name: "worker", OperationID: "workers-operation", Template: cfg.ProviderTemplates()["burst"]}); !errors.Is(err, provider.ErrCreateRejected) {
+		t.Fatalf("local refusal before a create must allow first-attempt fallback: %v", err)
 	}
-	if _, err := Load(writeConfig(t, `{"idleTimeout":1800}`)); err == nil {
-		t.Fatal("accepted numeric duration")
+	if len(seen) != 0 {
+		t.Fatal("contacted provider without credentials")
+	}
+	t.Setenv("BURST_TOKEN", "new-key")
+	if _, err := clients["burst"].Get(t.Context(), "worker"); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-seen; got != "burst-org/Bearer new-key" {
+		t.Fatalf("credential rotation switched wallet: %q", got)
 	}
 }

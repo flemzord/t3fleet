@@ -91,8 +91,8 @@ func nativePeerOAuthClient(id string) bool {
 // NewPeerPairing returns a one-use code from the native controller. The fleet
 // admin API authenticates its caller before invoking it.
 func (p *Proxy) NewPeerPairing(ctx context.Context, access string) (string, error) {
-	if p.dispatch == nil || p.dispatch.onDemand == nil || !validPeerOAuthAccess(access) {
-		return "", errors.New("peer pairing needs on-demand dispatch and a valid access level")
+	if p.dispatch == nil || !validPeerOAuthAccess(access) {
+		return "", errors.New("peer pairing requires a fleet endpoint and a valid access level")
 	}
 	body, _ := json.Marshal(map[string]string{"purpose": "peer-link", "access": access})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.origin.String()+"/api/auth/pairing-token", nil)
@@ -111,10 +111,7 @@ func (p *Proxy) NewPeerPairing(ctx context.Context, access string) (string, erro
 
 // servePeerOAuth sends just the native linked-environment sign-in routes to the
 // dedicated controller. Desktop pairing and peer authorization remain separate.
-func (d *dispatchPOC) servePeerOAuth(p *Proxy, w http.ResponseWriter, r *http.Request) bool {
-	if d.onDemand == nil {
-		return false
-	}
+func (d *dispatcher) servePeerOAuth(p *Proxy, w http.ResponseWriter, r *http.Request) bool {
 	admin := false
 	switch r.URL.Path {
 	case "/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp",
@@ -220,7 +217,7 @@ func (d *dispatchPOC) servePeerOAuth(p *Proxy, w http.ResponseWriter, r *http.Re
 	return true
 }
 
-func (d *dispatchPOC) acceptPeerOAuth(path, contentType string, body []byte) bool {
+func (d *dispatcher) acceptPeerOAuth(path, contentType string, body []byte) bool {
 	if path == "/oauth/mcp/token" {
 		form, err := url.ParseQuery(string(body))
 		if contentType != "application/x-www-form-urlencoded" || err != nil {

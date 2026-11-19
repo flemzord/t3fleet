@@ -35,7 +35,7 @@ func TestAbandonedDispatchLaunchReleasesCapacityAfterRestart(t *testing.T) {
 		},
 	}
 	dir := t.TempDir()
-	restart := func() (*dispatchPOC, func()) {
+	restart := func() (*dispatcher, func()) {
 		s, err := state.Open(dir)
 		if err != nil {
 			t.Fatal(err)
@@ -50,7 +50,7 @@ func TestAbandonedDispatchLaunchReleasesCapacityAfterRestart(t *testing.T) {
 	}
 	d, close := restart()
 	ctx := t.Context()
-	d.disk.OnDemand.Project = &demandProject{ID: projectID, Title: "Project", Remote: "https://github.com/octocat/Hello-World.git"}
+	d.disk.OnDemand.Projects[projectID] = demandProject{ID: projectID, Title: "Project", Remote: "https://github.com/octocat/Hello-World.git"}
 	if err := d.store.Save(d.disk); err != nil {
 		t.Fatal(err)
 	}

@@ -7,13 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"maps"
-	"net/url"
-	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/flemzord/t3fleet/internal/state"
@@ -30,20 +25,15 @@ type DispatchOnDemand struct {
 	Lookup      func(string) (DispatchWorker, error)
 	Release     func(context.Context, string) error // nil keeps archived workers
 	Reclaim     func(context.Context, string) error // releases an incomplete launch, including one without a fleet batch
-	// Lost reports true only when the provider confirms that a ready worker no
-	// longer exists. Errors and stopped workers keep the reservation.
+	// Lost retires the local worker record and reports true only when the
+	// provider confirms absence. It does not delete remote machines.
 	Lost func(context.Context, string) (bool, error)
-}
-
-type demandProject struct {
-	ID     string
-	Title  string
-	Remote string
 }
 
 type demandRoute struct {
 	Key        string
 	ProjectID  string
+	Listing    *threadListing `json:",omitempty"`
 	Ready      bool
 	Peer       *peerRoute         `json:",omitempty"`
 	Archive    *demandArchive     `json:",omitempty"`
@@ -53,7 +43,8 @@ type demandRoute struct {
 }
 
 type onDemandDisk struct {
-	Project     *demandProject
+	Projects    map[string]demandProject
+	Project     *demandProject `json:",omitempty"` // Single-project state written by earlier versions.
 	Routes      map[string]demandRoute
 	PeerThreads map[string]string `json:",omitempty"`
 }
@@ -66,7 +57,7 @@ func NewDispatchOnDemand(origin string, store *state.Store, opts DispatchOnDeman
 	if opts.MaxWorkers < 1 {
 		return nil, errors.New("on-demand dispatch requires a positive worker capacity")
 	}
-	d := &dispatchPOC{store: store, workers: []DispatchWorker{opts.Controller}, timeout: 3 * time.Minute,
+	d := &dispatcher{store: store, timeout: 3 * time.Minute,
 		onDemand: &opts, preparing: map[string]chan struct{}{}}
 	if err := store.Load(&d.disk); errors.Is(err, state.ErrEmpty) {
 		id, err := randomToken()
@@ -74,7 +65,7 @@ func NewDispatchOnDemand(origin string, store *state.Store, opts DispatchOnDeman
 			return nil, err
 		}
 		d.disk = dispatchState{Origin: origin, EnvironmentID: "t3fleet-" + id, Clients: map[string]time.Time{},
-			OnDemand: &onDemandDisk{Routes: map[string]demandRoute{}}}
+			OnDemand: &onDemandDisk{Projects: map[string]demandProject{}, Routes: map[string]demandRoute{}}}
 		if err := store.Save(d.disk); err != nil {
 			return nil, err
 		}
@@ -82,8 +73,11 @@ func NewDispatchOnDemand(origin string, store *state.Store, opts DispatchOnDeman
 		return nil, err
 	}
 	if d.disk.Origin != origin || d.disk.EnvironmentID == "" || d.disk.Clients == nil ||
-		d.disk.OnDemand == nil || d.disk.OnDemand.Routes == nil || len(d.disk.Workers) != 0 {
+		d.disk.OnDemand == nil || d.disk.OnDemand.Routes == nil {
 		return nil, errors.New("on-demand dispatch state must use its original origin and mode")
+	}
+	if err := d.loadDemandProjects(); err != nil {
+		return nil, err
 	}
 	return d.proxy(origin)
 }
@@ -97,93 +91,7 @@ func demandKey(parts ...string) string {
 	return hex.EncodeToString(h.Sum(nil)[:16])
 }
 
-var repositoryPath = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}$`)
-
-func demandRemote(raw string) string {
-	if strings.HasPrefix(raw, "git@github.com:") {
-		path := strings.TrimPrefix(raw, "git@github.com:")
-		if safeRepositoryPath(path) {
-			return raw
-		}
-		return ""
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Host != "github.com" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawPath != "" ||
-		!safeRepositoryPath(strings.TrimPrefix(u.Path, "/")) {
-		return ""
-	}
-	if u.Scheme == "https" && u.User == nil {
-		return raw
-	}
-	if u.Scheme == "ssh" && u.User != nil && u.User.String() == "git" {
-		return "git@github.com:" + strings.TrimPrefix(u.Path, "/")
-	}
-	return ""
-}
-
-func safeRepositoryPath(path string) bool {
-	repo := strings.TrimSuffix(path, ".git")
-	return repositoryPath.MatchString(path) && !strings.HasSuffix(repo, "/.") && !strings.HasSuffix(repo, "/..") && !strings.HasSuffix(repo, "/")
-}
-
-func (d *dispatchPOC) registerRepository(ctx context.Context, payload map[string]any) (map[string]any, error) {
-	id, _ := payload["projectId"].(string)
-	title, _ := payload["title"].(string)
-	raw, _ := payload["remoteUrl"].(string)
-	remote := demandRemote(raw)
-	if !validDispatchThreadID(id) || strings.TrimSpace(title) == "" || len(title) > 256 || remote == "" {
-		return nil, errors.New("choose a GitHub repository URL without embedded credentials")
-	}
-	d.mu.Lock()
-	if existing := d.disk.OnDemand.Project; existing != nil {
-		if existing.Remote != remote {
-			d.mu.Unlock()
-			return nil, errors.New("on-demand dispatch supports one GitHub repository")
-		}
-		id, title = existing.ID, existing.Title
-	} else {
-		next := d.disk
-		demand := *next.OnDemand
-		demand.Project = &demandProject{ID: id, Title: title, Remote: remote}
-		next.OnDemand = &demand
-		if err := d.store.Save(next); err != nil {
-			d.mu.Unlock()
-			return nil, errors.New("could not save the project")
-		}
-		d.disk = next
-	}
-	d.mu.Unlock()
-	path := filepath.Join(d.onDemand.ProjectRoot, demandKey("project", id))
-	if err := os.MkdirAll(path, 0700); err != nil {
-		return nil, errors.New("could not prepare virtual project directory")
-	}
-	if err := d.seedProject(ctx, d.workers[0], id, title, path); err != nil {
-		return nil, err
-	}
-	return map[string]any{"projectId": id, "cwd": path, "remoteUrl": remote, "repository": nil}, nil
-}
-
-func (d *dispatchPOC) seedProject(ctx context.Context, worker DispatchWorker, id, title, path string) error {
-	req := map[string]any{"_tag": "Request", "id": "dispatch-project", "tag": "projects.mutate", "headers": []any{},
-		"payload": map[string]any{"type": "project.create", "projectId": id, "title": title, "workspaceRoot": path,
-			"commandId": "dispatch-project-" + demandKey(id)}}
-	return d.rpcTo(ctx, worker, req, nil, func(reply map[string]any) error {
-		exit, _ := reply["exit"].(map[string]any)
-		if exit["_tag"] != "Success" {
-			return errors.New("T3 could not register the dispatch project")
-		}
-		return nil
-	})
-}
-
-func (d *dispatchPOC) threadWorker(threadID string) (DispatchWorker, error) {
-	if d.onDemand == nil {
-		index, err := d.worker(threadID, false)
-		if err != nil {
-			return DispatchWorker{}, err
-		}
-		return d.workers[index], nil
-	}
+func (d *dispatcher) threadWorker(threadID string) (DispatchWorker, error) {
 	d.mu.Lock()
 	r, ok := d.disk.OnDemand.Routes[threadID]
 	d.mu.Unlock()
@@ -196,15 +104,19 @@ func (d *dispatchPOC) threadWorker(threadID string) (DispatchWorker, error) {
 	return d.onDemand.Lookup(r.Key)
 }
 
-func (d *dispatchPOC) prepareDemandWorker(ctx context.Context, id, projectID string) (DispatchWorker, error) {
+func (d *dispatcher) prepareDemandWorker(ctx context.Context, id, projectID string) (DispatchWorker, error) {
 	for {
 		d.mu.Lock()
-		project := d.disk.OnDemand.Project
-		if project == nil || project.ID != projectID || !validDispatchThreadID(id) {
+		project := d.disk.OnDemand.Projects[projectID]
+		if project.Title == "" || !validDispatchThreadID(id) {
 			d.mu.Unlock()
 			return DispatchWorker{}, errors.New("register the GitHub project before launching a thread")
 		}
 		route, exists := d.disk.OnDemand.Routes[id]
+		if exists && route.ProjectID != projectID {
+			d.mu.Unlock()
+			return DispatchWorker{}, errors.New("a thread must keep its original project")
+		}
 		if route.Abandoned != nil {
 			d.mu.Unlock()
 			return DispatchWorker{}, errors.New("the incomplete dispatch launch expired; start a new thread")
@@ -267,7 +179,7 @@ func (d *dispatchPOC) prepareDemandWorker(ctx context.Context, id, projectID str
 		if err != nil {
 			return DispatchWorker{}, err
 		}
-		if err := d.seedProject(ctx, worker, project.ID, project.Title, path); err != nil {
+		if _, err := d.seedProject(ctx, worker, project, path); err != nil {
 			return DispatchWorker{}, err
 		}
 		d.mu.Lock()
@@ -279,7 +191,7 @@ func (d *dispatchPOC) prepareDemandWorker(ctx context.Context, id, projectID str
 	}
 }
 
-func (d *dispatchPOC) saveDemandRouteLocked(id string, r demandRoute) error {
+func (d *dispatcher) saveDemandRouteLocked(id string, r demandRoute) error {
 	next := d.disk
 	demand := *next.OnDemand
 	demand.Routes = maps.Clone(demand.Routes)
@@ -292,49 +204,11 @@ func (d *dispatchPOC) saveDemandRouteLocked(id string, r demandRoute) error {
 	return nil
 }
 
-func (d *dispatchPOC) onDemandShell(ctx context.Context) (map[string]any, error) {
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	d.mu.Lock()
-	saved := maps.Clone(d.disk.OnDemand.Routes)
-	d.mu.Unlock()
-	workers := []DispatchWorker{d.workers[0]}
-	routes := map[string]int{}
-	for _, id := range slices.Sorted(maps.Keys(saved)) {
-		r := saved[id]
-		if !r.Ready || (r.Archive != nil && r.Archive.Released) || r.Lost != nil {
-			continue
-		}
-		worker, err := d.onDemand.Lookup(r.Key)
-		if err != nil {
-			continue
-		} // deleted workers keep their reservation but have no shell rows
-		routes[id] = len(workers)
-		workers = append(workers, worker)
-	}
-	rows := make([]map[string]any, len(workers))
-	var wg sync.WaitGroup
-	for i, worker := range workers {
-		wg.Go(func() { rows[i], _ = d.getFrom(ctx, worker, dispatchShellPath) })
-	}
-	wg.Wait()
-	// Tell Desktop to start a draft in the project root. This virtual
-	// project has no checkout to inspect before the first message.
-	if projects, ok := rows[0]["projects"].([]any); ok {
-		for _, item := range projects {
-			if project, ok := item.(map[string]any); ok {
-				project["defaultThreadEnvMode"] = "local"
-			}
-		}
-	}
-	return mergeDispatchShell(rows, routes, true)
-}
-
 func rpcSuccess(id, value any) map[string]any {
 	return map[string]any{"_tag": "Exit", "requestId": id, "exit": map[string]any{"_tag": "Success", "value": value}}
 }
 
-func (d *dispatchPOC) callOnDemand(ctx context.Context, tag string, frame, payload map[string]any, acks <-chan map[string]any, send func(map[string]any) error) error {
+func (d *dispatcher) callOnDemand(ctx context.Context, tag string, frame, payload map[string]any, acks <-chan map[string]any, send func(map[string]any) error) error {
 	id := frame["id"]
 	threadID, _ := payload["threadId"].(string)
 	switch tag {
@@ -356,6 +230,9 @@ func (d *dispatchPOC) callOnDemand(ctx context.Context, tag string, frame, paylo
 		unlock := d.lockDemandWrite(threadID)
 		defer unlock()
 		if payload["reuseExistingThread"] == true {
+			if route := d.demandRoute(threadID); route.ProjectID == "" || route.ProjectID != projectID {
+				return errors.New("a thread must keep its original project")
+			}
 			worker, err := d.threadWorker(threadID)
 			if err != nil {
 				return err
@@ -408,7 +285,7 @@ func (d *dispatchPOC) callOnDemand(ctx context.Context, tag string, frame, paylo
 		<-ctx.Done()
 		return ctx.Err()
 	case "server.getConfig", "server.probe", "subscribeServerConfig", "subscribeProjectClones", "subscribeAuthAccess":
-		return d.rpc(ctx, 0, frame, acks, send)
+		return d.rpcTo(ctx, d.onDemand.Controller, frame, acks, send)
 	case "server.refreshProviders":
 		return send(rpcSuccess(id, map[string]any{"providers": d.demandProviders()}))
 	default:
@@ -416,7 +293,7 @@ func (d *dispatchPOC) callOnDemand(ctx context.Context, tag string, frame, paylo
 	}
 }
 
-func (d *dispatchPOC) demandProviders() []any {
+func (d *dispatcher) demandProviders() []any {
 	model := cmp.Or(d.onDemand.Model, "gpt-5.4")
 	return []any{map[string]any{"instanceId": "codex", "driver": "codex", "enabled": true, "installed": true,
 		"version": nil, "status": "ready", "auth": map[string]any{"status": "unknown"},
