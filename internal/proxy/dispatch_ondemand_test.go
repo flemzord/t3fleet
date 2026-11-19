@@ -85,7 +85,7 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 	var attempts, remotes []string
 	var deletions []string
 	calls := func() int { mu.Lock(); defer mu.Unlock(); return len(attempts) }
-	opts := DispatchOnDemand{Controller: controller, ProjectRoot: t.TempDir(), MaxWorkers: 2, Model: "gpt-6.1-sol", Provision: func(_ context.Context, key, remote string) (DispatchWorker, string, error) {
+	opts := DispatchOnDemand{Controller: controller, ProjectRoot: t.TempDir(), MaxWorkers: 2, Agents: []DispatchAgent{{Driver: "codex", Models: []string{"gpt-6.1-sol"}}, {Driver: "pi", Models: []string{"deepseek/v4", "glm-5"}}}, Provision: func(_ context.Context, key, remote string) (DispatchWorker, string, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		attempts = append(attempts, key)
@@ -177,13 +177,19 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 		}
 	})
 	providers, _ := config["providers"].([]any)
-	if len(providers) != 1 {
-		t.Fatal("expected a single virtual Codex provider")
+	if len(providers) != 2 {
+		t.Fatal("expected one virtual provider per declared agent")
 	}
 	codex, _ := providers[0].(map[string]any)
 	models, _ := codex["models"].([]any)
-	if len(models) != 1 || models[0].(map[string]any)["slug"] != "gpt-6.1-sol" {
+	if codex["instanceId"] != "codex" || len(models) != 1 || models[0].(map[string]any)["slug"] != "gpt-6.1-sol" {
 		t.Fatal("virtual catalog did not advertise the configured Codex model")
+	}
+	pi, _ := providers[1].(map[string]any)
+	models, _ = pi["models"].([]any)
+	if pi["instanceId"] != "pi" || pi["driver"] != "pi" || len(models) != 2 || models[1].(map[string]any)["slug"] != "glm-5" ||
+		models[0].(map[string]any)["isDefault"] != true || models[1].(map[string]any)["isDefault"] != false {
+		t.Fatal("virtual catalog did not advertise the configured Pi models")
 	}
 	client.rpc("server.probe", nil)
 	if calls() != 0 {

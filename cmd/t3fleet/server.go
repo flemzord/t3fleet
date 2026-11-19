@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -87,7 +88,7 @@ func serveWithController(ctx context.Context, cfg config.Config, diagnostics io.
 	}
 	dispatch, err := proxy.NewDispatchOnDemand("http://"+settings.Listen, store, proxy.DispatchOnDemand{
 		Controller: controller, ProjectRoot: filepath.Join(root, "projects"),
-		MaxWorkers: settings.MaxWorkerCount(), Model: settings.Model,
+		MaxWorkers: settings.MaxWorkerCount(), Agents: dispatchAgents(settings.AgentCatalog()),
 		Provision: func(ctx context.Context, key, remote string) (proxy.DispatchWorker, string, error) {
 			return manager.ProvisionDispatchWorker(ctx, key, remote, settings.ProviderOrder)
 		},
@@ -462,4 +463,12 @@ func printServeSummary(w io.Writer, cfg config.Config, machines []fleet.Machine)
 	fmt.Fprintln(w, "  state:    ", cfg.StateDir)
 	fmt.Fprintln(w, "  machines: ", machineSummary(byState, len(machines)))
 	fmt.Fprintln(w, "Cloud machines keep running and billing after the daemon stops; use 't3fleet admin stop' or 't3fleet admin delete'.")
+}
+
+func dispatchAgents(catalog []config.Agent) []proxy.DispatchAgent {
+	agents := make([]proxy.DispatchAgent, 0, len(catalog))
+	for _, agent := range catalog {
+		agents = append(agents, proxy.DispatchAgent{Driver: agent.Driver, Models: slices.Clone(agent.Models)})
+	}
+	return agents
 }

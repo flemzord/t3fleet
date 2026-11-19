@@ -38,7 +38,7 @@
           runtime = pkgs.callPackage ./nix/runtime.nix { };
           vm-tools = pkgs.buildEnv {
             name = "t3fleet-vm-tools";
-            paths = [ t3-server runtime pkgs.codex pkgs.claude-code ];
+            paths = [ t3-server runtime pkgs.codex pkgs.claude-code pkgs.pi-coding-agent ];
           };
         });
       checks = eachSystem (system:

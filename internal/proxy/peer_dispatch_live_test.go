@@ -87,7 +87,7 @@ func TestLiveLinkedDispatch(t *testing.T) {
 	attempts := 0
 	var releases []string
 	opts := DispatchOnDemand{
-		Controller: controller, ProjectRoot: t.TempDir(), MaxWorkers: len(workers), Model: "multi-turn",
+		Controller: controller, ProjectRoot: t.TempDir(), MaxWorkers: len(workers), Agents: []DispatchAgent{{Driver: "codex", Models: []string{"multi-turn"}}},
 		Provision: func(_ context.Context, key, _ string) (DispatchWorker, string, error) {
 			mu.Lock()
 			defer mu.Unlock()

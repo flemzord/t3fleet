@@ -7,7 +7,7 @@ The host runs `t3fleet serve` and a normal T3 server as its controller. Each thr
 A **golden template** contains software and startup hooks, but no machine identity or user credentials. It must include:
 
 - A Linux T3 server pinned to the version of the T3 desktop client you will use.
-- Codex for the fleet's configured model. The reference image also includes Claude Code, but the fleet catalog currently exposes only Codex.
+- The agent CLI for each driver in `dispatch.agents`: `codex`, `claude` (Claude Code) or `pi`. The reference image includes all three. On first boot it enables Pi in the worker's T3 settings; T3 enables Codex and Claude by default.
 - A `t3fleet-runtime-info` executable available in the remote user's login shell.
 
 The daemon executes this fixed command after provider startup:
@@ -32,7 +32,7 @@ This repository ships self-contained image inputs:
 
 - [`nix/t3-server.nix`](../nix/t3-server.nix) pins the Linux T3 server archive.
 - [`nix/runtime.nix`](../nix/runtime.nix) supplies the startup, readiness, and credential-free image checks.
-- [`images/Dockerfile`](../images/Dockerfile) combines them with Claude Code and Codex for a clean Namespace reference image.
+- [`images/Dockerfile`](../images/Dockerfile) combines them with Claude Code, Codex and Pi for a clean Namespace reference image.
 
 The Linux `vm-tools` flake output is the common preinstalled profile. Build it on Linux or inside a provider image builder; the macOS development shell builds the daemon, not a Linux guest image.
 
@@ -48,7 +48,7 @@ Before publishing a shared image or snapshot, verify it contains none of:
 
 The reference image check rejects known credential and T3 state paths. It cannot prove that an arbitrary file contains no secret; keep the build environment credential-free as well.
 
-Boat requires a ready saved snapshot. Namespace accepts a registered image (`registered:org/name`), an OCI image, or a golden Devbox source with an explicit completed snapshot. A Namespace image can bootstrap the pinned runtime on first use when Nix is already installed. The worker needs Git access to the repository and credentials for the chosen Codex model at run time. Fleet does not copy your desktop checkout or credentials.
+Boat requires a ready saved snapshot. Namespace accepts a registered image (`registered:org/name`), an OCI image, or a golden Devbox source with an explicit completed snapshot. A Namespace image can bootstrap the pinned runtime on first use when Nix is already installed. The worker needs Git access to the repository and credentials for the chosen agent and model at run time. Fleet does not copy your desktop checkout or credentials.
 
 ## Configure the controller and placement
 
@@ -64,7 +64,8 @@ Start with [examples/boat.json](../examples/boat.json) or the [multi-provider ex
 | `dispatch.t3Binary` | Absolute path to the local T3 executable. |
 | `dispatch.providerOrder` | Required array of instance names. The first is primary. Subsequent entries are fallbacks in order. |
 | `dispatch.maxWorkers` | Maximum concurrent reservations, including pending launches. Omitted or zero means 8. |
-| `dispatch.model` | Codex model offered by this fleet; defaults to `gpt-5.4`. |
+| `dispatch.agents` | Agents offered by this fleet. Each entry has a T3 `driver` (`codex`, `claudeAgent` or `pi`) and the `models` it offers. A driver appears once. The first model of the first entry is the default for launches without a model. Pi model IDs use Pi's `<provider>/<model>` form, or `default`. Every worker image must include every declared agent. |
+| `dispatch.model` | Shorthand for a single Codex model, used when `dispatch.agents` is absent. Defaults to `gpt-5.4`. Do not set both. |
 | `dispatch.deleteWorkerOnArchive` | Default `false`. Set to `true` to delete a thread’s worker after a confirmed archive. |
 
 **Boat.** Set `template.snapshot`. Optional `size` is `small`, `default`, `large`, or `xlarge`; omit it to use Boat’s default. Each instance requires `organization`, the Boat wallet to bill. To inject an existing Boat environment, set `environment`; otherwise the daemon requests a clean machine. Choose one of `apiKeyEnv`, `apiKeyFile`, or `credentialFile` per instance. An explicit selector must work; it will not fall back to another account. Without a selector, the daemon tries `BOAT_API_KEY` and the Boat login. Private credential files must not be group- or world-readable. See the [Boat adapter](providers-boat.md).

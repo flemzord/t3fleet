@@ -79,6 +79,13 @@ let
       exec 9>"$T3CODE_HOME/start.lock"
       flock -x 9
       ready_url="http://127.0.0.1:$port/.well-known/t3/environment"
+      settings="$T3CODE_HOME/userdata/settings.json"
+      if [ ! -e "$settings" ] && [ ! -L "$settings" ]; then
+        # T3 enables Codex and Claude by default but not Pi. Seed the first
+        # boot only; later edits on the worker are kept.
+        install -d -m 0700 "$T3CODE_HOME/userdata"
+        (umask 077 && printf '%s\n' '{"providerInstances":{"codex":{"driver":"codex"},"claudeAgent":{"driver":"claudeAgent"},"pi":{"driver":"pi","enabled":true}}}' >"$settings")
+      fi
       if ! curl --noproxy '*' -fsS --max-time 2 "$ready_url" >/dev/null 2>&1; then
         # Namespace image sessions do not require systemd. `setsid` also closes
         # the provider exec session; this process survives its disconnect.
@@ -123,7 +130,7 @@ let
         fi
       done
       test "$(t3 --version)" = "t3 v${t3Server.version}"
-      for agent in codex claude; do
+      for agent in codex claude pi; do
         executable=$(command -v "$agent")
         case "$(readlink -f "$executable")" in
           /nix/store/*) ;;
