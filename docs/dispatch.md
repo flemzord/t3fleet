@@ -2,6 +2,8 @@
 
 The fleet exposes one T3 environment. Its local T3 server handles pairing and project metadata. Each thread gets a dedicated remote T3 server, its own checkout and model session. The dispatcher routes later requests for the thread back to that worker.
 
+The fleet operator manages T3 updates. Desktop can show the controller’s actual version and report a mismatch, but cannot update the fleet from the app. To upgrade, deploy the matching T3 binary on the controller and in worker templates, and set `expectedVersion` to that version. Changing a template does not upgrade existing workers.
+
 ## Register a project in Desktop
 
 After pairing with `t3fleet pair`, use **Add to another machine** on a GitHub project and select the fleet. Register as many repositories as you need; two organizations may use the same repository name. HTTPS and Git-over-SSH URLs for the same GitHub repository refer to the same project. Do not put credentials in a URL.

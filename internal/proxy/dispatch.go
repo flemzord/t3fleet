@@ -87,11 +87,38 @@ func (d *dispatcher) proxy(origin string) (*Proxy, error) {
 }
 
 func dispatchCapabilities(v map[string]any) {
+	// The controller runs in desktop mode, but the fleet endpoint cannot
+	// update its binary, stage releases, or switch Desktop channels.
+	for _, key := range []string{"serverSelfUpdate", "serverSelfUpdateProgress", "serverUpdateStaging",
+		"serverUpdateThreadContinuation", "desktopAppUpdate", "desktopAppChannelSwitch", "serverInstallation", "npmReleaseLookup"} {
+		delete(v, key)
+	}
 	for _, key := range []string{"shellThreadFamilies", "shellOlderSettled", "linkedThreadRefreshes"} {
 		if _, ok := v[key]; ok {
 			v[key] = false
 		}
 	}
+}
+
+// Desktop offers a manual install command when self-update is absent. Tell
+// it updates are managed, preserving any policy the controller already has.
+func dispatchUpdatePolicy(cfg map[string]any) {
+	policy, _ := cfg["managedPolicy"].(map[string]any)
+	if policy == nil {
+		policy = map[string]any{"organization": dispatchLabel, "lockedSettings": []string{}}
+		cfg["managedPolicy"] = policy
+	}
+	limits, _ := policy["limits"].(map[string]any)
+	if limits == nil {
+		limits = map[string]any{}
+		policy["limits"] = limits
+	}
+	updates, _ := limits["updates"].(map[string]any)
+	if updates == nil {
+		updates = map[string]any{}
+		limits["updates"] = updates
+	}
+	updates["mode"] = "off"
 }
 
 func tokenDigest(token string) string {
@@ -443,6 +470,7 @@ func (d *dispatcher) sanitizeConfig(tag any, reply map[string]any) {
 		cfg, _ := raw.(map[string]any)
 		stripDirect(cfg)
 		if cfg != nil {
+			dispatchUpdatePolicy(cfg)
 			cfg["providers"] = d.demandProviders()
 			cfg["shellOlderSettled"] = false
 			cfg["shellThreadFamilies"] = false
