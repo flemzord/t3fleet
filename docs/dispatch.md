@@ -70,6 +70,17 @@ the original launch cannot recreate the worker. The sweep handles only
 deletions already saved by an explicit archive under this setting; it does
 not touch previously archived threads that have no saved deletion.
 
+### Manually delete workers
+
+Run `t3fleet admin delete` in a terminal. Use the up and down arrows to move
+between workers and Space to check or uncheck a worker. Nothing is checked by
+default. Press Enter to review the checked names and full IDs, then type
+`delete` to permanently remove those workers. Esc or Ctrl+C cancels the picker.
+
+For scripts, use `t3fleet admin delete --ids ID1,ID2 --yes`. Passing a single
+exact name or full ID as an argument deletes that one worker without opening
+the picker.
+
 ### Release workers removed outside t3fleet
 
 An archive needs the worker to confirm it. If a ready worker was removed

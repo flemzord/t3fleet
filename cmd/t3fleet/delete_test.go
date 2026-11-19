@@ -21,12 +21,11 @@ func TestDeleteSelectionConfirmationAndIsolation(t *testing.T) {
 		args, want           []string
 		interactive, wantErr bool
 	}{
-		{name: "selected", input: "3 1 3\ndelete\n", interactive: true, want: []string{"three", "one"}},
-		{name: "empty", input: "\n", interactive: true},
-		{name: "cancel", input: "q\n", interactive: true},
-		{name: "declined", input: "1 2\nno\n", interactive: true},
-		{name: "eof", input: "1 2\n", interactive: true},
-		{name: "invalid", input: "1 99\ndelete\n", interactive: true, wantErr: true},
+		{name: "confirmed", args: []string{"--ids", "three,one,three"}, input: "delete\n", interactive: true, want: []string{"three", "one"}},
+		{name: "declined", args: []string{"--ids", "one,two"}, input: "no\n", interactive: true},
+		{name: "eof at confirmation", args: []string{"--ids", "one,two"}, interactive: true},
+		{name: "numeric input cannot bypass picker", input: "1 2\ndelete\n", interactive: true, wantErr: true},
+		{name: "no implicit confirmation", args: []string{"--yes"}, interactive: true, wantErr: true},
 		{name: "script", args: []string{"--ids", "two,one,two", "--yes"}, want: []string{"two", "one"}},
 		{name: "unmanaged", args: []string{"--ids", "one,foreign", "--yes"}, wantErr: true},
 		{name: "no-tty", wantErr: true},

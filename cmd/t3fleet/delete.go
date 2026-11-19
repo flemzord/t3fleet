@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -73,7 +72,6 @@ func (a *app) deleteMany(ctx context.Context, opts deleteOptions) error {
 		return err
 	}
 	var ids []string
-	scanner := bufio.NewScanner(a.stdin)
 	if opts.ids != "" {
 		ids = strings.Split(opts.ids, ",")
 	} else {
@@ -81,29 +79,18 @@ func (a *app) deleteMany(ctx context.Context, opts deleteOptions) error {
 			fmt.Fprintln(a.stderr, "No managed machines.")
 			return nil
 		}
-		tw := tabwriter.NewWriter(a.stderr, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "#\tNAME\tPROVIDER\tSTATE\tID")
-		for i, m := range machines {
-			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n", i+1, orDash(m.Name), orDash(m.Provider), orDash(m.State), m.ID)
+		in, inOK := a.stdin.(*os.File)
+		out, outOK := a.stderr.(*os.File)
+		if !inOK || !outOK {
+			return hinted("use an interactive terminal or pass explicit IDs with --ids ID,ID --yes", "the worker selector needs a terminal on stdin and stderr")
 		}
-		tw.Flush()
-		fmt.Fprintln(a.stderr, "Select numbers separated by spaces (empty or q cancels):")
-		line, err := readSelection(ctx, scanner)
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
+		ids, err = selectDeleteMachines(ctx, in, out, machines)
 		if err != nil {
 			return err
 		}
-		if strings.TrimSpace(line) == "q" {
+		if ids == nil {
+			fmt.Fprintln(a.stderr, "Cancelled; nothing deleted.")
 			return nil
-		}
-		for _, field := range strings.Fields(line) {
-			n, err := strconv.Atoi(field)
-			if err != nil || n < 1 || n > len(machines) {
-				return errors.New("invalid selection; nothing deleted")
-			}
-			ids = append(ids, machines[n-1].ID)
 		}
 	}
 	selected, err := selectedMachines(machines, ids)
@@ -122,7 +109,7 @@ func (a *app) deleteMany(ctx context.Context, opts deleteOptions) error {
 	tw.Flush()
 	if !opts.yes {
 		fmt.Fprintln(a.stderr, "Type delete to confirm this exact selection (anything else cancels):")
-		line, err := readSelection(ctx, scanner)
+		line, err := readSelection(ctx, bufio.NewScanner(a.stdin))
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
