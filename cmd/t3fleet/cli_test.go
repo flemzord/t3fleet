@@ -182,7 +182,7 @@ func TestInventoryObservations(t *testing.T) {
 			{"name":"one","futureField":true,"provider":"east","state":"ready","providerState":"stopped","providerObservedAt":"`+timestamp+`"},
 			{"name":"two","provider":"east","state":"ready","providerState":"idle","providerObservedAt":"`+timestamp+`"},
 			{"name":"three","provider":"west","state":"ready","providerState":"unknown"},
-			{"name":"four","provider":"namespace","state":"ready"}]`)
+			{"name":"four","provider":"devboxes","state":"ready","providerState":"running","providerObservedAt":"`+timestamp+`"}]`)
 	}))
 	defer server.Close()
 	cfg.Listen = strings.TrimPrefix(server.URL, "http://")
@@ -205,11 +205,11 @@ func TestInventoryObservations(t *testing.T) {
 		t.Fatalf("could not read list: %v, %v", rows, err)
 	}
 	if rows[0]["futureField"] != true || rows[0]["state"] != "ready" || rows[0]["providerState"] != "stopped" || rows[0]["providerObservedAt"] != timestamp ||
-		rows[2]["providerState"] != "unknown" || rows[2]["providerObservedAt"] != nil || rows[3]["providerState"] != nil {
+		rows[2]["providerState"] != "unknown" || rows[2]["providerObservedAt"] != nil || rows[3]["providerState"] != "running" {
 		t.Fatalf("incorrect inventory observations: %v", rows)
 	}
 	status := run("status")
-	for _, want := range []string{"4 (4 ready)", "Provider state (east):", "2 (1 idle, 1 stopped); last observed " + timestamp, "Provider state (west):", "1 (1 unknown)"} {
+	for _, want := range []string{"4 (4 ready)", "Provider state (east):", "2 (1 idle, 1 stopped); last observed " + timestamp, "Provider state (west):", "1 (1 unknown)", "Provider state (devboxes):", "1 (1 running)"} {
 		if !strings.Contains(status, want) {
 			t.Errorf("status misses %q: %s", want, status)
 		}
@@ -219,7 +219,9 @@ func TestInventoryObservations(t *testing.T) {
 		t.Fatal(err)
 	}
 	east, west := report.ProviderStates["east"], report.ProviderStates["west"]
-	if report.Total != 4 || report.Machines["ready"] != 4 || len(report.ProviderStates) != 2 ||
+	devboxes := report.ProviderStates["devboxes"]
+	if report.Total != 4 || report.Machines["ready"] != 4 || len(report.ProviderStates) != 3 ||
+		devboxes == nil || devboxes.Total != 1 || devboxes.States["running"] != 1 ||
 		east == nil || east.Total != 2 || east.States["idle"] != 1 || east.States["stopped"] != 1 || east.ObservedAt.Format(time.RFC3339) != timestamp ||
 		west == nil || west.Total != 1 || west.States["unknown"] != 1 || !west.ObservedAt.IsZero() {
 		t.Fatalf("incorrect status: %+v", report)

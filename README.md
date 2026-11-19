@@ -34,7 +34,7 @@ The source build writes `bin/t3fleet`. Run `nix develop` first if you want the p
 4. In another terminal, run `t3fleet pair --config PATH` and open the link in T3 Desktop. To launch from another T3 server into an existing project, pair it with `t3fleet pair --peer-access approval-required --config PATH`. To register a new project from that server, the link needs `--peer-access full-access` and the caller also needs full access.
 5. In Desktop, choose **Add to another machine**, select the fleet, and send a first text message. From a linked T3 server, use the [native project and launch workflow](docs/dispatch.md#launch-from-another-t3-server). Run `t3fleet list --config PATH` to see which provider instance owns the worker.
 
-Use `T3FLEET_CONFIG` to set the config path for all commands. `t3fleet list` and `t3fleet status` show the local fleet state alongside the [current Boat state](docs/providers-boat.md#worker-inventory). For example, a worker can be locally `ready` while its sandbox is `stopped`. Checking the inventory does not wake it. Use `t3fleet admin --help` for manual recovery operations. Stopping the daemon does not stop billing. Archive cleanup can be enabled explicitly.
+Use `T3FLEET_CONFIG` to set the config path for all commands. `t3fleet list` and `t3fleet status` show the local fleet state alongside the state reported by [Boat](docs/providers-boat.md#worker-inventory) or [Namespace](docs/providers-namespace.md#worker-inventory). For example, a worker can be locally `ready` while its cloud machine is `stopped`. Checking the inventory does not wake it. Use `t3fleet admin --help` for manual recovery operations. Stopping the daemon does not stop billing. Archive cleanup can be enabled explicitly.
 
 ## Guides
 

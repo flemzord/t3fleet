@@ -133,13 +133,25 @@ func (r response) machine() (provider.Machine, error) {
 var errAccessTokenUnavailable = errors.New("namespace: could not issue access token")
 
 func (c *Client) call(ctx context.Context, method string, input, output any) error {
-	body, err := json.Marshal(input)
+	token, err := c.accessToken(ctx)
 	if err != nil {
 		return err
 	}
+	return c.callWithToken(ctx, token, method, input, output)
+}
+
+func (c *Client) accessToken(ctx context.Context) (string, error) {
 	token, err := c.config.TokenSource.IssueToken(ctx, 5*time.Minute, false)
 	if err != nil {
-		return fmt.Errorf("%w: %w", errAccessTokenUnavailable, err)
+		return "", fmt.Errorf("%w: %w", errAccessTokenUnavailable, err)
+	}
+	return token, nil
+}
+
+func (c *Client) callWithToken(ctx context.Context, token, method string, input, output any) error {
+	body, err := json.Marshal(input)
+	if err != nil {
+		return err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.Endpoint+servicePath+method, bytes.NewReader(body))
 	if err != nil {

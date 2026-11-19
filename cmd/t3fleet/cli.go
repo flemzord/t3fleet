@@ -319,7 +319,7 @@ func (a *app) listCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:               "list",
 		Aliases:           []string{"ls"},
-		Short:             "List managed machines with their fleet and live Boat states",
+		Short:             "List managed machines with their fleet and live provider states",
 		GroupID:           "machines",
 		Example:           "  t3fleet list\n  t3fleet list --json | jq -r '.[].id'",
 		Args:              noArgs,
@@ -695,7 +695,7 @@ func (a *app) statusCommand() *cobra.Command {
 		Use:               "status",
 		Short:             "Show the configuration, daemon and machine summary",
 		GroupID:           "daemon",
-		Long:              "Show settings from the selected file, whether the daemon answers, and counts by\nfleet state and live Boat state. Restart the daemon after editing the file. Exits with an error when the daemon is not running.",
+		Long:              "Show settings from the selected file, whether the daemon answers, and counts by\nfleet state and live provider state. Restart the daemon after editing the file. Exits with an error when the daemon is not running.",
 		Example:           "  t3fleet status\n  t3fleet status --json",
 		Args:              noArgs,
 		ValidArgsFunction: cobra.NoFileCompletions,

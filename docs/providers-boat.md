@@ -96,7 +96,7 @@ matches only managed remote IDs. It never wakes a worker or adopts other
 sandboxes. If Boat is unreachable, the read times out, or the ID is absent,
 the local row remains visible with provider state `unknown` and no observation
 time. An unrecognized state returned by Boat also displays as `unknown`, with
-an observation time. Namespace workers show only the local state.
+an observation time.
 
 ## Private transport
 
