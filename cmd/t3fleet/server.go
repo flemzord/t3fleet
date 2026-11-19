@@ -26,6 +26,7 @@ import (
 type fleetAPI interface {
 	Create(context.Context, fleet.CreateRequest) (fleet.Machine, error)
 	List() []fleet.Machine
+	ObservedList(context.Context) []fleet.ObservedMachine
 	Get(string) (fleet.Machine, error)
 	Start(context.Context, string) error
 	Stop(context.Context, string) error
@@ -217,7 +218,11 @@ func newAdminHandlerWithDispatch(manager fleetAPI, token string, dispatch *proxy
 		if r.URL.Path == "/v1/machines" {
 			switch r.Method {
 			case http.MethodGet:
-				writeJSON(w, http.StatusOK, manager.List())
+				if r.URL.Query().Get("observe") == "1" {
+					writeJSON(w, http.StatusOK, manager.ObservedList(ctx))
+				} else {
+					writeJSON(w, http.StatusOK, manager.List())
+				}
 			case http.MethodPost:
 				var request machineCreateRequest
 				if !decodeRequest(w, r, &request) {

@@ -121,6 +121,10 @@ func TestListAndInspectHumanAndJSON(t *testing.T) {
 	if strings.Contains(table, "\x1b[") {
 		t.Fatal("redirected list output contains color codes")
 	}
+	// This daemon ignores observe=1. Its fleet state is not a provider reading.
+	if fields := strings.Fields(strings.Split(table, "\n")[1]); len(fields) < 5 || fields[3] != "-" || fields[4] != "-" {
+		t.Fatalf("invented observation for an older daemon:\n%s", table)
+	}
 
 	out.Reset()
 	if err := runClient(t.Context(), cfg, "ls", []string{"--json"}, &out, io.Discard); err != nil {
@@ -156,6 +160,91 @@ func TestMachineCommandsResolveReferences(t *testing.T) {
 	*calls = nil
 	if err := runClient(t.Context(), cfg, "admin", []string{"delete", "3f9c"}, io.Discard, io.Discard); err == nil || len(*calls) != 0 {
 		t.Fatalf("delete accepted an ID prefix: %v %v", err, *calls)
+	}
+}
+
+func TestInventoryObservations(t *testing.T) {
+	cfg := config.Default()
+	cfg.StateDir = t.TempDir()
+	token := mustAdminToken(t, cfg.StateDir)
+	const timestamp = "2026-11-19T21:20:10Z"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/_info" {
+			_, _ = io.WriteString(w, `{"version":"test"}`)
+			return
+		}
+		if r.Method != http.MethodGet || r.URL.RequestURI() != "/v1/machines?observe=1" || r.Header.Get("Authorization") != "Bearer "+token {
+			t.Errorf("unexpected inventory request: %s %s", r.Method, r.URL.RequestURI())
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_, _ = io.WriteString(w, `[
+			{"name":"one","futureField":true,"provider":"east","state":"ready","providerState":"stopped","providerObservedAt":"`+timestamp+`"},
+			{"name":"two","provider":"east","state":"ready","providerState":"idle","providerObservedAt":"`+timestamp+`"},
+			{"name":"three","provider":"west","state":"ready","providerState":"unknown"},
+			{"name":"four","provider":"namespace","state":"ready"}]`)
+	}))
+	defer server.Close()
+	cfg.Listen = strings.TrimPrefix(server.URL, "http://")
+	run := func(cmd string, args ...string) string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := runClient(t.Context(), cfg, cmd, args, &out, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	table := run("list")
+	for _, want := range []string{"FLEET STATE", "PROVIDER STATE", "OBSERVED AT", timestamp, "stopped", "idle", "unknown"} {
+		if !strings.Contains(table, want) {
+			t.Errorf("list misses %q: %s", want, table)
+		}
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(run("list", "--json")), &rows); err != nil || len(rows) != 4 {
+		t.Fatalf("could not read list: %v, %v", rows, err)
+	}
+	if rows[0]["futureField"] != true || rows[0]["state"] != "ready" || rows[0]["providerState"] != "stopped" || rows[0]["providerObservedAt"] != timestamp ||
+		rows[2]["providerState"] != "unknown" || rows[2]["providerObservedAt"] != nil || rows[3]["providerState"] != nil {
+		t.Fatalf("incorrect inventory observations: %v", rows)
+	}
+	status := run("status")
+	for _, want := range []string{"4 (4 ready)", "Provider state (east):", "2 (1 idle, 1 stopped); last observed " + timestamp, "Provider state (west):", "1 (1 unknown)"} {
+		if !strings.Contains(status, want) {
+			t.Errorf("status misses %q: %s", want, status)
+		}
+	}
+	var report statusReport
+	if err := json.Unmarshal([]byte(run("status", "--json")), &report); err != nil {
+		t.Fatal(err)
+	}
+	east, west := report.ProviderStates["east"], report.ProviderStates["west"]
+	if report.Total != 4 || report.Machines["ready"] != 4 || len(report.ProviderStates) != 2 ||
+		east == nil || east.Total != 2 || east.States["idle"] != 1 || east.States["stopped"] != 1 || east.ObservedAt.Format(time.RFC3339) != timestamp ||
+		west == nil || west.Total != 1 || west.States["unknown"] != 1 || !west.ObservedAt.IsZero() {
+		t.Fatalf("incorrect status: %+v", report)
+	}
+}
+
+func TestStatusReportsUnavailableInventory(t *testing.T) {
+	cfg := config.Default()
+	cfg.StateDir = t.TempDir()
+	mustAdminToken(t, cfg.StateDir)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/_info" {
+			_, _ = io.WriteString(w, `{"version":"test"}`)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":"unauthorized"}`)
+	}))
+	defer server.Close()
+	cfg.Listen = strings.TrimPrefix(server.URL, "http://")
+	var out bytes.Buffer
+	err := runClient(t.Context(), cfg, "status", []string{"--json"}, &out, io.Discard)
+	var report statusReport
+	if err == nil || json.Unmarshal(out.Bytes(), &report) != nil || !report.Daemon.Running || report.Machines != nil {
+		t.Fatalf("unreadable inventory must not report success: %v %s", err, &out)
 	}
 }
 
@@ -196,7 +285,7 @@ func TestStatusReportsDaemonAndMachines(t *testing.T) {
 	if err := runClient(t.Context(), cfg, "status", nil, &out, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Providers:", "primary", "47733", "Worker limit:", "17", "running on", "2 (1 ready, 1 stopped)"} {
+	for _, want := range []string{"Providers:", "primary", "47733", "Worker limit:", "17", "running on", "2 (1 ready, 1 stopped)", "not reported"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("status misses %q:\n%s", want, out.String())
 		}

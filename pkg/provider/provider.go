@@ -92,6 +92,13 @@ type PassiveConnector interface {
 	ConnectPassive(context.Context, string, int) (Endpoint, error)
 }
 
+// StateObserver reports provider-native lifecycle states for managed remote IDs
+// without waking machines. An omitted ID is unobserved, not necessarily deleted.
+// Implementations must return display-safe states and discard results on error.
+type StateObserver interface {
+	ObserveStates(ctx context.Context, ids []string) (map[string]string, error)
+}
+
 // Provider owns vendor-specific lifecycle and private transport. Methods must
 // honor context cancellation. Create uses OperationID to deduplicate retries.
 type Provider interface {

@@ -57,22 +57,29 @@ func printJSON(w io.Writer, value any) error {
 	return encoder.Encode(value)
 }
 
-func printMachineTable(w io.Writer, machines []fleet.Machine, color bool) {
+func printMachineTable(w io.Writer, machines []fleet.ObservedMachine, color bool) {
 	// tabwriter counts escape bytes as width, so pad states before coloring.
-	width := len("STATE")
+	width := len("FLEET STATE")
 	for _, m := range machines {
 		width = max(width, len(m.State))
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(tw, "NAME\tPROVIDER\t%-*s\tID\tLAST STOP\n", width, "STATE")
+	fmt.Fprintf(tw, "NAME\tPROVIDER\t%-*s\tPROVIDER STATE\tOBSERVED AT\tID\tLAST STOP\n", width, "FLEET STATE")
 	for _, m := range machines {
 		state := fmt.Sprintf("%-*s", width, m.State)
 		if color {
 			state = styleState(m.State, true) + state[len(m.State):]
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", orDash(m.Name), orDash(m.Provider), state, shortID(m.ID), lastStop(m, time.Now()))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", orDash(m.Name), orDash(m.Provider), state, orDash(m.ProviderState), observationTime(m.ProviderObservedAt), shortID(m.ID), lastStop(m.Machine, time.Now()))
 	}
 	tw.Flush()
+}
+
+func observationTime(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 func printMachineDetails(w io.Writer, m fleet.Machine, color bool) {

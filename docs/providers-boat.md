@@ -82,6 +82,22 @@ snapshot does not reinstall T3; boot services in the prepared image must start i
 Boat's default auto-stop policy applies because the create request does not
 override `ttlSeconds`. This provider policy is independent of the fleet's archive cleanup.
 
+## Worker inventory
+
+`t3fleet list` shows the state saved by the daemon, the sandbox state reported
+by Boat, and when the daemon read it. For example, `ready` / `stopped` means T3
+passed its last readiness check, but the sandbox is now stopped. The display
+uses Boat CLI names: `archived` appears as `stopped`, `archiving` as
+`stopping`, and `provisioned` as `starting`. `t3fleet status` counts fleet
+states separately from observed states for each Boat instance.
+
+Each invocation reads Boat's inventory in the configured organization and
+matches only managed remote IDs. It never wakes a worker or adopts other
+sandboxes. If Boat is unreachable, the read times out, or the ID is absent,
+the local row remains visible with provider state `unknown` and no observation
+time. An unrecognized state returned by Boat also displays as `unknown`, with
+an observation time. Namespace workers show only the local state.
+
 ## Private transport
 
 The adapter hosts the T3 port with `public: false` and `localhost: true`. T3 can

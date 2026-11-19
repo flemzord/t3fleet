@@ -45,6 +45,23 @@ func (d daemonClient) machines(ctx context.Context) ([]fleet.Machine, error) {
 	return machines, nil
 }
 
+// Only inventory commands ask for provider observations. Reference resolution
+// and shell completion keep using the local, inexpensive machine list.
+func (d daemonClient) inventory(ctx context.Context) ([]byte, error) {
+	// Allow time for the daemon's bounded provider read and the local response.
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return d.call(ctx, http.MethodGet, "/v1/machines?observe=1", nil)
+}
+
+func parseInventory(data []byte) ([]fleet.ObservedMachine, error) {
+	var machines []fleet.ObservedMachine
+	if json.Unmarshal(data, &machines) != nil {
+		return nil, errors.New("invalid daemon response")
+	}
+	return machines, nil
+}
+
 func (d daemonClient) resolve(ctx context.Context, ref string, allowPrefix bool) (fleet.Machine, error) {
 	if err := validateMachineRef(ref); err != nil {
 		return fleet.Machine{}, err

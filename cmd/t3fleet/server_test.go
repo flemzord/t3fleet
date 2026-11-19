@@ -35,7 +35,10 @@ func (f *fakeFleet) Create(_ context.Context, r fleet.CreateRequest) (fleet.Mach
 	f.created = r
 	return fleet.Machine{ID: "machine-1"}, f.err
 }
-func (f *fakeFleet) List() []fleet.Machine                { return []fleet.Machine{{ID: "machine-1"}} }
+func (f *fakeFleet) List() []fleet.Machine { return []fleet.Machine{{ID: "machine-1"}} }
+func (f *fakeFleet) ObservedList(context.Context) []fleet.ObservedMachine {
+	return []fleet.ObservedMachine{{Machine: fleet.Machine{ID: "machine-1", State: "ready"}, ProviderState: "stopped"}}
+}
 func (f *fakeFleet) Get(id string) (fleet.Machine, error) { return fleet.Machine{ID: id}, f.err }
 func (f *fakeFleet) Start(_ context.Context, id string) error {
 	f.calls = append(f.calls, "start:"+id)
@@ -100,6 +103,24 @@ func TestAdminAuthorizationAndHostIsolation(t *testing.T) {
 		w := adminRequest(h, http.MethodGet, path, "", "")
 		if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "private-admin-token") {
 			t.Fatal("unsafe health/info response")
+		}
+	}
+}
+
+func TestAdminInventoryObservationIsOptIn(t *testing.T) {
+	h := newAdminHandler(&fakeFleet{}, "token")
+	for _, tc := range []struct {
+		path, token string
+		code        int
+		observed    bool
+	}{
+		{"/v1/machines", "token", http.StatusOK, false},
+		{"/v1/machines?observe=1", "", http.StatusUnauthorized, false},
+		{"/v1/machines?observe=1", "token", http.StatusOK, true},
+	} {
+		w := adminRequest(h, http.MethodGet, tc.path, tc.token, "")
+		if w.Code != tc.code || strings.Contains(w.Body.String(), `"providerState":"stopped"`) != tc.observed {
+			t.Errorf("GET %s: %d %s", tc.path, w.Code, w.Body)
 		}
 	}
 }
