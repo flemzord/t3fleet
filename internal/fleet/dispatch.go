@@ -335,7 +335,18 @@ if [[ -e "$repo" || -L "$repo" ]]; then
 else
   stage=$(mktemp -d "$base/clone.XXXXXXXX")
   trap 'rmdir -- "$stage" 2>/dev/null || true' EXIT
-  if ! git -c protocol.file.allow=never clone -- "$remote" "$stage/repo" >/dev/null 2>&1; then
+  clone_opts=(-c protocol.file.allow=never)
+  if [[ "$remote" == https://github.com/* ]] && command -v gh >/dev/null &&
+     [[ "$(git ls-remote --get-url -- "$remote" 2>/dev/null)" == "$remote" ]]; then
+    # Leave configured helpers (even an explicit empty reset) and URL rewrites
+    # to Git. --get-url only expands the URL; it makes no network request.
+    status=0
+    git config --get-urlmatch credential.helper "$remote" >/dev/null 2>&1 || status=$?
+    if [[ "$status" == 1 ]]; then
+      clone_opts+=(-c 'credential.https://github.com.helper=!GH_PROMPT_DISABLED=1 gh auth git-credential')
+    fi
+  fi
+  if ! git "${clone_opts[@]}" clone -- "$remote" "$stage/repo" >/dev/null 2>&1; then
     rm -rf -- "$stage/repo"
     exit 1
   fi
