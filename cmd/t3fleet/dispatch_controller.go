@@ -49,7 +49,11 @@ func startDispatchController(ctx context.Context, cfg config.Config, diagnostics
 			return proxy.DispatchWorker{}, nil, err
 		}
 	}
-	if err := enableControllerPeerLinks(userdata); err != nil {
+	var drivers []string
+	for _, agent := range cfg.Dispatch.AgentCatalog() {
+		drivers = append(drivers, agent.Driver)
+	}
+	if err := prepareControllerSettings(userdata, drivers); err != nil {
 		_ = lock.Close()
 		return proxy.DispatchWorker{}, nil, err
 	}
@@ -194,8 +198,10 @@ func privateControllerDirectory(path string) error {
 }
 
 // T3 loads this settings file at startup. The controller belongs to t3fleet;
-// only its Linked Environments setting is managed here.
-func enableControllerPeerLinks(userdata string) error {
+// only Linked Environments and the declared agents are managed here. Desktop
+// lists a provider in the fleet settings only when the controller enables it,
+// and T3 leaves Pi disabled by default.
+func prepareControllerSettings(userdata string, drivers []string) error {
 	const maxSettings = 4 << 20
 	path := filepath.Join(userdata, "settings.json")
 	settings := make(map[string]json.RawMessage)
@@ -210,10 +216,41 @@ func enableControllerPeerLinks(userdata string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return errors.New("could not find local T3 dispatch controller settings")
 	}
-	if string(settings["linkedEnvironmentsEnabled"]) == "true" {
+	changed := false
+	if string(settings["linkedEnvironmentsEnabled"]) != "true" {
+		settings["linkedEnvironmentsEnabled"] = json.RawMessage("true")
+		changed = true
+	}
+	instances := make(map[string]map[string]json.RawMessage)
+	if raw := settings["providerInstances"]; len(raw) != 0 && string(raw) != "null" {
+		if json.Unmarshal(raw, &instances) != nil || instances == nil {
+			return errors.New("could not read local T3 dispatch controller provider settings")
+		}
+	}
+	instancesChanged := false
+	for _, driver := range drivers {
+		encoded, _ := json.Marshal(driver)
+		instance := instances[driver]
+		if instance == nil || string(instance["driver"]) != string(encoded) {
+			instance = map[string]json.RawMessage{"driver": encoded}
+		}
+		if string(instance["enabled"]) != "true" {
+			instance["enabled"] = json.RawMessage("true")
+			instances[driver] = instance
+			instancesChanged = true
+		}
+	}
+	if instancesChanged {
+		raw, err := json.Marshal(instances)
+		if err != nil {
+			return errors.New("could not encode local T3 dispatch controller provider settings")
+		}
+		settings["providerInstances"] = raw
+		changed = true
+	}
+	if !changed {
 		return nil
 	}
-	settings["linkedEnvironmentsEnabled"] = json.RawMessage("true")
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return errors.New("could not encode local T3 dispatch controller settings")

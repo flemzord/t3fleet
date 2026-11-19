@@ -64,7 +64,7 @@ Start with [examples/boat.json](../examples/boat.json) or the [multi-provider ex
 | `dispatch.t3Binary` | Absolute path to the local T3 executable. |
 | `dispatch.providerOrder` | Required array of instance names. The first is primary. Subsequent entries are fallbacks in order. |
 | `dispatch.maxWorkers` | Maximum concurrent reservations, including pending launches. Omitted or zero means 8. |
-| `dispatch.agents` | Agents offered by this fleet. Each entry has a T3 `driver` (`codex`, `claudeAgent` or `pi`) and the `models` it offers. A driver appears once. The first model of the first entry is the default for launches without a model. Pi model IDs use Pi's `<provider>/<model>` form, or `default`. Every worker image must include every declared agent. |
+| `dispatch.agents` | Agents offered by this fleet. Each entry has a T3 `driver` (`codex`, `claudeAgent` or `pi`) and the `models` it offers. A driver appears once. The first model of the first entry is the default for launches without a model. Pi model IDs use Pi's `<provider>/<model>` form, or `default`. Every worker image must include every declared agent. At startup, the daemon enables each declared agent in its local T3 controller settings so Desktop lists it. |
 | `dispatch.model` | Shorthand for a single Codex model, used when `dispatch.agents` is absent. Defaults to `gpt-5.4`. Do not set both. |
 | `dispatch.deleteWorkerOnArchive` | Default `false`. Set to `true` to delete a thread’s worker after a confirmed archive. |
 

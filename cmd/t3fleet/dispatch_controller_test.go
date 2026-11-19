@@ -17,7 +17,7 @@ func TestEnableControllerPeerLinksKeepsOtherSettings(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"linkedEnvironmentsEnabled":false,"newWorktreesStartFromOrigin":false}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := enableControllerPeerLinks(userdata); err != nil {
+	if err := prepareControllerSettings(userdata, nil); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
@@ -27,6 +27,53 @@ func TestEnableControllerPeerLinksKeepsOtherSettings(t *testing.T) {
 	var settings map[string]bool
 	if json.Unmarshal(data, &settings) != nil || len(settings) != 2 || !settings["linkedEnvironmentsEnabled"] || settings["newWorktreesStartFromOrigin"] {
 		t.Fatal("controller Labs update did not preserve other settings")
+	}
+}
+
+func TestPrepareControllerSettingsEnablesDeclaredAgents(t *testing.T) {
+	userdata := t.TempDir()
+	path := filepath.Join(userdata, "settings.json")
+	initial := `{"linkedEnvironmentsEnabled":true,"providerInstances":{"claudeAgent":{"driver":"claudeAgent","enabled":false,"accentColor":"#e51992"},"pi":{"driver":"codex"},"grok":{"driver":"grok","enabled":false}}}`
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareControllerSettings(userdata, []string{"codex", "claudeAgent", "pi"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings struct {
+		Linked    bool `json:"linkedEnvironmentsEnabled"`
+		Instances map[string]struct {
+			Driver  string
+			Enabled *bool
+			Accent  string `json:"accentColor"`
+		} `json:"providerInstances"`
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	for _, driver := range []string{"codex", "claudeAgent", "pi"} {
+		instance := settings.Instances[driver]
+		if instance.Driver != driver || instance.Enabled == nil || !*instance.Enabled {
+			t.Fatalf("%s is not enabled: %s", driver, data)
+		}
+	}
+	if !settings.Linked || settings.Instances["claudeAgent"].Accent != "#e51992" || settings.Instances["grok"].Enabled == nil || *settings.Instances["grok"].Enabled {
+		t.Fatalf("other controller settings were not preserved: %s", data)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareControllerSettings(userdata, []string{"pi"}); err != nil {
+		t.Fatal(err)
+	}
+	again, err := os.Stat(path)
+	if err != nil || !again.ModTime().Equal(info.ModTime()) {
+		t.Fatal("unchanged controller settings were rewritten")
 	}
 }
 
