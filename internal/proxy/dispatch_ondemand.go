@@ -216,6 +216,9 @@ func (d *dispatcher) prepareDemandWorker(ctx context.Context, id, projectID stri
 		if _, err := d.seedProject(ctx, worker, project, path); err != nil {
 			return DispatchWorker{}, err
 		}
+		if err := d.enableWorkerAgents(ctx, worker); err != nil {
+			return DispatchWorker{}, err
+		}
 		d.mu.Lock()
 		route.Ready = true
 		route.RetryUntil = time.Time{}
