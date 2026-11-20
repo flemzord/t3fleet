@@ -55,11 +55,12 @@ func enabledAgentInstances(current map[string]any, agents []DispatchAgent) (map[
 	changed := false
 	for _, agent := range agents {
 		instance, _ := instances[agent.Driver].(map[string]any)
-		if instance == nil || instance["driver"] != agent.Driver {
+		switch {
+		case instance == nil || instance["driver"] != agent.Driver:
 			instance = map[string]any{"driver": agent.Driver}
-		} else if instance["enabled"] == true {
+		case instance["enabled"] == true:
 			continue
-		} else {
+		default:
 			instance = maps.Clone(instance)
 		}
 		instance["enabled"] = true
