@@ -429,6 +429,26 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 			}
 		}
 	})
+	t.Run("Desktop can change the modes of an existing thread", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
+		defer cancel()
+		conn := newDispatchTestClient(t, ctx, server.URL, token)
+		defer func() { _ = conn.conn.CloseNow() }()
+		const threadID = "on-demand-b"
+		conn.rpc("orchestration.dispatchCommand", map[string]any{
+			"type": "thread.runtime-mode.set", "threadId": threadID, "commandId": "desktop-runtime-mode",
+			"runtimeMode": "approval-required",
+		})
+		conn.rpc("orchestration.dispatchCommand", map[string]any{
+			"type": "thread.interaction-mode.set", "threadId": threadID, "commandId": "desktop-interaction-mode",
+			"interactionMode": "plan",
+		})
+		projection := conn.rpc("orchestration.getThreadProjection", map[string]any{"threadId": threadID})
+		thread, _ := projection["thread"].(map[string]any)
+		if thread["runtimeMode"] != "approval-required" || thread["interactionMode"] != "plan" {
+			t.Fatalf("worker did not persist the mode changes: runtime=%v, interaction=%v", thread["runtimeMode"], thread["interactionMode"])
+		}
+	})
 	if calls() != 3 {
 		t.Fatal("routing an existing thread provisioned again")
 	}
