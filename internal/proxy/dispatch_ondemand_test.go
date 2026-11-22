@@ -84,6 +84,25 @@ func checkFleetDescriptor(t *testing.T, descriptor map[string]any, version any) 
 	}
 }
 
+func waitDispatchProjectionRow(c *dispatchTestClient, threadID, collection, id, status string) map[string]any {
+	c.t.Helper()
+	for {
+		projection := c.rpc("orchestration.getThreadProjection", map[string]any{"threadId": threadID})
+		rows, _ := projection[collection].([]any)
+		for _, value := range rows {
+			row, _ := value.(map[string]any)
+			if row["status"] == status && (id == "" || row["id"] == id) {
+				return row
+			}
+		}
+		select {
+		case <-c.ctx.Done():
+			c.t.Fatalf("thread %s did not reach %s in %s", threadID, status, collection)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
 func TestLiveOnDemandDispatch(t *testing.T) {
 	setup := setupDispatchReplay(t)
 	controllerURL, controllerToken, controllerDescriptor := startLiveT3(t, nil)
@@ -250,11 +269,15 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 	}
 	launch := func(c *dispatchTestClient, reqID int, thread string) {
 		projectID := "demo"
+		model, mode := "multi-turn", "full-access"
 		if thread == "on-demand-b" {
 			projectID = "other"
 		}
+		if thread == "on-demand-c" {
+			model, mode = "approval", "approval-required"
+		}
 		c.send(reqID, "orchestration.launchThread", map[string]any{"threadId": thread, "projectId": projectID, "commandId": "launch-" + thread,
-			"title": thread, "modelSelection": map[string]any{"instanceId": "devReplay", "model": "multi-turn"}, "runtimeMode": "full-access", "interactionMode": "default",
+			"title": thread, "modelSelection": map[string]any{"instanceId": "devReplay", "model": model}, "runtimeMode": mode, "interactionMode": "default",
 			"workspaceStrategy": map[string]any{"type": "root"},
 			"initialMessage":    map[string]any{"text": "One", "messageId": "message-" + thread, "attachments": []any{}},
 		})
@@ -356,6 +379,23 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 	if calls() != 4 {
 		t.Fatal("new thread did not get exactly one worker after capacity release")
 	}
+	t.Run("Desktop can answer a pending approval", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+		defer cancel()
+		conn := newDispatchTestClient(t, ctx, server.URL, token)
+		defer func() { _ = conn.conn.CloseNow() }()
+		const threadID = "on-demand-c"
+		pending := waitDispatchProjectionRow(conn, threadID, "runtimeRequests", "", "pending")
+		id, _ := pending["id"].(string)
+		if id == "" {
+			t.Fatal("pending approval has no request ID")
+		}
+		conn.rpc("orchestration.dispatchCommand", map[string]any{
+			"type": "runtime-request.respond", "threadId": threadID, "commandId": "desktop-approve", "requestId": id, "decision": "accept",
+		})
+		waitDispatchProjectionRow(conn, threadID, "runtimeRequests", id, "resolved")
+		waitDispatchProjectionRow(conn, threadID, "runs", "", "completed")
+	})
 	client.rpc("orchestration.getThreadProjection", map[string]any{"threadId": "on-demand-b"})
 	worker, err := p.dispatch.threadWorker("on-demand-c")
 	if err != nil {
