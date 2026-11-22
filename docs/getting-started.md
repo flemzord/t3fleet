@@ -61,6 +61,7 @@ Start with [examples/boat.json](../examples/boat.json) or the [multi-provider ex
 | `expectedVersion` | Exact controller and worker T3 version, without the leading `v`. |
 | `providers.<name>` | One configured account, template and machine shape. Names are operator-defined, e.g. `primary` and `burst` may both have `type: "boat"`. |
 | `dispatch.listen` | Stable T3 endpoint, on a separate `127.0.0.1` port. Pair with this service once. |
+| `dispatch.externalOrigin` | Optional HTTPS origin for clients on a private network, for example `https://fleet.example.net`. A TLS reverse proxy must serve this address. |
 | `dispatch.t3Binary` | Absolute path to the local T3 executable. |
 | `dispatch.providerOrder` | Required array of instance names. The first is primary. Subsequent entries are fallbacks in order. |
 | `dispatch.maxWorkers` | Maximum concurrent reservations, including pending launches. Omitted or zero means 8. |
@@ -87,6 +88,14 @@ t3fleet serve
 In another terminal with the same configuration, run `t3fleet pair` and open the one-use link in T3 Desktop. Use **Add to another machine** on a GitHub project. Choose the fleet, the default Git branch and a first text message. Adding another project needs no configuration change. The worker receives its own clone on the first launch. For server-to-server use see [Linked Environments](dispatch.md#launch-from-another-t3-server).
 
 Use `t3fleet status` to see settings from the selected file and the reachability of the daemon, `t3fleet list` and `t3fleet inspect NAME` to locate a worker, and `t3fleet admin --help` for recovery. Keep the state directory and dispatch origin stable across restarts. The service only listens on loopback; a remote caller needs a private route, such as an SSH tunnel that preserves the port. Keep the admin listener private.
+
+## Connect from another machine over HTTPS
+
+1. On the fleet host, keep `dispatch.listen` unchanged and set `dispatch.externalOrigin` to the HTTPS address clients will use. Restart the daemon. With Home Manager, put this value under `services.t3fleet.settings.dispatch`.
+2. On the reverse proxy, use a certificate trusted by the clients, restrict access to the private network, and forward HTTP and WebSocket requests to `dispatch.listen`. Preserve the external `Host` header. Leave the administration port private and redact `wsTicket` from access logs.
+3. On the fleet host, run `t3fleet pair --external`. Open the resulting link in T3 Desktop on the remote machine. For a server-to-server link, run `t3fleet pair --peer-access LEVEL` and enter the HTTPS address and code in the source server.
+
+The local address and existing pairings continue to work. The HTTPS origin only adds a route to the same fleet; it does not start a TLS listener or grant access.
 
 ## Replacing an early configuration
 

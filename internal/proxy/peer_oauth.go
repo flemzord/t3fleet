@@ -100,7 +100,7 @@ func (p *Proxy) NewPeerPairing(ctx context.Context, access string) (string, erro
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	status, payload, err := requestPeerOAuth(p, req, body, true)
+	status, payload, err := requestPeerOAuth(p, req, body, true, p.origin)
 	var reply struct{ Credential, Purpose, Access string }
 	if err != nil || status != http.StatusOK || json.Unmarshal(payload, &reply) != nil ||
 		reply.Purpose != "peer-link" || reply.Access != access || !validWorkerPeerCredential(reply.Credential) {
@@ -111,7 +111,7 @@ func (p *Proxy) NewPeerPairing(ctx context.Context, access string) (string, erro
 
 // servePeerOAuth sends just the native linked-environment sign-in routes to the
 // dedicated controller. Desktop pairing and peer authorization remain separate.
-func (d *dispatcher) servePeerOAuth(p *Proxy, w http.ResponseWriter, r *http.Request) bool {
+func (d *dispatcher) servePeerOAuth(p *Proxy, w http.ResponseWriter, r *http.Request, origin *url.URL) bool {
 	admin := false
 	switch r.URL.Path {
 	case "/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp",
@@ -184,7 +184,7 @@ func (d *dispatcher) servePeerOAuth(p *Proxy, w http.ResponseWriter, r *http.Req
 		}
 		body, _ = json.Marshal(value)
 	}
-	status, payload, err := requestPeerOAuth(p, r, body, admin)
+	status, payload, err := requestPeerOAuth(p, r, body, admin, origin)
 	if err != nil {
 		fail(w, http.StatusBadGateway, "linked environment authentication is unavailable")
 		return true
@@ -262,7 +262,7 @@ func (d *dispatcher) acceptPeerOAuth(path, contentType string, body []byte) bool
 	}
 }
 
-func requestPeerOAuth(p *Proxy, r *http.Request, body []byte, admin bool) (int, []byte, error) {
+func requestPeerOAuth(p *Proxy, r *http.Request, body []byte, admin bool, origin *url.URL) (int, []byte, error) {
 	ctx, stop := context.WithTimeout(r.Context(), 10*time.Second)
 	defer stop()
 	up, ctx, cancel, err := p.resolve(r.WithContext(ctx))
@@ -282,10 +282,7 @@ func requestPeerOAuth(p *Proxy, r *http.Request, body []byte, admin bool) (int, 
 	}
 	// Native OAuth verifies the resource and issuer against this origin; keep
 	// the already validated public Host even though the controller port moves.
-	req.Host = r.Host
-	if p.origin.Scheme == "https" {
-		req.Header.Set("X-Forwarded-Proto", "https")
-	}
+	setPeerAuthority(req, r, origin)
 	if ct := r.Header.Get("Content-Type"); ct != "" {
 		req.Header.Set("Content-Type", ct)
 	}
@@ -305,4 +302,13 @@ func requestPeerOAuth(p *Proxy, r *http.Request, body []byte, admin bool) (int, 
 		return 0, nil, errors.New("invalid native OAuth response")
 	}
 	return res.StatusCode, data, nil
+}
+
+func setPeerAuthority(upstream, incoming *http.Request, origin *url.URL) {
+	upstream.Host = incoming.Host
+	upstream.Header.Del("X-Forwarded-Proto")
+	if origin.Scheme == "https" {
+		upstream.Host = origin.Host
+		upstream.Header.Set("X-Forwarded-Proto", "https")
+	}
 }

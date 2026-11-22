@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -40,7 +43,7 @@ func TestLiveControllerPeerOAuth(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	var controllerResolves atomic.Int64
-	p, err := NewDispatchOnDemand(origin, store, DispatchOnDemand{
+	opts := DispatchOnDemand{
 		Controller: DispatchWorker{ID: "controller", Resolve: func(context.Context) (Upstream, error) {
 			controllerResolves.Add(1)
 			return Upstream{Endpoint: provider.Endpoint{URL: controllerOrigin}, Token: service}, nil
@@ -52,12 +55,11 @@ func TestLiveControllerPeerOAuth(t *testing.T) {
 			return DispatchWorker{}, "", errors.New("no worker")
 		},
 		Lookup: func(string) (DispatchWorker, error) { return DispatchWorker{}, errors.New("no worker") },
-	})
+	}
+	p, err := NewDispatchOnDemand(origin, store, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	server.Config.Handler = p
-	server.Start()
 	desktop, err := randomToken()
 	if err != nil {
 		t.Fatal(err)
@@ -65,6 +67,21 @@ func TestLiveControllerPeerOAuth(t *testing.T) {
 	if err := p.dispatch.saveToken(t.Context(), desktop); err != nil {
 		t.Fatal(err)
 	}
+	localID := p.dispatch.disk.EnvironmentID
+	opts.ExternalOrigin = &url.URL{Scheme: "https", Host: "fleet.example"}
+	p, err = NewDispatchOnDemand(origin, store, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.authorized(&http.Request{Header: http.Header{"Authorization": {"Bearer " + desktop}}}) ||
+		p.dispatch.disk.EnvironmentID != localID {
+		t.Fatal("enabling the external origin lost the existing Desktop pairing or environment")
+	}
+	server.Config.Handler = p
+	server.Start()
+	t.Run("HTTPS reverse proxy preserves Desktop and peer access", func(t *testing.T) {
+		testExternalDispatch(t, p, server.URL)
+	})
 	t.Run("Desktop can list outgoing links", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
@@ -185,5 +202,72 @@ func TestLiveControllerPeerOAuth(t *testing.T) {
 	}
 	if status := post("/mcp", grant, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`); status != http.StatusUnauthorized {
 		t.Fatalf("revoked peer grant could still sign in: %d", status)
+	}
+}
+
+func testExternalDispatch(t *testing.T, p *Proxy, local string) {
+	t.Helper()
+	target, err := url.Parse(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := httptest.NewTLSServer(httputil.NewSingleHostReverseProxy(target))
+	t.Cleanup(front.Close)
+	client := front.Client()
+	tr := client.Transport.(*http.Transport)
+	tr.TLSClientConfig.ServerName = "127.0.0.1" // Verify the loopback test certificate.
+	tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, front.Listener.Addr().String())
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 12*time.Second)
+	defer cancel()
+	external := p.cfg.ExternalOrigin.String()
+	pair, err := p.NewExternalPairing()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pairURL, err := url.Parse(pair.URL)
+	if err != nil || pairURL.Scheme != "https" || pairURL.Host != p.cfg.ExternalOrigin.Host {
+		t.Fatal("external pairing did not advertise the HTTPS origin")
+	}
+	fragment, _ := url.ParseQuery(pairURL.Fragment)
+	up := Upstream{Endpoint: provider.Endpoint{URL: external}}
+	var exchange struct {
+		Token string `json:"access_token"`
+	}
+	if err := workerPeerJSON(ctx, client, up, "", http.MethodPost, "/oauth/token",
+		url.Values{"subject_token": {fragment.Get("token")}}, &exchange); err != nil || exchange.Token == "" {
+		t.Fatalf("external Desktop exchange failed: %v", err)
+	}
+	ws := newDispatchTestClientHTTP(t, ctx, client, external, exchange.Token)
+	defer func() { _ = ws.conn.CloseNow() }()
+	cfg := ws.rpc("server.getConfig", nil)
+	env, _ := cfg["environment"].(map[string]any)
+	if env["environmentId"] != p.dispatch.disk.EnvironmentID {
+		t.Fatal("external WebSocket advertised a different fleet identity")
+	}
+	var metadata struct{ Resource string }
+	if err := workerPeerJSON(ctx, client, up, "", http.MethodGet, "/.well-known/oauth-protected-resource/mcp", nil, &metadata); err != nil ||
+		metadata.Resource != external+"/mcp" {
+		t.Fatalf("external OAuth discovery did not use the configured origin: %v", err)
+	}
+	up.Token = exchange.Token
+	grant, err := mintNativePeer(ctx, client, up, "read-only", "external OAuth test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := workerPeerRequest(ctx, up, grant, http.MethodPost, "/mcp", []byte(
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"external-test","version":"1"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	res, err := client.Do(req)
+	if err != nil {
+		t.Fatal("HTTPS peer MCP request failed")
+	}
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusOK || res.Header.Get("Mcp-Session-Id") == "" {
+		t.Fatalf("HTTPS peer MCP initialization did not establish a session: HTTP %d", res.StatusCode)
 	}
 }

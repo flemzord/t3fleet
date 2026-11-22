@@ -8,6 +8,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -84,7 +85,7 @@ type peerTool struct {
 	Arguments map[string]any `json:"arguments"`
 }
 
-func (d *dispatcher) controllerMCPRequest(r *http.Request, body []byte) (*http.Response, func(), error) {
+func (d *dispatcher) controllerMCPRequest(r *http.Request, body []byte, origin *url.URL) (*http.Response, func(), error) {
 	up, ctx, cancel, err := resolveUpstream(r.Context(), d.timeout, d.onDemand.Controller.Resolve)
 	if err != nil {
 		return nil, nil, err
@@ -96,7 +97,6 @@ func (d *dispatcher) controllerMCPRequest(r *http.Request, body []byte) (*http.R
 		cleanup()
 		return nil, nil, err
 	}
-	req.Host = r.Host
 	req.Header = up.Endpoint.Headers.Clone()
 	if req.Header == nil {
 		req.Header = make(http.Header)
@@ -108,21 +108,13 @@ func (d *dispatcher) controllerMCPRequest(r *http.Request, body []byte) (*http.R
 			req.Header.Add(key, value)
 		}
 	}
-	if strings.HasPrefix(d.diskOrigin(), "https:") {
-		req.Header.Set("X-Forwarded-Proto", "https")
-	}
+	setPeerAuthority(req, r, origin)
 	res, err := tr.RoundTrip(req)
 	if err != nil {
 		cleanup()
 		return nil, nil, err
 	}
 	return res, func() { _ = res.Body.Close(); cleanup() }, nil
-}
-
-func (d *dispatcher) diskOrigin() string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.disk.Origin
 }
 
 func relayPeerMCPResponse(w http.ResponseWriter, res *http.Response) {
@@ -142,7 +134,7 @@ func peerToolError(w http.ResponseWriter, id json.RawMessage, code, message stri
 	}})
 }
 
-func (d *dispatcher) servePeerMCP(w http.ResponseWriter, r *http.Request) {
+func (d *dispatcher) servePeerMCP(w http.ResponseWriter, r *http.Request, origin *url.URL) {
 	if r.Method != http.MethodPost || r.Header.Get("Origin") != "" || r.URL.RawQuery != "" {
 		fail(w, http.StatusForbidden, "unsupported peer MCP request")
 		return
@@ -170,7 +162,7 @@ func (d *dispatcher) servePeerMCP(w http.ResponseWriter, r *http.Request) {
 		switch request.Method {
 		case "initialize", "notifications/initialized", "ping", "tools/list":
 			body, _ := json.Marshal(request)
-			res, closeRes, err := d.controllerMCPRequest(r, body)
+			res, closeRes, err := d.controllerMCPRequest(r, body, origin)
 			if err != nil {
 				fail(w, 502, "peer controller unavailable")
 				return
@@ -190,7 +182,7 @@ func (d *dispatcher) servePeerMCP(w http.ResponseWriter, r *http.Request) {
 	// Ask the native controller to admit this exact credential and transport
 	// session on every request. This also applies revocation and mode limits.
 	ping, _ := json.Marshal(peerRequest{JSONRPC: "2.0", ID: request.ID, Method: "ping"})
-	check, closeCheck, err := d.controllerMCPRequest(r, ping)
+	check, closeCheck, err := d.controllerMCPRequest(r, ping, origin)
 	if err != nil {
 		fail(w, 502, "peer controller unavailable")
 		return
@@ -211,7 +203,7 @@ func (d *dispatcher) servePeerMCP(w http.ResponseWriter, r *http.Request) {
 	case "t3_environment_read", "t3_project_list", "t3_project_read", "orchestrator_capabilities":
 		request.Params, _ = json.Marshal(tool)
 		body, _ := json.Marshal(request)
-		res, closeRes, err := d.controllerMCPRequest(r, body)
+		res, closeRes, err := d.controllerMCPRequest(r, body, origin)
 		if err != nil {
 			fail(w, 502, "peer controller unavailable")
 			return

@@ -60,14 +60,20 @@ type dispatchTestClient struct {
 
 func newDispatchTestClient(t *testing.T, ctx context.Context, origin, token string) *dispatchTestClient {
 	t.Helper()
+	return newDispatchTestClientHTTP(t, ctx, http.DefaultClient, origin, token)
+}
+
+func newDispatchTestClientHTTP(t *testing.T, ctx context.Context, httpClient *http.Client, origin, token string) *dispatchTestClient {
+	t.Helper()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, origin+"/api/auth/websocket-ticket/rpc", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
-	res, err := http.DefaultClient.Do(req)
+	res, err := httpClient.Do(req)
 	if err != nil {
 		t.Fatal("dispatch ticket request failed")
 	}
 	ticket, _ := decodeDispatchResponse(t, res)["ticket"].(string)
-	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(origin, "http")+"/ws?orchestrationProtocol=2&wsTicket="+url.QueryEscape(ticket), nil)
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(origin, "http")+"/ws?orchestrationProtocol=2&wsTicket="+url.QueryEscape(ticket),
+		&websocket.DialOptions{HTTPClient: httpClient})
 	if err != nil {
 		t.Fatal("dispatch socket dial failed")
 	}

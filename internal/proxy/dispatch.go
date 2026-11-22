@@ -63,7 +63,7 @@ func (d *dispatcher) proxy(origin string) (*Proxy, error) {
 		}
 	}
 	p, err := New(Config{
-		Origin: origin, Label: dispatchLabel, Resolve: d.onDemand.Controller.Resolve,
+		Origin: origin, ExternalOrigin: d.onDemand.ExternalOrigin, Label: dispatchLabel, Resolve: d.onDemand.Controller.Resolve,
 		Authorize: d.authorize, SaveToken: d.saveToken, RequestTimeout: d.timeout,
 		Descriptor: func(ctx context.Context) (map[string]any, error) {
 			v, err := descriptor(ctx)
@@ -196,7 +196,7 @@ func rejectRedirect(*http.Request, []*http.Request) error { return http.ErrUseLa
 
 const dispatchShellPath = "/api/orchestration/shell"
 
-func (d *dispatcher) serve(p *Proxy, w http.ResponseWriter, r *http.Request) {
+func (d *dispatcher) serve(w http.ResponseWriter, r *http.Request, origin *url.URL) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == dispatchShellPath:
 		snapshot, err := d.onDemandShell(r.Context())
@@ -219,7 +219,7 @@ func (d *dispatcher) serve(p *Proxy, w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusNotFound, "thread has no dispatch assignment")
 			return
 		}
-		relay := Proxy{origin: p.origin, cfg: Config{Resolve: worker.Resolve, RequestTimeout: d.timeout}}
+		relay := Proxy{origin: origin, cfg: Config{Resolve: worker.Resolve, RequestTimeout: d.timeout}}
 		relay.relay(w, r)
 	default:
 		fail(w, http.StatusNotImplemented, "route is not supported by the fleet")

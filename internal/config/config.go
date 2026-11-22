@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/flemzord/t3fleet/pkg/provider"
@@ -31,6 +33,7 @@ type Config struct {
 // ProviderOrder names configured instances, not adapter types.
 type Dispatch struct {
 	Listen                string   `json:"listen"`
+	ExternalOrigin        string   `json:"externalOrigin,omitempty"`
 	T3Binary              string   `json:"t3Binary"`
 	ProviderOrder         []string `json:"providerOrder"`
 	MaxWorkers            int      `json:"maxWorkers,omitempty"`
@@ -110,6 +113,52 @@ func Load(path string) (Config, error) {
 }
 
 var instanceName = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,62}$`)
+var originLabel = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+var numericHostLabel = regexp.MustCompile(`^(?:[0-9]+|0x[0-9a-f]*)$`)
+
+// ParseExternalOrigin returns the canonical HTTPS origin exposed by a TLS proxy.
+func ParseExternalOrigin(raw string) (*url.URL, error) {
+	invalid := errors.New("dispatch.externalOrigin must be an HTTPS origin with a non-loopback host and no path, query, or fragment")
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil ||
+		u.ForceQuery || u.RawQuery != "" || strings.Contains(raw, "#") ||
+		(u.EscapedPath() != "" && u.EscapedPath() != "/") || strings.HasSuffix(u.Host, ":") {
+		return nil, invalid
+	}
+	host := strings.ToLower(u.Hostname())
+	if ip, err := netip.ParseAddr(host); err == nil {
+		if ip.IsLoopback() || ip.IsUnspecified() || ip.Is4In6() || ip.Zone() != "" {
+			return nil, invalid
+		}
+		host = ip.String()
+		if ip.Is6() {
+			host = "[" + host + "]"
+		}
+	} else {
+		if strings.HasPrefix(u.Host, "[") || len(host) > 253 || host == "localhost" || strings.HasSuffix(host, ".localhost") {
+			return nil, invalid
+		}
+		for label := range strings.SplitSeq(host, ".") {
+			if !originLabel.MatchString(label) {
+				return nil, invalid
+			}
+		}
+		// Browsers interpret some numeric hostnames as legacy IPv4 literals.
+		if numericHostLabel.MatchString(host[strings.LastIndexByte(host, '.')+1:]) {
+			return nil, invalid
+		}
+	}
+	if port := u.Port(); port != "" {
+		n, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || n == 0 {
+			return nil, invalid
+		}
+		if n != 443 {
+			host += ":" + strconv.FormatUint(n, 10)
+		}
+	}
+	return &url.URL{Scheme: "https", Host: host}, nil
+}
 
 func (cfg Config) Validate() error {
 	admin, err := netip.ParseAddrPort(cfg.Listen)
@@ -129,6 +178,11 @@ func (cfg Config) Validate() error {
 	dispatch, err := netip.ParseAddrPort(d.Listen)
 	if err != nil || dispatch.Addr() != netip.AddrFrom4([4]byte{127, 0, 0, 1}) || dispatch.Port() == 0 || dispatch == netip.AddrPortFrom(admin.Addr().Unmap(), admin.Port()) {
 		return errors.New("dispatch.listen must use 127.0.0.1 and a separate, nonzero port")
+	}
+	if d.ExternalOrigin != "" {
+		if _, err := ParseExternalOrigin(d.ExternalOrigin); err != nil {
+			return err
+		}
 	}
 	if !filepath.IsAbs(d.T3Binary) || strings.ContainsAny(d.T3Binary, "\x00\r\n") {
 		return errors.New("dispatch.t3Binary must be an absolute executable path")

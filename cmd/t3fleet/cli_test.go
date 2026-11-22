@@ -318,6 +318,8 @@ func TestPairTargetsTheFleetWithZeroMachines(t *testing.T) {
 		switch r.URL.Path {
 		case "/v1/dispatch/pair":
 			_, _ = io.WriteString(w, `{"url":"http://127.0.0.1:47801/pair#token=one-time"}`)
+		case "/v1/dispatch/pair-external":
+			_, _ = io.WriteString(w, `{"url":"https://fleet.example/pair#token=one-time"}`)
 		case "/v1/dispatch/pair-peer":
 			var req struct{ Access string }
 			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Access != "approval-required" {
@@ -333,6 +335,11 @@ func TestPairTargetsTheFleetWithZeroMachines(t *testing.T) {
 	var out bytes.Buffer
 	if err := runClient(t.Context(), cfg, "pair", nil, &out, io.Discard); err != nil || !strings.HasPrefix(out.String(), "t3code://pair?pairingUrl=") {
 		t.Fatalf("%v %q", err, out.String())
+	}
+	out.Reset()
+	if err := runClient(t.Context(), cfg, "pair", []string{"--external"}, &out, io.Discard); err != nil ||
+		!strings.Contains(out.String(), "https%3A%2F%2Ffleet.example%2Fpair") {
+		t.Fatalf("external Desktop pairing failed: %v", err)
 	}
 	out.Reset()
 	if err := runClient(t.Context(), cfg, "pair", []string{"--peer-access", "approval-required", "--json"}, &out, io.Discard); err != nil || !strings.Contains(out.String(), `"credential": "test-code"`) {

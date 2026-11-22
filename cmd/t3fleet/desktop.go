@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strconv"
 	"time"
+
+	"github.com/flemzord/t3fleet/internal/config"
 )
 
 // The CLI owns the desktop handoff: the daemon can run on another host and
@@ -16,6 +18,10 @@ import (
 var openT3 = openDesktop
 
 func pairingAppLink(data []byte) (string, error) {
+	return pairingAppLinkForOrigin(data, false)
+}
+
+func pairingAppLinkForOrigin(data []byte, external bool) (string, error) {
 	var pair struct {
 		URL string `json:"url"`
 	}
@@ -26,12 +32,19 @@ func pairingAppLink(data []byte) (string, error) {
 	if err != nil {
 		return "", errors.New("invalid pairing URL")
 	}
-	port, err := strconv.Atoi(u.Port())
 	fragment, fragmentErr := url.ParseQuery(u.Fragment)
-	if err != nil || fragmentErr != nil || port < 1 || port > 65535 || u.Scheme != "http" ||
-		(u.Hostname() != "127.0.0.1" && u.Hostname() != "localhost") || u.User != nil ||
-		u.Path != "/pair" || u.RawQuery != "" || fragment.Get("token") == "" {
+	if fragmentErr != nil || u.User != nil || u.EscapedPath() != "/pair" || u.ForceQuery || u.RawQuery != "" || fragment.Get("token") == "" {
 		return "", errors.New("invalid pairing URL")
+	}
+	if external {
+		if _, err := config.ParseExternalOrigin("https://" + u.Host); u.Scheme != "https" || err != nil {
+			return "", errors.New("invalid HTTPS pairing URL")
+		}
+	} else {
+		port, err := strconv.Atoi(u.Port())
+		if err != nil || port < 1 || port > 65535 || u.Scheme != "http" || (u.Hostname() != "127.0.0.1" && u.Hostname() != "localhost") {
+			return "", errors.New("invalid local pairing URL")
+		}
 	}
 	return "t3code://pair?pairingUrl=" + url.QueryEscape(u.String()), nil
 }

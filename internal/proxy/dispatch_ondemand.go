@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"maps"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"time"
@@ -17,9 +18,10 @@ import (
 // DispatchOnDemand uses a local T3 server for the control plane. The callback
 // is only invoked by a first message, with a stable allocation key.
 type DispatchOnDemand struct {
-	Controller  DispatchWorker
-	ProjectRoot string
-	MaxWorkers  int
+	Controller     DispatchWorker
+	ExternalOrigin *url.URL
+	ProjectRoot    string
+	MaxWorkers     int
 	// Agents lists the T3 drivers and models workers offer; the first model
 	// is the default. Empty means the default Codex model.
 	Agents    []DispatchAgent

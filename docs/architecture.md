@@ -64,4 +64,4 @@ The daemon restores saved listeners at startup. A saved port conflict causes sta
 
 ## Deployment boundary
 
-The dispatch, administration and per-machine listeners bind loopback. Use private forwarding with a stable port to reach dispatch from another host. Public hosting would need TLS, an explicit external origin and an operator authorization model. Stopping the daemon closes local connections without stopping or deleting cloud resources.
+The dispatch, administration and per-machine listeners bind loopback. To reach dispatch from another private host, forward the local port over SSH or configure an HTTPS origin behind a TLS reverse proxy. The proxy must expose only the dispatch port. Stopping the daemon closes local connections without stopping or deleting cloud resources.

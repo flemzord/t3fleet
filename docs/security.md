@@ -47,7 +47,7 @@ Stopping the daemon only closes local connections. It does not stop agents, remo
 
 The current gateway has no multi-user authorization model, hosted TLS management, remote idle watchdog, or complete offline protocol emulation. The fleet exposes scoped [native linked-environment operations](dispatch.md#launch-from-another-t3-server); URL-only attachment credentials are not relayed. See [protocol scope](protocol.md#current-scope).
 
-If using an always-on host, use authenticated SSH forwarding and keep control/listener ports private. A public bind address or a reverse proxy alone does not create a supported hosted deployment.
+To reach an always-on host, use authenticated SSH forwarding or configure `dispatch.externalOrigin` behind a TLS reverse proxy restricted to a private network. Keep the administration port private. The HTTPS route uses the same pairings and authorization checks as the local route; it is not a public hosting mode.
 
 ## Reporting a vulnerability
 

@@ -235,6 +235,38 @@ func TestRequestSecurityDoesNotWakeUnauthorizedMachine(t *testing.T) {
 	}
 }
 
+func TestExternalOriginChecksHostAndBrowserOriginTogether(t *testing.T) {
+	p, s := proxyServer(t, "http://127.0.0.1:1", func(c *Config) {
+		c.ExternalOrigin = &url.URL{Scheme: "https", Host: "fleet.example"}
+		c.Descriptor = func(context.Context) (map[string]any, error) {
+			return map[string]any{"environmentId": "fixture"}, nil
+		}
+	})
+	for _, tc := range []struct {
+		host, origin string
+		want         int
+	}{
+		{p.origin.Host, p.origin.String(), http.StatusOK},
+		{"fleet.example", "https://fleet.example", http.StatusOK},
+		{"fleet.example:443", "t3code://app", http.StatusOK},
+		{"fleet.example", p.origin.String(), http.StatusForbidden},
+		{p.origin.Host, "https://fleet.example", http.StatusForbidden},
+		{"fleet.example:8443", "", http.StatusForbidden},
+		{"unknown.example", "https://fleet.example", http.StatusForbidden},
+	} {
+		req := httptest.NewRequest(http.MethodGet, s.URL+"/.well-known/t3/environment", nil)
+		req.Host = tc.host
+		req.Header.Set("Origin", tc.origin)
+		req.Header.Set("X-Forwarded-Host", "fleet.example")
+		req.Header.Set("X-Forwarded-Proto", "https")
+		res := httptest.NewRecorder()
+		p.ServeHTTP(res, req)
+		if res.Code != tc.want {
+			t.Errorf("Host %q, Origin %q: status %d, want %d", tc.host, tc.origin, res.Code, tc.want)
+		}
+	}
+}
+
 func TestPairingCodesAreSingleUseAndReplaceable(t *testing.T) {
 	upstream := sourceServer(t, nil)
 	p, s := proxyServer(t, upstream.URL, nil)

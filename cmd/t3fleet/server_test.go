@@ -77,7 +77,7 @@ func adminRequest(h http.Handler, method, path, token, body string) *httptest.Re
 func TestAdminAuthorizationAndHostIsolation(t *testing.T) {
 	f := &fakeFleet{}
 	h := newAdminHandler(f, "private-admin-token")
-	for _, path := range []string{"/v1/machines", "/v1/machines/x/start", "/v1/machines/x/pair", "/v1/dispatch/pair", "/v1/dispatch/pair-peer"} {
+	for _, path := range []string{"/v1/machines", "/v1/machines/x/start", "/v1/machines/x/pair", "/v1/dispatch/pair", "/v1/dispatch/pair-external", "/v1/dispatch/pair-peer"} {
 		w := adminRequest(h, http.MethodPost, path, "", "{}")
 		if w.Code != http.StatusUnauthorized {
 			t.Fatalf("%s accepted without auth: %d", path, w.Code)
@@ -350,7 +350,7 @@ func TestServeLifecycleAndPrivateState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Dispatch = &config.Dispatch{Listen: t3Listener.Addr().String(), T3Binary: "/test/bin/t3", ProviderOrder: []string{"primary"}}
+	cfg.Dispatch = &config.Dispatch{Listen: t3Listener.Addr().String(), ExternalOrigin: "https://fleet.example", T3Binary: "/test/bin/t3", ProviderOrder: []string{"primary"}}
 	defer func() { _ = t3Listener.Close() }()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -393,6 +393,10 @@ func TestServeLifecycleAndPrivateState(t *testing.T) {
 	pair, err := callAdmin(t.Context(), cfg.Listen, token, "POST", "/v1/dispatch/pair", nil)
 	if err != nil || !strings.Contains(string(pair), cfg.Dispatch.Listen) {
 		t.Fatalf("could not pair with T3 listener: %v", err)
+	}
+	pair, err = callAdmin(t.Context(), cfg.Listen, token, "POST", "/v1/dispatch/pair-external", nil)
+	if err != nil || !strings.Contains(string(pair), "https://fleet.example/pair#token=") {
+		t.Fatalf("could not pair with external origin: %v", err)
 	}
 	for _, path := range []string{"/_healthcheck", "/_info"} {
 		if _, err := callAdmin(t.Context(), cfg.Listen, "", "GET", path, nil); err != nil {

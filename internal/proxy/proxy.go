@@ -44,11 +44,12 @@ type Upstream struct {
 // A successful SaveToken must make Authorize accept that token immediately.
 // Persisted tokens must expire one year after issuance, matching the T3 lease.
 type Config struct {
-	Activity *Activity
-	Session  func(context.Context) (map[string]any, error)
-	Label    string
-	Origin   string
-	Resolve  func(context.Context) (Upstream, error)
+	Activity       *Activity
+	Session        func(context.Context) (map[string]any, error)
+	Label          string
+	Origin         string
+	ExternalOrigin *url.URL // Canonical HTTPS origin, validated by the fleet configuration.
+	Resolve        func(context.Context) (Upstream, error)
 	// Descriptor returns a cached public descriptor without waking the machine.
 	// If absent, the standalone handler resolves the live upstream.
 	Descriptor     func(context.Context) (map[string]any, error)
@@ -110,6 +111,19 @@ func (p *Proxy) Handler() http.Handler { return p }
 // NewPairing replaces the previous unredeemed code. The URL is a credential and
 // must be displayed only to the user who requested pairing, never logged.
 func (p *Proxy) NewPairing() (Pairing, error) {
+	return p.newPairing(p.origin)
+}
+
+// NewExternalPairing advertises the configured HTTPS endpoint, using the same
+// one-use pairing state as the local endpoint.
+func (p *Proxy) NewExternalPairing() (Pairing, error) {
+	if p.cfg.ExternalOrigin == nil {
+		return Pairing{}, errors.New("configure dispatch.externalOrigin to pair over HTTPS")
+	}
+	return p.newPairing(p.cfg.ExternalOrigin)
+}
+
+func (p *Proxy) newPairing(origin *url.URL) (Pairing, error) {
 	code, err := randomToken()
 	if err != nil {
 		return Pairing{}, err
@@ -118,12 +132,14 @@ func (p *Proxy) NewPairing() (Pairing, error) {
 	p.mu.Lock()
 	p.pairing = credential{code, expires}
 	p.mu.Unlock()
-	return Pairing{URL: p.origin.String() + "/pair#token=" + code, ExpiresAt: expires}, nil
+	return Pairing{URL: origin.String() + "/pair#token=" + code, ExpiresAt: expires}, nil
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	if !p.validHost(r.Host) || !p.validOrigin(r.Header.Get("Origin")) {
+	origin := p.requestOrigin(r.Host)
+	browserOrigin := r.Header.Get("Origin")
+	if origin == nil || (browserOrigin != "" && browserOrigin != "t3code://app" && browserOrigin != origin.String()) {
 		fail(w, http.StatusForbidden, "forbidden origin")
 		return
 	}
@@ -143,11 +159,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 	if p.dispatch != nil {
-		if p.dispatch.servePeerOAuth(p, w, r) {
+		if p.dispatch.servePeerOAuth(p, w, r, origin) {
 			return
 		}
 		if r.URL.Path == "/mcp" {
-			p.dispatch.servePeerMCP(w, r)
+			p.dispatch.servePeerMCP(w, r, origin)
 			return
 		}
 	}
@@ -184,7 +200,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if p.dispatch != nil {
-			p.dispatch.serve(p, w, r)
+			p.dispatch.serve(w, r, origin)
 			return
 		}
 		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
@@ -212,16 +228,23 @@ func mediaPath(path string) bool {
 	return strings.HasPrefix(path, "/api/device-hub/") || strings.HasPrefix(path, "/api/preview-stream/")
 }
 
-func (p *Proxy) validHost(host string) bool {
+// requestOrigin selects an explicitly configured origin using Host. In
+// particular, a proxy's forwarding headers never select the OAuth issuer.
+func (p *Proxy) requestOrigin(host string) *url.URL {
 	got, err := url.Parse("http://" + host)
-	if err != nil || got.Host != host || got.User != nil {
-		return false
+	if err != nil || got.Host != host || got.Hostname() == "" || got.User != nil || strings.HasSuffix(host, ":") {
+		return nil
 	}
 	a, b := strings.ToLower(got.Hostname()), strings.ToLower(p.origin.Hostname())
-	if got.Port() != p.origin.Port() {
-		return false
+	if got.Port() == p.origin.Port() && (a == b || (loopback(a) && loopback(b))) {
+		return p.origin
 	}
-	return a == b || (loopback(a) && loopback(b))
+	if external := p.cfg.ExternalOrigin; external != nil && strings.EqualFold(a, external.Hostname()) {
+		if got.Port() == external.Port() || (external.Port() == "" && got.Port() == "443") {
+			return external
+		}
+	}
+	return nil
 }
 func loopback(host string) bool {
 	if host == "localhost" {
@@ -229,9 +252,6 @@ func loopback(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
-}
-func (p *Proxy) validOrigin(origin string) bool {
-	return origin == "" || origin == "t3code://app" || origin == p.origin.String()
 }
 func (p *Proxy) authorized(r *http.Request) bool {
 	scheme, token, ok := strings.Cut(r.Header.Get("Authorization"), " ")

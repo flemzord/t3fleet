@@ -67,9 +67,13 @@ loopback aliases at that same port. Browser requests must come from
 `t3code://app` or the gateway's own origin; arbitrary browser origins are refused.
 Requests without an Origin header still require their route's credential.
 
-The fleet daemon should bind loopback by default. Hosting it elsewhere requires
-TLS termination and an explicit external origin; the gateway does not provision
-certificates or expose an unauthenticated management interface.
+The fleet daemon binds loopback. A TLS proxy can expose the T3 listener on a
+private network when `dispatch.externalOrigin` names its HTTPS origin. The
+gateway selects the origin from the validated `Host`, never from forwarded
+headers. Browser origins must match the selected endpoint or be
+`t3code://app`. OAuth discovery and peer requests use the selected authority.
+The gateway does not provision certificates or expose the administration API
+on that endpoint.
 
 ## Current scope
 

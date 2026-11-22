@@ -14,6 +14,27 @@ import (
 	"github.com/flemzord/t3fleet/pkg/provider"
 )
 
+func TestExternalOrigin(t *testing.T) {
+	for _, raw := range []string{"http://fleet.example", "https://127.0.0.1", "https://localhost", "https://127.1", "https://0x7f000001",
+		"https://[::]", "https://[::ffff:192.0.2.1]", "https://0.0.0.0", "https://*.example", "https://user@fleet.example",
+		"https://fleet.example/path", "https://fleet.example?", "https://fleet.example#",
+		"https://fleet.example:0", "https://fleet.example:65536"} {
+		if _, err := ParseExternalOrigin(raw); err == nil {
+			t.Errorf("accepted invalid origin %q", raw)
+		}
+	}
+	for raw, want := range map[string]string{
+		"https://Fleet.Example:443/": "https://fleet.example",
+		"https://fleet.example:8443": "https://fleet.example:8443",
+		"https://[fd00::1]:8443":     "https://[fd00::1]:8443",
+	} {
+		got, err := ParseExternalOrigin(raw)
+		if err != nil || got.String() != want {
+			t.Errorf("ParseExternalOrigin(%q) = %v, %v; want %s", raw, got, err, want)
+		}
+	}
+}
+
 func writeConfig(t *testing.T, content string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "config.json")

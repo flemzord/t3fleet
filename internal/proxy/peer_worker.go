@@ -50,6 +50,10 @@ func (d *dispatcher) mintNativeWorkerPeer(parent context.Context, worker Dispatc
 	tr := transport(up.Endpoint)
 	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: tr, CheckRedirect: rejectRedirect}
+	return mintNativePeer(ctx, client, up, access, label)
+}
+
+func mintNativePeer(ctx context.Context, client *http.Client, up Upstream, access, label string) (string, error) {
 	var metadata struct{ Resource string }
 	if err := workerPeerJSON(ctx, client, up, "", http.MethodGet, "/.well-known/oauth-protected-resource/mcp", nil, &metadata); err != nil {
 		return "", fmt.Errorf("read worker MCP resource: %w", err)

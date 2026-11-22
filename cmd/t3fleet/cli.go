@@ -571,7 +571,7 @@ func (a *app) machinePairCommand(open bool) *cobra.Command {
 
 func (a *app) fleetPairCommand() *cobra.Command {
 	var peerAccess string
-	var asJSON bool
+	var asJSON, external bool
 	cmd := &cobra.Command{
 		Use:     "pair",
 		GroupID: "daemon",
@@ -579,10 +579,13 @@ func (a *app) fleetPairCommand() *cobra.Command {
 		Long: `Print a T3 Code Desktop pairing link for the fleet.
 With --peer-access, print a Linked Environments code instead, for launching
 on-demand threads from another T3 server. Keep the link or code private.`,
-		Example:           "  t3fleet pair\n  t3fleet pair --peer-access approval-required",
+		Example:           "  t3fleet pair\n  t3fleet pair --external\n  t3fleet pair --peer-access approval-required",
 		Args:              noArgs,
 		ValidArgsFunction: cobra.NoFileCompletions,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if external && peerAccess != "" {
+				return errors.New("--external selects a Desktop pairing URL; use the configured HTTPS URL with the peer code")
+			}
 			d, err := a.daemon()
 			if err != nil {
 				return err
@@ -590,6 +593,8 @@ on-demand threads from another T3 server. Keep the link or code private.`,
 			path, body := "/v1/dispatch/pair", any(nil)
 			if peerAccess != "" {
 				path, body = "/v1/dispatch/pair-peer", map[string]string{"access": peerAccess}
+			} else if external {
+				path = "/v1/dispatch/pair-external"
 			}
 			data, err := d.call(cmd.Context(), http.MethodPost, path, body)
 			if hasDaemonCode(err, "not_found") {
@@ -599,7 +604,7 @@ on-demand threads from another T3 server. Keep the link or code private.`,
 				return err
 			}
 			if peerAccess == "" {
-				link, err := pairingAppLink(data)
+				link, err := pairingAppLinkForOrigin(data, external)
 				if err != nil {
 					return err
 				}
@@ -621,6 +626,7 @@ on-demand threads from another T3 server. Keep the link or code private.`,
 		},
 	}
 	cmd.Flags().StringVar(&peerAccess, "peer-access", "", "issue a Linked Environments code: read-only, approval-required, auto-accept-edits, auto, or full-access")
+	cmd.Flags().BoolVar(&external, "external", false, "use the configured HTTPS origin for Desktop pairing")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the result as JSON")
 	return cmd
 }

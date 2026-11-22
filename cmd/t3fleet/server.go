@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -82,13 +83,21 @@ func serveWithController(ctx context.Context, cfg config.Config, diagnostics io.
 	}
 	defer stop()
 	settings := cfg.Dispatch
+	var externalOrigin *url.URL
+	if settings.ExternalOrigin != "" {
+		externalOrigin, err = config.ParseExternalOrigin(settings.ExternalOrigin)
+		if err != nil {
+			return err
+		}
+	}
 	var releaseWorker func(context.Context, string) error
 	if settings.DeleteWorkerOnArchive {
 		releaseWorker = manager.ReleaseDispatchWorker
 	}
 	dispatch, err := proxy.NewDispatchOnDemand("http://"+settings.Listen, store, proxy.DispatchOnDemand{
 		Controller: controller, ProjectRoot: filepath.Join(root, "projects"),
-		MaxWorkers: settings.MaxWorkerCount(), Agents: dispatchAgents(settings.AgentCatalog()),
+		ExternalOrigin: externalOrigin,
+		MaxWorkers:     settings.MaxWorkerCount(), Agents: dispatchAgents(settings.AgentCatalog()),
 		Provision: func(ctx context.Context, key, remote string) (proxy.DispatchWorker, string, error) {
 			return manager.ProvisionDispatchWorker(ctx, key, remote, settings.ProviderOrder)
 		},
@@ -180,11 +189,19 @@ func newAdminHandlerWithDispatch(manager fleetAPI, token string, dispatch *proxy
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 		defer cancel()
 
-		if r.URL.Path == "/v1/dispatch/pair" {
+		if r.URL.Path == "/v1/dispatch/pair" || r.URL.Path == "/v1/dispatch/pair-external" {
+			w.Header().Set("Cache-Control", "no-store")
 			if dispatch == nil {
 				safeError(w, http.StatusNotFound, "not_found")
 			} else if r.Method != http.MethodPost {
 				w.WriteHeader(http.StatusMethodNotAllowed)
+			} else if r.URL.Path == "/v1/dispatch/pair-external" {
+				pair, err := dispatch.NewExternalPairing()
+				if err != nil {
+					safeError(w, http.StatusBadRequest, err.Error())
+				} else {
+					writeJSON(w, http.StatusOK, pair)
+				}
 			} else if pair, err := dispatch.NewPairing(); err != nil {
 				operationError(w, err)
 			} else {
