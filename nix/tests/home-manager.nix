@@ -15,7 +15,7 @@ let
   hm = builtins.getFlake "github:nix-community/home-manager/5643e73425b85ac359ba2aaf83deae8ce1cd7968";
   pkgs = import fleet.inputs.nixpkgs { inherit system; };
   darwin = pkgs.stdenv.hostPlatform.isDarwin;
-  hmConfig = hm.lib.homeManagerConfiguration {
+  mkConfig = overrides: hm.lib.homeManagerConfiguration {
     inherit pkgs;
     modules = [
       fleet.homeModules.default
@@ -61,12 +61,17 @@ let
           };
         };
       }
+      { services.t3fleet = overrides; }
     ];
   };
+  hmConfig = mkConfig { };
+  jsonFiles = (mkConfig { configFormat = "json"; }).config.home.file;
+  legacyFiles = (mkConfig { settings.providers.primary.credentialFile = null; }).config.home.file;
   cfg = hmConfig.config;
   expectedConfig = if darwin then "${homeDirectory}/Library/Application Support" else cfg.xdg.configHome;
   expectedState = if darwin then "${homeDirectory}/.local/state" else cfg.xdg.stateHome;
-  configPath = "${expectedConfig}/t3fleet/config.json";
+  configPath = "${expectedConfig}/t3fleet/config.toml";
+  jsonPath = "${expectedConfig}/t3fleet/config.json";
   configFile = cfg.home.file.${configPath}.source;
   package = fleet.packages.${system}.t3fleet;
   logFile = "${homeDirectory}/Library/Logs/t3fleet.log";
@@ -74,13 +79,17 @@ let
   command = [ "${package}/bin/t3fleet" "serve" "--config" (toString configFile) ];
   job = cfg.launchd.agents.t3fleet.config;
   unit = cfg.systemd.user.services.t3fleet;
-  serviceFile = if darwin then "${hmConfig.activationPackage}/LaunchAgents/com.t3fleet.daemon.plist"
+  serviceFile =
+    if darwin then "${hmConfig.activationPackage}/LaunchAgents/com.t3fleet.daemon.plist"
     else cfg.xdg.configFile."systemd/user/t3fleet.service".source;
 in
 assert builtins.elem package cfg.home.packages;
+assert !builtins.hasAttr jsonPath cfg.home.file;
+assert builtins.hasAttr jsonPath jsonFiles && !builtins.hasAttr configPath jsonFiles;
+assert builtins.hasAttr jsonPath legacyFiles && !builtins.hasAttr configPath legacyFiles;
 assert cfg.services.t3fleet.settings.stateDir == "${expectedState}/t3fleet";
 assert cfg.services.t3fleet.settings.dispatch.t3Binary ==
-  (if darwin then darwinT3Binary else "${fleet.packages.${system}.t3-server}/bin/t3");
+(if darwin then darwinT3Binary else "${fleet.packages.${system}.t3-server}/bin/t3");
 assert if darwin then job.ProgramArguments == command && job.RunAtLoad && job.KeepAlive
   && job.Umask == 63
   && job.StandardOutPath == logFile && job.StandardErrorPath == logFile
@@ -92,10 +101,12 @@ else unit.Service.ExecStart == [ (builtins.concatStringsSep " " command) ]
   && unit.Service.UMask == "0077"
   && builtins.elem (systemdEnv "T3FLEET_TEST_ENV=${extraValue}") unit.Service.Environment
   && (namespaceTokenFile == null || builtins.elem
-    (systemdEnv "NSC_TOKEN_FILE=${namespaceTokenFile}")
-    unit.Service.Environment);
+  (systemdEnv "NSC_TOKEN_FILE=${namespaceTokenFile}")
+  unit.Service.Environment);
 {
   inherit configPath configFile;
+  jsonConfigFile = jsonFiles.${jsonPath}.source;
+  legacyConfigFile = legacyFiles.${jsonPath}.source;
   service = pkgs.runCommand "t3fleet-home-manager-service" { } ''
     cp ${serviceFile} "$out"
   '';

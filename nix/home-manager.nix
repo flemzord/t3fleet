@@ -5,9 +5,21 @@ let
   host = pkgs.stdenv.hostPlatform;
   home = config.home.homeDirectory;
   configHome = if host.isDarwin then "${home}/Library/Application Support" else config.xdg.configHome;
-  settingsFormat = pkgs.formats.json { };
-  rendered = settingsFormat.generate "t3fleet-settings.json" cfg.settings;
-  configFile = pkgs.runCommand "t3fleet-config.json" { } ''
+  jsonFormat = pkgs.formats.json { };
+  # Preserve the existing settings type and null values that TOML cannot encode.
+  containsNull = value:
+    value == null
+    || (builtins.isAttrs value && lib.any containsNull (builtins.attrValues value))
+    || (builtins.isList value && lib.any containsNull value);
+  hasNull = containsNull cfg.settings;
+  configFormat =
+    if cfg.configFormat != "auto" then cfg.configFormat
+    else if hasNull then "json"
+    else "toml";
+  settingsFormat = if configFormat == "toml" then pkgs.formats.toml { } else jsonFormat;
+  fileName = "config.${configFormat}";
+  rendered = settingsFormat.generate "t3fleet-settings.${configFormat}" cfg.settings;
+  configFile = pkgs.runCommand "t3fleet-${fileName}" { } ''
     ${lib.getExe cfg.package} validate --config ${rendered}
     cp ${rendered} "$out"
   '';
@@ -30,8 +42,19 @@ in
       description = "The t3fleet package to install and run.";
     };
 
+    configFormat = lib.mkOption {
+      type = lib.types.enum [ "auto" "toml" "json" ];
+      default = "auto";
+      description = ''
+        Format of the generated daemon configuration. The default uses TOML
+        unless settings contain null values, in which case it preserves JSON.
+        Select JSON explicitly when using an older t3fleet package or keeping
+        an existing script that refers to config.json.
+      '';
+    };
+
     settings = lib.mkOption {
-      inherit (settingsFormat) type;
+      inherit (jsonFormat) type;
       default = { };
       apply = settings:
         if host.isLinux && builtins.isAttrs (settings.dispatch or null)
@@ -42,10 +65,10 @@ in
           };
         } else settings;
       description = ''
-        On-demand fleet configuration as in examples/config.json. On Linux,
+        Fleet configuration as in examples/config.json. On Linux,
         dispatch.t3Binary defaults to the T3 server pinned by this flake.
         On macOS, set it to the absolute path of a matching T3 executable.
-        This JSON is written to the Nix store. Use absolute string paths
+        The generated configuration is written to the Nix store. Use absolute string paths
         to credential files; never put secrets or Nix path literals here.
       '';
     };
@@ -73,16 +96,23 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    assertions = [ {
-      assertion = builtins.isAttrs (cfg.settings.providers or null) && cfg.settings.providers != { };
-      message = "services.t3fleet.settings.providers must contain at least one named provider instance.";
-    } {
-      assertion = lib.all (name: builtins.match "[A-Za-z_][A-Za-z0-9_]*" name != null)
-        (builtins.attrNames cfg.environment);
-      message = "services.t3fleet.environment must contain valid environment variable names.";
-    } ];
+    assertions = [
+      {
+        assertion = builtins.isAttrs (cfg.settings.providers or null) && cfg.settings.providers != { };
+        message = "services.t3fleet.settings.providers must contain at least one named provider instance.";
+      }
+      {
+        assertion = lib.all (name: builtins.match "[A-Za-z_][A-Za-z0-9_]*" name != null)
+          (builtins.attrNames cfg.environment);
+        message = "services.t3fleet.environment must contain valid environment variable names.";
+      }
+      {
+        assertion = configFormat != "toml" || !hasNull;
+        message = "TOML cannot represent null; use services.t3fleet.configFormat = \"json\" to preserve these settings.";
+      }
+    ];
     home.packages = [ cfg.package ];
-    home.file."${configHome}/t3fleet/config.json".source = configFile;
+    home.file."${configHome}/t3fleet/${fileName}".source = configFile;
     services.t3fleet.settings.stateDir = lib.mkDefault (
       if host.isDarwin then "${home}/.local/state/t3fleet" else "${config.xdg.stateHome}/t3fleet"
     );
