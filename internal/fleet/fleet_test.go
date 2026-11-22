@@ -42,13 +42,20 @@ type mockProvider struct {
 	execExitCode    int
 	deleteFails     bool
 	version         string
+	environmentID   string
+	serviceToken    string
 }
 
 func newProvider(t *testing.T) *mockProvider {
 	t.Helper()
-	p := &mockProvider{machines: map[string]provider.Machine{}, operations: map[string]string{}, version: serverVersion}
+	return newProviderWithIdentity(t, "env-test", "service-token")
+}
+
+func newProviderWithIdentity(t *testing.T, environmentID, serviceToken string) *mockProvider {
+	t.Helper()
+	p := &mockProvider{machines: map[string]provider.Machine{}, operations: map[string]string{}, version: serverVersion, environmentID: environmentID, serviceToken: serviceToken}
 	p.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer service-token" || r.Header.Get("X-Provider-Key") != "private-transport" || r.URL.Query().Get("_token") != "provider-secret" {
+		if r.Header.Get("Authorization") != "Bearer "+p.serviceToken || r.Header.Get("X-Provider-Key") != "private-transport" || r.URL.Query().Get("_token") != "provider-secret" {
 			t.Error("private endpoint did not receive the expected service and transport authorization")
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -56,7 +63,7 @@ func newProvider(t *testing.T) *mockProvider {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/.well-known/t3/environment":
-			_ = json.NewEncoder(w).Encode(map[string]any{"environmentId": "env-test", "label": "upstream", "orchestrationProtocolVersion": 2, "serverVersion": serverVersion, "directEndpoints": []string{"https://private.invalid"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"environmentId": p.environmentID, "label": "upstream", "orchestrationProtocolVersion": 2, "serverVersion": serverVersion, "directEndpoints": []string{"https://private.invalid"}})
 		case "/api/auth/session":
 			_ = json.NewEncoder(w).Encode(map[string]any{"scopes": []string{"orchestration:read", "orchestration:write"}, "permissions": map[string]any{"filesystem": "read-write"}})
 		case "/api/orchestration/shell":
@@ -184,7 +191,7 @@ func (p *mockProvider) Exec(ctx context.Context, id string, req provider.ExecReq
 	if strings.Join(req.Args, " ") != "/bin/bash -lc exec t3fleet-runtime-info" {
 		return provider.ExecResult{}, errors.New("unexpected provisioning command")
 	}
-	data, _ := json.Marshal(map[string]string{"token": "service-token", "environmentId": "env-test", "serverVersion": p.version})
+	data, _ := json.Marshal(map[string]string{"token": p.serviceToken, "environmentId": p.environmentID, "serverVersion": p.version})
 	return provider.ExecResult{Stdout: string(data)}, nil
 }
 func (p *mockProvider) Connect(ctx context.Context, id string, port int) (provider.Endpoint, error) {

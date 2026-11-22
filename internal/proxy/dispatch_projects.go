@@ -43,7 +43,7 @@ func (d *dispatcher) loadDemandProjects() error {
 		}
 	}
 	if legacy {
-		return d.store.Save(d.disk)
+		return d.saveDispatchState(d.disk)
 	}
 	return nil
 }
@@ -137,7 +137,7 @@ func (d *dispatcher) rememberProject(p demandProject) (demandProject, error) {
 	demand.Projects = maps.Clone(projects)
 	demand.Projects[p.ID] = p
 	next.OnDemand = &demand
-	if err := d.store.Save(next); err != nil {
+	if err := d.saveDispatchState(next); err != nil {
 		return demandProject{}, errors.New("could not save the project")
 	}
 	d.disk = next

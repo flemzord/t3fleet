@@ -39,6 +39,7 @@ func (d *dispatcher) mintWorkerPeer(ctx context.Context, worker DispatchWorker, 
 }
 
 func (d *dispatcher) mintNativeWorkerPeer(parent context.Context, worker DispatchWorker, access, label string) (string, error) {
+	defer worker.begin()()
 	ctx, stop := context.WithTimeout(parent, d.timeout)
 	defer stop()
 	up, ctx, cancel, err := resolveUpstream(ctx, d.timeout, worker.Resolve)

@@ -1,6 +1,6 @@
-# Launch threads on demand
+# Launch threads on a fleet
 
-The fleet exposes one T3 environment. Its local T3 server handles pairing and project metadata. Each thread gets a dedicated remote T3 server, its own checkout and model session. The dispatcher routes later requests for the thread back to that worker.
+The fleet exposes one T3 environment. Its local T3 server handles pairing and project metadata. On demand, each thread gets a dedicated remote T3 server, checkout and model session. Fixed mode places threads across a bounded pool of reusable VMs. In either mode, later requests go back to the worker already assigned to the thread.
 
 The fleet operator manages T3 updates. Desktop can show the controller’s actual version and report a mismatch, but cannot update the fleet from the app. To upgrade, deploy the matching T3 binary on the controller and in worker templates, and set `expectedVersion` to that version. Changing a template does not upgrade existing workers.
 
@@ -8,7 +8,7 @@ The fleet operator manages T3 updates. Desktop can show the controller’s actua
 
 After pairing with `t3fleet pair`, use **Add to another machine** on a GitHub project and select the fleet. Register as many repositories as you need; two organizations may use the same repository name. HTTPS and Git-over-SSH URLs for the same GitHub repository refer to the same project. Do not put credentials in a URL.
 
-Registering a project writes metadata only. The folder on the controller represents the project; it contains no Git checkout. On the first text message, the worker clones the selected remote using its own Git credentials. A retry of checkout on the same reservation reuses the checkout if its origin matches. A new thread gets a new worker, even in the same project. Changes that exist only in another worker’s checkout are not transferred.
+Registering a project writes metadata only. The folder on the controller represents the project; it contains no Git checkout. On first use, a worker clones the selected remote using its own Git credentials. A retry on the same worker reuses the checkout if its origin matches. Changes that exist only in another worker’s checkout are not transferred.
 
 For a private GitHub repository over HTTPS, the worker can use its existing Git credential helper or a signed-in GitHub CLI (`gh`). If the worker has `gh` and no matching helper is configured, the fleet lets Git ask `gh` for credentials for that clone only. It leaves SSH, URL rewrites, and explicit helper settings (including an empty helper) alone. Later fetches and pushes use the worker’s usual Git configuration.
 
@@ -32,6 +32,21 @@ The fleet accepts incoming links. It can answer outgoing-link list requests from
 The native controller checks the peer grant, its expiry and revocation. A link can read, wait for, message, interrupt or organize its own threads within the grant and caller limits. Re-linking does not transfer ownership of existing threads. Revoke links from T3’s **Sharing & access**. Scratch launches, attachments and arbitrary controller paths are not supported.
 
 ## Placement and retry
+
+### Fixed pool
+
+Set `dispatch.mode = "fixed"` and configure `dispatch.fixed.workers` and `dispatch.fixed.idleTimeout`. The pool starts empty and creates a VM when a thread first uses its slot. Stopped VMs still occupy slots. The dispatcher prefers the lowest last observed load (including launches in progress), then a VM recorded as running. A saved assignment is never moved to another VM, even if a provider call times out.
+
+Threads on the same VM use separate worktrees. A root launch starts a new worktree from the chosen branch or the shared clone's local HEAD. An explicit worktree launch can request a refresh from origin. Archiving a thread keeps the shared VM and its disk.
+Worktrees separate Git checkouts; agents still share the VM's OS account and resources. Use dedicated placement for workloads that must not share a machine.
+
+Before stopping a VM, the daemon checks the native T3 state for every thread. Runs, queued work, approvals and unknown status prevent a stop. An explicit request wakes the same VM; listing the fleet does not. Changing the placement mode affects only new threads. The idle policy applies while fixed mode is configured. To shrink a pool, explicitly retire VMs in slots above the new limit; lowering the limit does not delete them. Deleted slots are tombstones and are not reused automatically.
+
+After the first fixed assignment, the state uses a shared catalog. Older dedicated-only daemons refuse this state instead of creating duplicate VMs. Back up the state before enabling fixed mode if you need to roll back the binary.
+
+If a VM was removed outside the fleet, reconcile its managed entry with `t3fleet admin delete ID` so new launches avoid the lost slot. Its existing threads cannot be recovered from another VM.
+
+### On-demand workers
 
 Each new reservation starts with the first instance in `dispatch.providerOrder`. Instances can share a provider type. For example, `["fast", "reserve", "devbox"]` can select two different Boat accounts or sizes before Namespace. When it reserves a worker, the manager records each choice’s template and size. It also records the Boat environment (including an empty one) or the Namespace site for image creation. Editing [the configuration](getting-started.md#configure-the-controller-and-placement) changes future reservations. A retry or pending fallback uses the saved settings.
 

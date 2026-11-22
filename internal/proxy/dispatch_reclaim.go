@@ -15,7 +15,7 @@ type demandAbandonment struct {
 // Ready is persisted before a native launch is sent. A missing thread mapping
 // alone cannot prove that a ready worker has no user work.
 func reclaimableLaunch(route demandRoute) bool {
-	return !route.Ready && route.Peer == nil && route.Archive == nil &&
+	return route.PoolSlot == 0 && !route.Ready && route.Peer == nil && route.Archive == nil &&
 		(route.Abandoned == nil || !route.Abandoned.Released)
 }
 

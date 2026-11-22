@@ -25,8 +25,9 @@ import (
 // DispatchWorker resolves one T3 server. The ID must identify
 // the same machine (and T3 data) after a restart.
 type DispatchWorker struct {
-	ID      string
-	Resolve func(context.Context) (Upstream, error)
+	ID       string
+	Resolve  func(context.Context) (Upstream, error)
+	Activity *Activity
 	// ResolvePassive may only connect without waking a machine. Nil means no passive transport.
 	ResolvePassive func(context.Context) (Upstream, error)
 	Descriptor     func(context.Context) (map[string]any, error)
@@ -37,19 +38,28 @@ type dispatchState struct {
 	EnvironmentID string
 	Clients       map[string]time.Time
 	OnDemand      *onDemandDisk        `json:",omitempty"`
+	Shared        *onDemandDisk        `json:",omitempty"` // Dedicated-only daemons reject this format.
 	PeerGrants    map[string]peerGrant `json:",omitempty"`
 }
 
 type dispatcher struct {
-	mu           sync.Mutex
-	store        *state.Store
-	disk         dispatchState
-	timeout      time.Duration
-	sequence     atomic.Uint64
-	onDemand     *DispatchOnDemand
-	preparing    map[string]chan struct{}
-	peerLaunches sync.Map
-	demandWrites [32]sync.Mutex
+	mu            sync.Mutex
+	store         *state.Store
+	disk          dispatchState
+	environmentID string // immutable after startup
+	timeout       time.Duration
+	sequence      atomic.Uint64
+	onDemand      *DispatchOnDemand
+	preparing     map[string]chan struct{}
+	peerLaunches  sync.Map
+	demandWrites  [32]sync.Mutex
+}
+
+func (d *dispatcher) saveDispatchState(next dispatchState) error {
+	if next.Shared != nil {
+		next.Shared, next.OnDemand = next.OnDemand, nil
+	}
+	return d.store.Save(next)
 }
 
 const dispatchLabel = "t3fleet"
@@ -143,7 +153,7 @@ func (d *dispatcher) saveToken(_ context.Context, token string) error {
 	now := time.Now()
 	maps.DeleteFunc(next.Clients, func(_ string, expiry time.Time) bool { return !now.Before(expiry) })
 	next.Clients[tokenDigest(token)] = now.Add(clientLifetime)
-	if err := d.store.Save(next); err != nil {
+	if err := d.saveDispatchState(next); err != nil {
 		return err
 	}
 	d.disk = next
@@ -155,6 +165,7 @@ func validDispatchThreadID(id string) bool {
 }
 
 func (d *dispatcher) getFrom(ctx context.Context, worker DispatchWorker, path string) (map[string]any, error) {
+	defer worker.begin()()
 	up, ctx, cancel, err := resolveUpstream(ctx, d.timeout, worker.Resolve)
 	if err != nil {
 		return nil, err
@@ -219,6 +230,7 @@ func (d *dispatcher) serve(w http.ResponseWriter, r *http.Request, origin *url.U
 			fail(w, http.StatusNotFound, "thread has no dispatch assignment")
 			return
 		}
+		defer worker.begin()()
 		relay := Proxy{origin: origin, cfg: Config{Resolve: worker.Resolve, RequestTimeout: d.timeout}}
 		relay.relay(w, r)
 	default:
@@ -396,8 +408,37 @@ func (d *dispatcher) streamShell(ctx context.Context, id any, marker bool, send 
 	}
 }
 
-// Open a separate upstream socket per RPC to isolate request IDs and acknowledgments.
+func (w DispatchWorker) begin() func() {
+	if w.Activity != nil {
+		return w.Activity.Begin()
+	}
+	return func() {}
+}
+
 func (d *dispatcher) rpcTo(parent context.Context, worker DispatchWorker, frame map[string]any, acks <-chan map[string]any, send func(map[string]any) error) error {
+	if worker.Activity != nil && fixedSubscription(frame["tag"]) {
+		for {
+			ctx, cancel := context.WithCancelCause(parent)
+			err := d.relayRPC(ctx, worker, frame, acks, send, func() { cancel(errWorkerIdle) })
+			idle := errors.Is(context.Cause(ctx), errWorkerIdle)
+			cancel(nil)
+			if !idle {
+				return err
+			}
+			// Keep the downstream subscription open. An explicit request can
+			// wake the VM; this subscription must not undo the idle stop.
+			if err := worker.Activity.waitAwake(parent); err != nil {
+				return err
+			}
+		}
+	}
+	return d.relayRPC(parent, worker, frame, acks, send, nil)
+}
+
+// Open a separate upstream socket per RPC to isolate request IDs and acknowledgments.
+func (d *dispatcher) relayRPC(parent context.Context, worker DispatchWorker, frame map[string]any, acks <-chan map[string]any, send func(map[string]any) error, onIdle func()) error {
+	done := worker.begin()
+	defer done()
 	up, ctx, cancel, err := resolveUpstream(parent, d.timeout, worker.Resolve)
 	if err != nil {
 		return err
@@ -419,6 +460,10 @@ func (d *dispatcher) rpcTo(parent context.Context, worker DispatchWorker, frame 
 	socket.SetReadLimit(maxWSMessage)
 	if err := writeDispatchFrame(ctx, socket, frame); err != nil {
 		return errors.New("dispatch request delivery uncertain")
+	}
+	if onIdle != nil {
+		defer worker.Activity.watch(onIdle)()
+		done()
 	}
 	if acks != nil {
 		ended := make(chan struct{})

@@ -27,6 +27,7 @@ type batchRecord struct {
 	Request BatchRequest `json:"request"`
 	IDs     []string     `json:"ids"`
 	Names   []string     `json:"names,omitempty"`
+	Fixed   bool         `json:"fixed,omitempty"`
 }
 
 // PrepareBatch atomically reserves every local name and operation identity before
@@ -38,6 +39,10 @@ func (m *Manager) PrepareBatch(ctx context.Context, req BatchRequest) (Batch, er
 // A nonempty dispatchOrder is captured with the reservation before any
 // provider call. Manual batches have no dispatch policy or runtime bootstrap.
 func (m *Manager) prepareBatch(ctx context.Context, req BatchRequest, dispatchOrder []string) (Batch, error) {
+	return m.prepareBatchMode(ctx, req, dispatchOrder, false)
+}
+
+func (m *Manager) prepareBatchMode(ctx context.Context, req BatchRequest, dispatchOrder []string, fixed bool) (Batch, error) {
 	if err := ctx.Err(); err != nil {
 		return Batch{}, err
 	}
@@ -77,7 +82,7 @@ func (m *Manager) prepareBatch(ctx context.Context, req BatchRequest, dispatchOr
 		comparison.Name = managedName(comparison.Name)
 		candidate := req
 		candidate.Name = managedName(candidate.Name)
-		if comparison != candidate {
+		if comparison != candidate || old.Fixed != fixed {
 			return Batch{}, ErrConflict
 		}
 		return m.batchLocked(req.ID), nil
@@ -99,7 +104,7 @@ func (m *Manager) prepareBatch(ctx context.Context, req BatchRequest, dispatchOr
 			}
 		}
 	}
-	b := batchRecord{Request: req, Names: names}
+	b := batchRecord{Request: req, Names: names, Fixed: fixed}
 	rollback := func() {
 		for _, id := range b.IDs {
 			_ = m.machines[id].close()
@@ -115,7 +120,7 @@ func (m *Manager) prepareBatch(ctx context.Context, req BatchRequest, dispatchOr
 		}
 		id := hex.EncodeToString(raw[:])
 		host := m.opts.Providers[req.Provider]
-		r := record{Machine: Machine{ID: id, Name: name, Provider: req.Provider, State: "planned"}, Driver: host.Name(), Scope: providerScope(host), Template: req.Template, Size: req.Size, Shape: shape, Placement: providerPlacement(host)}
+		r := record{Machine: Machine{ID: id, Name: name, Provider: req.Provider, State: "planned"}, Driver: host.Name(), Scope: providerScope(host), Template: req.Template, Size: req.Size, Shape: shape, Placement: providerPlacement(host), Fixed: fixed}
 		if len(dispatchOrder) > 0 {
 			r.InstallRuntime = r.Driver == "namespace"
 			r.FallbackPlan = fallbacks

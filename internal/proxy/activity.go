@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -13,12 +14,17 @@ type Activity struct {
 	last     time.Time
 	active   int
 	sleeping bool
+	wakeup   chan struct{}
 	sockets  map[uint64]func()
 	next     uint64
 }
 
 func NewActivity(now func() time.Time, sleeping bool) *Activity {
-	return &Activity{now: now, last: now(), sleeping: sleeping, sockets: map[uint64]func(){}}
+	a := &Activity{now: now, last: now(), sleeping: sleeping, sockets: map[uint64]func(){}}
+	if sleeping {
+		a.wakeup = make(chan struct{})
+	}
+	return a
 }
 func (a *Activity) Begin() func() {
 	a.mu.Lock()
@@ -29,7 +35,31 @@ func (a *Activity) Begin() func() {
 	return func() { once.Do(func() { a.mu.Lock(); a.active--; a.last = a.now(); a.mu.Unlock() }) }
 }
 func (a *Activity) Sleeping() bool { a.mu.Lock(); defer a.mu.Unlock(); return a.sleeping }
-func (a *Activity) Awake()         { a.mu.Lock(); a.sleeping = false; a.last = a.now(); a.mu.Unlock() }
+func (a *Activity) Awake() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.sleeping {
+		close(a.wakeup)
+		a.wakeup = nil
+		a.sleeping = false
+	}
+	a.last = a.now()
+}
+
+func (a *Activity) waitAwake(ctx context.Context) error {
+	a.mu.Lock()
+	wakeup := a.wakeup
+	a.mu.Unlock()
+	if wakeup == nil {
+		return ctx.Err()
+	}
+	select {
+	case <-wakeup:
+		return ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 // Check holds new useful work outside the upstream until the stop completes.
 // Any failure or observed work restarts a full idle window. Unknown never means idle.
@@ -51,12 +81,19 @@ func (a *Activity) Check(timeout time.Duration, probe func() (bool, error), stop
 		a.last = a.now()
 		return err
 	}
-	a.sleeping = true
+	a.suspendLocked()
+	return nil
+}
+
+func (a *Activity) suspendLocked() {
+	if !a.sleeping {
+		a.sleeping = true
+		a.wakeup = make(chan struct{})
+	}
 	// Cancellation is nonblocking. New sockets remain local until useful work arrives.
 	for _, cancel := range a.sockets {
 		cancel()
 	}
-	return nil
 }
 func (a *Activity) watch(cancel func()) func() {
 	a.mu.Lock()
@@ -82,8 +119,5 @@ func (a *Activity) BeginPassive() (func(), bool) {
 func (a *Activity) Suspend() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.sleeping = true
-	for _, cancel := range a.sockets {
-		cancel()
-	}
+	a.suspendLocked()
 }

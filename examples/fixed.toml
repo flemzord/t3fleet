@@ -1,0 +1,18 @@
+expectedVersion = "0.1.11-nightly.20261117.4838"
+
+[dispatch]
+listen = "127.0.0.1:47733"
+t3Binary = "/absolute/path/to/t3"
+providerOrder = ["boat"]
+mode = "fixed"
+
+[dispatch.fixed]
+workers = 3
+idleTimeout = "15m"
+
+[providers.boat]
+type = "boat"
+organization = "YOUR_BOAT_ORGANIZATION"
+
+[providers.boat.template]
+snapshot = "YOUR_READY_BOAT_SNAPSHOT"

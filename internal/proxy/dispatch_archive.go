@@ -30,7 +30,8 @@ func (d *dispatcher) lockDemandWrite(id string) func() {
 func (d *dispatcher) handlesDemandArchive(id string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.onDemand.Release != nil || d.disk.OnDemand.Routes[id].Archive != nil
+	r := d.disk.OnDemand.Routes[id]
+	return r.PoolSlot == 0 && (d.onDemand.Release != nil || r.Archive != nil)
 }
 
 func (d *dispatcher) demandRoute(id string) demandRoute {

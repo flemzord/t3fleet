@@ -55,7 +55,7 @@ func (d *dispatcher) savePeerGrant(token, access string, expiresAt time.Time) er
 		}
 	}
 	next.PeerGrants[tokenDigest(token)] = peerGrant{claims.SessionID, access, expiresAt}
-	if err := d.store.Save(next); err != nil {
+	if err := d.saveDispatchState(next); err != nil {
 		return errors.New("could not persist the peer grant")
 	}
 	d.disk = next
@@ -360,6 +360,9 @@ func (d *dispatcher) launchPeerThread(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 	}
+	if route.PoolSlot != 0 {
+		tool.Arguments["workspaceStrategy"] = fixedWorkspaceStrategy(strategy)
+	}
 	tool.Arguments["clientRequestId"] = slot
 	res, err := d.sendPeerWorkerTool(r, worker, route.Peer.WorkerToken, request, tool)
 	if err != nil {
@@ -397,7 +400,7 @@ func (d *dispatcher) publishPeerThread(slot, id, nativeID string) error {
 	}
 	demand.PeerThreads[slot] = nativeID
 	next.OnDemand = &demand
-	if err := d.store.Save(next); err != nil {
+	if err := d.saveDispatchState(next); err != nil {
 		return err
 	}
 	d.disk = next
@@ -439,6 +442,7 @@ func (d *dispatcher) callPeerThread(w http.ResponseWriter, r *http.Request, requ
 }
 
 func (d *dispatcher) sendPeerWorkerTool(r *http.Request, worker DispatchWorker, token string, request peerRequest, tool peerTool) (map[string]any, error) {
+	defer worker.begin()()
 	delete(tool.Arguments, "environmentId")
 	request.Params, _ = json.Marshal(tool)
 	body, _ := json.Marshal(request)
@@ -469,6 +473,11 @@ func (d *dispatcher) sendPeerWorkerTool(r *http.Request, worker DispatchWorker, 
 			d.mu.Unlock()
 			if routeID == "" {
 				routeID = slot
+			}
+		}
+		if action := tool.Arguments["action"]; tool.Name == "t3_thread_organize" && (action == "archive" || action == "unarchive") {
+			if err := d.noteFixedArchive(id, action == "archive"); err != nil {
+				return nil, err
 			}
 		}
 		if err := d.observeThreadListing(ctx, up, routeID, id, tool.Name == "t3_thread_launch"); err != nil {

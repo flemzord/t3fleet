@@ -22,6 +22,7 @@ type DispatchOnDemand struct {
 	ExternalOrigin *url.URL
 	ProjectRoot    string
 	MaxWorkers     int
+	Fixed          *FixedPlacement
 	// Agents lists the T3 drivers and models workers offer; the first model
 	// is the default. Empty means the default Codex model.
 	Agents    []DispatchAgent
@@ -69,6 +70,7 @@ func (o *DispatchOnDemand) offers(instance, model string) bool {
 type demandRoute struct {
 	Key        string
 	ProjectID  string
+	PoolSlot   int            `json:",omitempty"`
 	Listing    *threadListing `json:",omitempty"`
 	Ready      bool
 	Peer       *peerRoute         `json:",omitempty"`
@@ -108,11 +110,21 @@ func NewDispatchOnDemand(origin string, store *state.Store, opts DispatchOnDeman
 	} else if err != nil {
 		return nil, err
 	}
+	if d.disk.Shared != nil {
+		if d.disk.OnDemand != nil || opts.Fixed == nil {
+			return nil, errors.New("invalid shared dispatch state or missing fixed-worker support")
+		}
+		d.disk.OnDemand = d.disk.Shared
+	}
 	if d.disk.Origin != origin || d.disk.EnvironmentID == "" || d.disk.Clients == nil ||
 		d.disk.OnDemand == nil || d.disk.OnDemand.Routes == nil {
 		return nil, errors.New("on-demand dispatch state must use its original origin and mode")
 	}
+	d.environmentID = d.disk.EnvironmentID
 	if err := d.loadDemandProjects(); err != nil {
+		return nil, err
+	}
+	if err := d.validateFixedPlacement(); err != nil {
 		return nil, err
 	}
 	return d.proxy(origin)
@@ -137,7 +149,7 @@ func (d *dispatcher) threadWorker(threadID string) (DispatchWorker, error) {
 	if !ok || !r.Ready || r.Archive != nil {
 		return DispatchWorker{}, errors.New("thread has no ready dispatch worker")
 	}
-	return d.onDemand.Lookup(r.Key)
+	return d.lookupRoute(r)
 }
 
 func (d *dispatcher) prepareDemandWorker(ctx context.Context, id, projectID string) (DispatchWorker, error) {
@@ -167,7 +179,7 @@ func (d *dispatcher) prepareDemandWorker(ctx context.Context, id, projectID stri
 		}
 		if exists && route.Ready {
 			d.mu.Unlock()
-			return d.onDemand.Lookup(route.Key)
+			return d.lookupRoute(route)
 		}
 		if flight := d.preparing[id]; flight != nil {
 			d.mu.Unlock()
@@ -179,24 +191,33 @@ func (d *dispatcher) prepareDemandWorker(ctx context.Context, id, projectID stri
 			}
 		}
 		if !exists {
-			used := 0
-			for _, reserved := range d.disk.OnDemand.Routes {
-				if (reserved.Archive == nil || !reserved.Archive.Released) &&
-					(reserved.Abandoned == nil || !reserved.Abandoned.Released) &&
-					(reserved.Lost == nil || !reserved.Lost.Released) {
-					used++
+			route = demandRoute{Key: demandKey(d.disk.EnvironmentID, "thread", id), ProjectID: projectID}
+			if d.onDemand.Fixed != nil && d.onDemand.Fixed.Workers > 0 {
+				route.PoolSlot = d.chooseFixedSlot()
+				if route.PoolSlot == 0 {
+					d.mu.Unlock()
+					return DispatchWorker{}, errors.New("no usable fixed fleet slot")
+				}
+			} else {
+				used := 0
+				for _, reserved := range d.disk.OnDemand.Routes {
+					if reserved.PoolSlot == 0 && (reserved.Archive == nil || !reserved.Archive.Released) &&
+						(reserved.Abandoned == nil || !reserved.Abandoned.Released) &&
+						(reserved.Lost == nil || !reserved.Lost.Released) {
+						used++
+					}
+				}
+				if used >= d.onDemand.MaxWorkers {
+					d.mu.Unlock()
+					return DispatchWorker{}, errors.New("the dispatch worker limit has been reached")
 				}
 			}
-			if used >= d.onDemand.MaxWorkers {
-				d.mu.Unlock()
-				return DispatchWorker{}, errors.New("the dispatch worker limit has been reached")
-			}
-			route = demandRoute{Key: demandKey(d.disk.EnvironmentID, "thread", id), ProjectID: projectID}
 		}
-		if d.onDemand.Reclaim != nil {
+		reclaim := route.PoolSlot == 0 && d.onDemand.Reclaim != nil
+		if reclaim {
 			route.RetryUntil = time.Now().UTC().Add(dispatchLaunchGrace)
 		}
-		if !exists || d.onDemand.Reclaim != nil {
+		if !exists || reclaim {
 			if err := d.saveDemandRouteLocked(id, route); err != nil {
 				d.mu.Unlock()
 				return DispatchWorker{}, err
@@ -211,7 +232,7 @@ func (d *dispatcher) prepareDemandWorker(ctx context.Context, id, projectID stri
 			close(flight)
 			d.mu.Unlock()
 		}()
-		worker, path, err := d.onDemand.Provision(ctx, route.Key, project.Remote)
+		worker, path, err := d.prepareRoute(ctx, route, project)
 		if err != nil {
 			return DispatchWorker{}, err
 		}
@@ -236,7 +257,10 @@ func (d *dispatcher) saveDemandRouteLocked(id string, r demandRoute) error {
 	demand.Routes = maps.Clone(demand.Routes)
 	demand.Routes[id] = r
 	next.OnDemand = &demand
-	if err := d.store.Save(next); err != nil {
+	if r.PoolSlot > 0 {
+		next.Shared = next.OnDemand
+	}
+	if err := d.saveDispatchState(next); err != nil {
 		return errors.New("could not persist the dispatch thread assignment")
 	}
 	d.disk = next
@@ -288,6 +312,9 @@ func (d *dispatcher) callOnDemand(ctx context.Context, tag string, frame, payloa
 		if err != nil {
 			return err
 		}
+		if d.demandRoute(threadID).PoolSlot != 0 {
+			payload["workspaceStrategy"] = fixedWorkspaceStrategy(strategy)
+		}
 		return d.rpcTo(ctx, worker, frame, acks, send)
 	case "orchestration.dispatchCommand":
 		cmd, _ := payload["type"].(string)
@@ -295,7 +322,7 @@ func (d *dispatcher) callOnDemand(ctx context.Context, tag string, frame, payloa
 			"thread.visit", "thread.mark-unread", "thread.metadata.update",
 			"thread.runtime-mode.set", "thread.interaction-mode.set",
 			"queue.resume", "queued-run.start", "queued-run.reorder", "queued-run.edit", "queued-run.cancel",
-			"queued-message.promote-to-steer",
+			"queued-message.promote-to-steer", "prepared-run.retry",
 			"thread.model-selection.set", "thread.stop", "thread.archive", "thread.unarchive", "thread.settle", "thread.pin", "thread.unpin"}, cmd) {
 			return errors.New("this command is outside on-demand dispatch")
 		}

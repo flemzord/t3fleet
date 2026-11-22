@@ -641,6 +641,8 @@ on-demand threads from another T3 server. Keep the link or code private.`,
 
 type statusReport struct {
 	FleetListen    string                      `json:"fleetListen,omitempty"`
+	Mode           string                      `json:"mode,omitempty"`
+	Fixed          *config.FixedDispatch       `json:"fixed,omitempty"`
 	ProviderOrder  []string                    `json:"providerOrder,omitempty"`
 	MaxWorkers     int                         `json:"maxWorkers,omitempty"`
 	Config         string                      `json:"config"`
@@ -720,10 +722,19 @@ func (a *app) statusCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			path, source := a.configLocation()
+			path, source, err := a.configLocation()
+			if err != nil {
+				return err
+			}
 			report := statusReport{Config: path, ConfigSource: source, ConfigFound: !a.configMissing, StateDir: cfg.StateDir, Listen: cfg.Listen, Providers: configuredProviders(cfg)}
 			if d := cfg.Dispatch; d != nil && !a.configMissing {
-				report.FleetListen, report.ProviderOrder, report.MaxWorkers = d.Listen, d.ProviderOrder, d.MaxWorkerCount()
+				report.FleetListen, report.ProviderOrder = d.Listen, d.ProviderOrder
+				report.Mode = "on-demand"
+				if d.Fixed != nil {
+					report.Mode, report.Fixed = "fixed", d.Fixed
+				} else {
+					report.MaxWorkers = d.MaxWorkerCount()
+				}
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 3*time.Second)
 			defer cancel()
@@ -769,7 +780,12 @@ func (a *app) printStatus(r statusReport) {
 	}
 	fmt.Fprintf(tw, "Providers:\t%s\n", providers)
 	if r.FleetListen != "" {
-		fmt.Fprintf(tw, "Fleet endpoint:\t%s\nPlacement order:\t%s\nWorker limit:\t%d\n", r.FleetListen, strings.Join(r.ProviderOrder, " -> "), r.MaxWorkers)
+		fmt.Fprintf(tw, "Fleet endpoint:\t%s\nMode:\t%s\nPlacement order:\t%s\n", r.FleetListen, r.Mode, strings.Join(r.ProviderOrder, " -> "))
+		if r.Fixed != nil {
+			fmt.Fprintf(tw, "Fixed slots:\t%d\nIdle timeout:\t%s\n", r.Fixed.Workers, r.Fixed.IdleTimeout)
+		} else {
+			fmt.Fprintf(tw, "Worker limit:\t%d\n", r.MaxWorkers)
+		}
 	}
 	if r.Daemon.Running {
 		daemon := "running on " + r.Listen

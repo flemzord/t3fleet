@@ -60,7 +60,20 @@ func serveWithController(ctx context.Context, cfg config.Config, diagnostics io.
 	if err != nil {
 		return errors.New("cannot initialize private daemon token")
 	}
-	manager, err := fleet.New(fleet.Options{Providers: providers, Templates: cfg.ProviderTemplates(), Sizes: cfg.ProviderSizes(), Store: disk, ExpectedVersion: cfg.ExpectedVersion})
+	settings := cfg.Dispatch
+	var fixedCount int
+	var idleTimeout time.Duration
+	if settings.Fixed != nil {
+		fixedCount = settings.Fixed.Workers
+		idleTimeout, err = settings.Fixed.IdleDuration()
+		if err != nil {
+			return err
+		}
+	}
+	manager, err := fleet.New(fleet.Options{
+		Providers: providers, Templates: cfg.ProviderTemplates(), Sizes: cfg.ProviderSizes(),
+		Store: disk, ExpectedVersion: cfg.ExpectedVersion, IdleTimeout: idleTimeout, IdleFixedOnly: true,
+	})
 	if err != nil {
 		return fmt.Errorf("cannot initialize fleet: %w", err)
 	}
@@ -82,7 +95,6 @@ func serveWithController(ctx context.Context, cfg config.Config, diagnostics io.
 		return err
 	}
 	defer stop()
-	settings := cfg.Dispatch
 	var externalOrigin *url.URL
 	if settings.ExternalOrigin != "" {
 		externalOrigin, err = config.ParseExternalOrigin(settings.ExternalOrigin)
@@ -98,6 +110,12 @@ func serveWithController(ctx context.Context, cfg config.Config, diagnostics io.
 		Controller: controller, ProjectRoot: filepath.Join(root, "projects"),
 		ExternalOrigin: externalOrigin,
 		MaxWorkers:     settings.MaxWorkerCount(), Agents: dispatchAgents(settings.AgentCatalog()),
+		Fixed: &proxy.FixedPlacement{
+			Workers: fixedCount, Lookup: manager.LookupFixedWorker, State: manager.FixedWorkerState,
+			Prepare: func(ctx context.Context, slotKey, projectKey, remote string) (proxy.DispatchWorker, string, error) {
+				return manager.ProvisionFixedWorker(ctx, slotKey, projectKey, remote, settings.ProviderOrder)
+			},
+		},
 		Provision: func(ctx context.Context, key, remote string) (proxy.DispatchWorker, string, error) {
 			return manager.ProvisionDispatchWorker(ctx, key, remote, settings.ProviderOrder)
 		},

@@ -1,6 +1,6 @@
 # t3fleet
 
-Pair T3 Code with one fleet environment. Add GitHub projects as you work. The first message in each thread starts a dedicated T3 server on [Boat](https://boat.dev/) or [Namespace](https://namespace.so/), clones the selected repository on that worker, and runs the turn there. Follow-ups return to the same worker.
+Pair T3 Code with one fleet environment. Add GitHub projects as you work. The first message starts a dedicated worker on [Boat](https://boat.dev/) or [Namespace](https://namespace.so/) by default. A [fixed pool](docs/dispatch.md#fixed-pool) instead shares a bounded set of VMs and stops them when idle. Follow-ups return to the same worker in either mode.
 
 The daemon runs a local T3 controller for pairing and project metadata. You can start the daemon, pair and add projects with zero cloud workers. Your JSON configuration chooses the provider instances, their sizes and templates, the order to try them, and the worker limit.
 

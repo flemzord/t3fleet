@@ -43,6 +43,7 @@ type Storage interface {
 type Options struct {
 	IdleTimeout       time.Duration
 	IdleCheckInterval time.Duration
+	IdleFixedOnly     bool
 	Providers         map[string]provider.Provider
 	Templates         map[string]provider.Template
 	Sizes             map[string]string
@@ -90,6 +91,7 @@ type record struct {
 	Session         map[string]any      `json:"session,omitempty"`
 
 	InstallRuntime    bool             `json:"installRuntime,omitempty"`
+	Fixed             bool             `json:"fixed,omitempty"`
 	FallbackPlan      []dispatchTarget `json:"fallbackPlan,omitzero"`
 	DispatchFallbacks []string         `json:"dispatchFallbacks,omitzero"` // legacy instance names
 }
@@ -280,7 +282,7 @@ func (m *Manager) listen(r record) (*machineHandle, error) {
 	r.Port = listener.Addr().(*net.TCPAddr).Port
 	r.URL = "http://" + net.JoinHostPort(m.opts.ListenHost, strconv.Itoa(r.Port))
 	h := &machineHandle{record: r, listener: listener}
-	if m.opts.IdleTimeout > 0 {
+	if m.opts.IdleTimeout > 0 && (!m.opts.IdleFixedOnly || r.Fixed) {
 		h.activity = proxy.NewActivity(m.opts.Now, r.State == "stopped")
 	}
 	p, err := proxy.New(proxy.Config{
@@ -760,13 +762,19 @@ func (m *Manager) DispatchWorker(id string) (proxy.DispatchWorker, error) {
 	if err != nil {
 		return proxy.DispatchWorker{}, err
 	}
-	if r := m.copy(h); r.Token == "" || r.RemoteID == "" {
+	r := m.copy(h)
+	if r.Token == "" || r.RemoteID == "" {
 		return proxy.DispatchWorker{}, errors.New("dispatch worker has not completed initialization")
+	}
+	var activity *proxy.Activity
+	if r.Fixed {
+		activity = h.activity
 	}
 	return proxy.DispatchWorker{ID: id,
 		Resolve:        func(ctx context.Context) (proxy.Upstream, error) { return m.resolve(ctx, id) },
 		ResolvePassive: func(ctx context.Context) (proxy.Upstream, error) { return m.resolvePassive(ctx, id) },
 		Descriptor:     func(ctx context.Context) (map[string]any, error) { return m.descriptor(ctx, id) },
+		Activity:       activity,
 	}, nil
 }
 func (m *Manager) Stop(ctx context.Context, id string) error {

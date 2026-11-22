@@ -88,6 +88,11 @@ func (d *dispatcher) observeThreadRPC(ctx context.Context, up Upstream, frame, r
 	}
 	payload, _ := frame["payload"].(map[string]any)
 	id, _ := payload["threadId"].(string)
+	if tag == "orchestration.dispatchCommand" && (payload["type"] == "thread.archive" || payload["type"] == "thread.unarchive") {
+		if err := d.noteFixedArchive(id, payload["type"] == "thread.archive"); err != nil {
+			return err
+		}
+	}
 	return d.observeThreadListing(ctx, up, id, id, tag == "orchestration.launchThread")
 }
 
@@ -119,7 +124,7 @@ func (p *Proxy) RestoreWorkerListing(ctx context.Context, machineID string) erro
 		if !r.Ready || r.Listing != nil || r.Archive != nil || r.Lost != nil {
 			continue
 		}
-		worker, err := d.onDemand.Lookup(r.Key)
+		worker, err := d.lookupRoute(r)
 		if err != nil || worker.ID != machineID {
 			continue
 		}
@@ -162,6 +167,8 @@ func (d *dispatcher) onDemandShell(ctx context.Context) (map[string]any, error) 
 	d.mu.Unlock()
 	ids := slices.Sorted(maps.Keys(saved))
 	listings := make([]*threadListing, len(ids))
+	var groups [][]int
+	shared := make(map[int]int)
 	var wg sync.WaitGroup
 	for i, id := range ids {
 		route := saved[id]
@@ -171,22 +178,44 @@ func (d *dispatcher) onDemandShell(ctx context.Context) (map[string]any, error) 
 		if cached := route.Listing; cached != nil && cached.Schema == schema && cached.Thread["id"] == id {
 			listings[i] = cached
 		}
+		if route.PoolSlot != 0 {
+			if group, ok := shared[route.PoolSlot]; ok {
+				groups[group] = append(groups[group], i)
+				continue
+			}
+			shared[route.PoolSlot] = len(groups)
+		}
+		groups = append(groups, []int{i})
+	}
+	for _, group := range groups {
 		wg.Go(func() {
-			worker, err := d.onDemand.Lookup(route.Key)
+			worker, err := d.lookupRoute(saved[ids[group[0]]])
 			if err != nil || worker.ResolvePassive == nil {
 				return
 			}
 			passiveCtx, stop := context.WithTimeout(ctx, 2*time.Second)
 			defer stop()
+			if worker.Activity != nil {
+				done, ok := worker.Activity.BeginPassive()
+				if !ok {
+					return
+				}
+				defer done()
+				worker.Activity = nil // passive reads never extend the idle timeout
+			}
 			worker.Resolve = worker.ResolvePassive
 			snapshot, err := d.getFrom(passiveCtx, worker, dispatchShellPath)
 			if err != nil || snapshot["schemaVersion"] != schema {
 				return
 			}
-			if live := findThreadListing(snapshot, id, route.ProjectID); live != nil {
-				listings[i] = live
-				// A failed cache refresh must not hide a live worker or a sibling.
-				_ = d.saveThreadListing(id, route.Key, live)
+			for _, i := range group {
+				id := ids[i]
+				route := saved[id]
+				if live := findThreadListing(snapshot, id, route.ProjectID); live != nil {
+					listings[i] = live
+					// A failed cache refresh must not hide a live worker or a sibling.
+					_ = d.saveThreadListing(id, route.Key, live)
+				}
 			}
 		})
 	}

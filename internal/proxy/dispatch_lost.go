@@ -23,7 +23,7 @@ type demandLoss struct {
 // archive needs the worker to confirm it, so a worker removed outside t3fleet
 // would hold its slot forever.
 func lostCandidate(route demandRoute) bool {
-	return route.Ready && route.Archive == nil && (route.Lost == nil || !route.Lost.Released)
+	return route.PoolSlot == 0 && route.Ready && route.Archive == nil && (route.Lost == nil || !route.Lost.Released)
 }
 
 func (d *dispatcher) releaseLostWorkers(ctx context.Context, report func(error)) {

@@ -29,6 +29,8 @@ The daemon starts a local T3 controller in its own private home. Desktop and lin
 4. The manager initializes a private T3 identity on the worker and probes the configured T3 version through the provider’s private transport. A Namespace worker can install the bundled runtime if required.
 5. The worker clones the project if absent. The dispatcher seeds that project on the worker’s T3 server, forwards the launch, and sends subsequent actions to the same server. The worker owns the checkout, history and model session.
 
+Fixed placement saves a slot alongside the thread route. The fleet manager provisions that slot only on first use and prepares a shared project checkout on it. Each thread uses its own worktree. The dispatcher reads each shared worker's shell at most once per listing pass, and the fleet manager guards useful requests against idle stop.
+
 The local control API exposes inspection, pairing and manual rescue operations. Operators do not need to pre-create a pool or pair individual workers. See [dispatch](dispatch.md) for restart, archive and cleanup semantics.
 
 ## Stable T3 origin

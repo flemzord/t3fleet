@@ -55,16 +55,67 @@ func (m *Manager) LookupDispatchWorker(key string) (proxy.DispatchWorker, error)
 }
 
 func (m *Manager) dispatchReservation(key string) (Machine, error) {
-	batch, err := m.Batch(key)
-	if err != nil {
-		return Machine{}, err
-	}
-	if len(key) != 32 || len(batch.Machines) != 1 ||
-		batch.Machines[0].Name != managedName("thread-"+key[:12])+"-01" ||
-		m.opts.Providers[batch.Machines[0].Provider] == nil || batch.Machines[0].State == "deleted" {
+	machine, err := m.dispatchReservationFor(key, false)
+	if err == nil && machine.State == "deleted" {
 		return Machine{}, errors.New("the reserved dispatch worker is unavailable")
 	}
-	return batch.Machines[0], nil
+	return machine, err
+}
+
+func dispatchReservationName(key string, fixed bool) string {
+	if fixed {
+		return "pool-" + key[:12]
+	}
+	return "thread-" + key[:12]
+}
+
+func (m *Manager) dispatchReservationFor(key string, fixed bool) (Machine, error) {
+	if len(key) != 32 {
+		return Machine{}, ErrInvalid
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	saved, ok := m.batches[key]
+	if !ok {
+		return Machine{}, ErrNotFound
+	}
+	batch := m.batchLocked(key)
+	if saved.Fixed != fixed || len(batch.Machines) != 1 ||
+		batch.Machines[0].Name != managedName(dispatchReservationName(key, fixed))+"-01" {
+		return Machine{}, errors.New("the reserved dispatch worker is unavailable")
+	}
+	machine := batch.Machines[0]
+	if machine.State != "deleted" && m.opts.Providers[machine.Provider] == nil {
+		return Machine{}, errors.New("the reserved dispatch provider is unavailable")
+	}
+	return machine, nil
+}
+
+// LookupFixedWorker resolves a pool slot without creating or waking its VM.
+func (m *Manager) LookupFixedWorker(key string) (proxy.DispatchWorker, error) {
+	machine, err := m.dispatchReservationFor(key, true)
+	if err != nil {
+		return proxy.DispatchWorker{}, err
+	}
+	return m.DispatchWorker(machine.ID)
+}
+
+// FixedWorkerState reads the local journal only; a warm state is a placement
+// hint, not a guarantee that the provider still considers the VM running.
+func (m *Manager) FixedWorkerState(key string) string {
+	machine, err := m.dispatchReservationFor(key, true)
+	if errors.Is(err, ErrNotFound) {
+		return "absent"
+	}
+	if err != nil {
+		return "unavailable"
+	}
+	switch machine.State {
+	case "deleted", "ready":
+		return machine.State
+	default:
+		return "stopped"
+	}
 }
 
 // ReclaimDispatchWorker also accepts a missing batch: the dispatcher records
@@ -165,19 +216,33 @@ func (m *Manager) DispatchWorkerLost(ctx context.Context, key string) (bool, err
 // to either provider. Namespace workers install the daemon's pinned runtime
 // only if the base image doesn't already have the hook.
 func (m *Manager) ProvisionDispatchWorker(ctx context.Context, key, remote string, providerOrder []string) (proxy.DispatchWorker, string, error) {
-	machine, err := m.dispatchReservation(key)
+	return m.provisionDispatchWorker(ctx, key, key, remote, providerOrder, false)
+}
+
+// ProvisionFixedWorker keeps one durable provider operation per slot and a
+// separate checkout key per project. Try the same slot after an uncertain
+// response; allocating a replacement would split its existing thread history.
+func (m *Manager) ProvisionFixedWorker(ctx context.Context, slotKey, checkoutKey, remote string, providerOrder []string) (proxy.DispatchWorker, string, error) {
+	return m.provisionDispatchWorker(ctx, slotKey, checkoutKey, remote, providerOrder, true)
+}
+
+func (m *Manager) provisionDispatchWorker(ctx context.Context, key, checkoutKey, remote string, providerOrder []string, fixed bool) (proxy.DispatchWorker, string, error) {
+	if _, err := hex.DecodeString(checkoutKey); err != nil || len(checkoutKey) != 32 || checkoutKey != strings.ToLower(checkoutKey) {
+		return proxy.DispatchWorker{}, "", ErrInvalid
+	}
+	machine, err := m.dispatchReservationFor(key, fixed)
 	if errors.Is(err, ErrNotFound) {
-		if len(key) != 32 || len(providerOrder) == 0 {
+		if len(providerOrder) == 0 {
 			return proxy.DispatchWorker{}, "", ErrInvalid
 		}
 		// A concurrent launch may already have advanced this reservation to a
 		// fallback, so consult the saved identity even on a plan conflict.
-		_, err = m.prepareBatch(ctx, BatchRequest{ID: key, Count: 1, CreateRequest: CreateRequest{Name: "thread-" + key[:12], Provider: providerOrder[0]}}, providerOrder)
+		_, err = m.prepareBatchMode(ctx, BatchRequest{ID: key, Count: 1, CreateRequest: CreateRequest{Name: dispatchReservationName(key, fixed), Provider: providerOrder[0]}}, providerOrder, fixed)
 		if err == nil || errors.Is(err, ErrConflict) {
-			machine, err = m.dispatchReservation(key)
+			machine, err = m.dispatchReservationFor(key, fixed)
 		}
 	}
-	if err != nil {
+	if err != nil || machine.State == "deleted" {
 		return proxy.DispatchWorker{}, "", errors.New("could not reserve the worker for this thread")
 	}
 	h, err := m.handle(machine.ID)
@@ -231,14 +296,19 @@ func (m *Manager) ProvisionDispatchWorker(ctx context.Context, key, remote strin
 		}
 		return proxy.DispatchWorker{}, "", fmt.Errorf("the worker reserved on %s is not ready; retry the same thread: %w", r.Provider, err)
 	}
+	if fixed && h.activity != nil {
+		// Checkout preparation is useful work. The operation lock excludes
+		// idle checks until Exec is complete.
+		defer h.activity.Awake()
+	}
 	result, err := m.opts.Providers[r.Provider].Exec(ctx, r.RemoteID, provider.ExecRequest{
-		Args: []string{"/bin/bash", "-lc", dispatchCheckoutScript, "t3fleet-dispatch", key, remote},
+		Args: []string{"/bin/bash", "-lc", dispatchCheckoutScript, "t3fleet-dispatch", checkoutKey, remote},
 	})
 	if err != nil || result.ExitCode != 0 {
 		return proxy.DispatchWorker{}, "", fmt.Errorf("could not prepare the GitHub checkout on %s; check repository access on the worker", r.Provider)
 	}
 	cwd := strings.TrimSpace(result.Stdout)
-	if !path.IsAbs(cwd) || path.Clean(cwd) != cwd || !strings.HasSuffix(cwd, "/.t3fleet/dispatch-workspaces/"+key+"/repo") ||
+	if !path.IsAbs(cwd) || path.Clean(cwd) != cwd || !strings.HasSuffix(cwd, "/.t3fleet/dispatch-workspaces/"+checkoutKey+"/repo") ||
 		strings.ContainsAny(cwd, "\r\n\x00") || len(cwd) > 4096 {
 		return proxy.DispatchWorker{}, "", errors.New("worker did not return the reserved repository path")
 	}

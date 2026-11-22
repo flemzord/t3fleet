@@ -49,7 +49,7 @@ func (m *Manager) CheckIdle(ctx context.Context) error {
 				return
 			}
 			r := m.copy(h)
-			if r.State != "ready" || r.RemoteID == "" || r.Token == "" {
+			if h.activity == nil || r.State != "ready" || r.RemoteID == "" || r.Token == "" {
 				return
 			}
 			checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)

@@ -52,7 +52,7 @@ Boat requires a ready saved snapshot. Namespace accepts a registered image (`reg
 
 ## Configure the controller and placement
 
-Start with [examples/boat.json](../examples/boat.json) or the [multi-provider example](../examples/config.json). The JSON file describes the fleet, not a list of projects or machines. Settings take effect when the service restarts.
+Use `t3fleet init` for a TOML configuration, or start with the [fixed-pool TOML example](../examples/fixed.toml), [Boat JSON example](../examples/boat.json) or [multi-provider JSON example](../examples/config.json). Both formats use the same settings. Pass `--config` or set `T3FLEET_CONFIG` to select a specific file. If both default files exist, select one explicitly. Settings take effect when the service restarts.
 
 | Setting | Meaning |
 | --- | --- |
@@ -64,10 +64,13 @@ Start with [examples/boat.json](../examples/boat.json) or the [multi-provider ex
 | `dispatch.externalOrigin` | Optional HTTPS origin for clients on a private network, for example `https://fleet.example.net`. A TLS reverse proxy must serve this address. |
 | `dispatch.t3Binary` | Absolute path to the local T3 executable. |
 | `dispatch.providerOrder` | Required array of instance names. The first is primary. Subsequent entries are fallbacks in order. |
-| `dispatch.maxWorkers` | Maximum concurrent reservations, including pending launches. Omitted or zero means 8. |
+| `dispatch.mode` | `on-demand` (default) gives each new thread a VM. `fixed` reuses a bounded pool. |
+| `dispatch.fixed.workers` | In fixed mode, 1–100 slots. Stopped VMs count toward the limit. Slots are allocated on first use. |
+| `dispatch.fixed.idleTimeout` | In fixed mode, how long a whole VM must be idle before it stops (at least `1m`, e.g. `15m`). |
+| `dispatch.maxWorkers` | On-demand only. Maximum concurrent reservations, including pending launches. Omitted or zero means 8. |
 | `dispatch.agents` | Agents offered by this fleet. Each entry has a T3 `driver` (`codex`, `claudeAgent` or `pi`) and the `models` it offers. A driver appears once. The first model of the first entry is the default for launches without a model. Pi model IDs use Pi's `<provider>/<model>` form, or `default`. Every worker image must include every declared agent. At startup, the daemon enables each declared agent in its local T3 controller settings so Desktop lists it. |
 | `dispatch.model` | Shorthand for a single Codex model, used when `dispatch.agents` is absent. Defaults to `gpt-5.4`. Do not set both. |
-| `dispatch.deleteWorkerOnArchive` | Default `false`. Set to `true` to delete a thread’s worker after a confirmed archive. |
+| `dispatch.deleteWorkerOnArchive` | On-demand only, default `false`. Set to `true` to delete a thread’s worker after a confirmed archive. |
 
 **Boat.** Set `template.snapshot`. Optional `size` is `small`, `default`, `large`, or `xlarge`; omit it to use Boat’s default. Each instance requires `organization`, the Boat wallet to bill. To inject an existing Boat environment, set `environment`; otherwise the daemon requests a clean machine. Choose one of `apiKeyEnv`, `apiKeyFile`, or `credentialFile` per instance. An explicit selector must work; it will not fall back to another account. Without a selector, the daemon tries `BOAT_API_KEY` and the Boat login. Private credential files must not be group- or world-readable. See the [Boat adapter](providers-boat.md).
 

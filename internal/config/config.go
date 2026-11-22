@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/flemzord/t3fleet/pkg/provider"
 )
@@ -29,14 +30,53 @@ type Config struct {
 // Dispatch describes the T3 server that allocates one worker for each thread.
 // ProviderOrder names configured instances, not adapter types.
 type Dispatch struct {
-	Listen                string   `json:"listen"`
-	ExternalOrigin        string   `json:"externalOrigin,omitempty"`
-	T3Binary              string   `json:"t3Binary"`
-	ProviderOrder         []string `json:"providerOrder"`
-	MaxWorkers            int      `json:"maxWorkers,omitempty"`
-	Model                 string   `json:"model,omitempty"`
-	Agents                []Agent  `json:"agents,omitempty"`
-	DeleteWorkerOnArchive bool     `json:"deleteWorkerOnArchive,omitempty"`
+	Listen                string         `json:"listen"`
+	ExternalOrigin        string         `json:"externalOrigin,omitempty"`
+	T3Binary              string         `json:"t3Binary"`
+	ProviderOrder         []string       `json:"providerOrder"`
+	Mode                  string         `json:"mode,omitempty"`
+	Fixed                 *FixedDispatch `json:"fixed,omitempty"`
+	MaxWorkers            int            `json:"maxWorkers,omitempty"`
+	Model                 string         `json:"model,omitempty"`
+	Agents                []Agent        `json:"agents,omitempty"`
+	DeleteWorkerOnArchive bool           `json:"deleteWorkerOnArchive,omitempty"`
+}
+
+type FixedDispatch struct {
+	Workers     int    `json:"workers"`
+	IdleTimeout string `json:"idleTimeout"`
+}
+
+const MaxFixedWorkers = 100
+
+func (f FixedDispatch) IdleDuration() (time.Duration, error) {
+	timeout, err := time.ParseDuration(f.IdleTimeout)
+	if err != nil || timeout < time.Minute {
+		return 0, errors.New("dispatch.fixed.idleTimeout must be a duration of at least 1m")
+	}
+	return timeout, nil
+}
+
+func (d Dispatch) validateMode() error {
+	switch d.Mode {
+	case "", "on-demand":
+		if d.Fixed != nil {
+			return errors.New("dispatch.fixed requires dispatch.mode = fixed")
+		}
+	case "fixed":
+		if d.Fixed == nil || d.Fixed.Workers < 1 || d.Fixed.Workers > MaxFixedWorkers {
+			return fmt.Errorf("dispatch.fixed.workers must be between 1 and %d", MaxFixedWorkers)
+		}
+		if d.MaxWorkers != 0 || d.DeleteWorkerOnArchive {
+			return errors.New("dispatch.maxWorkers and dispatch.deleteWorkerOnArchive are only for on-demand workers")
+		}
+		if _, err := d.Fixed.IdleDuration(); err != nil {
+			return err
+		}
+	default:
+		return errors.New("dispatch.mode must be on-demand or fixed")
+	}
+	return nil
 }
 
 // Agent declares one T3 provider driver and the models the fleet offers for
@@ -150,6 +190,9 @@ func (cfg Config) Validate() error {
 	d := cfg.Dispatch
 	if d == nil {
 		return errors.New("dispatch is required; configure an on-demand T3 server")
+	}
+	if err := d.validateMode(); err != nil {
+		return err
 	}
 	dispatch, err := netip.ParseAddrPort(d.Listen)
 	if err != nil || dispatch.Addr() != netip.AddrFrom4([4]byte{127, 0, 0, 1}) || dispatch.Port() == 0 || dispatch == netip.AddrPortFrom(admin.Addr().Unmap(), admin.Port()) {
