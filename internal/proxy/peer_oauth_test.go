@@ -10,7 +10,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,8 +39,10 @@ func TestLiveControllerPeerOAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
+	var controllerResolves atomic.Int64
 	p, err := NewDispatchOnDemand(origin, store, DispatchOnDemand{
 		Controller: DispatchWorker{ID: "controller", Resolve: func(context.Context) (Upstream, error) {
+			controllerResolves.Add(1)
 			return Upstream{Endpoint: provider.Endpoint{URL: controllerOrigin}, Token: service}, nil
 		}},
 		ProjectRoot: t.TempDir(),
@@ -69,6 +73,35 @@ func TestLiveControllerPeerOAuth(t *testing.T) {
 		links, ok := client.rpc("peerLinks.list", nil)["links"].([]any)
 		if !ok || len(links) != 0 {
 			t.Fatal("expected an empty outgoing link list from the fresh controller")
+		}
+	})
+	t.Run("Desktop activity matches the native void reply", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		const method = "server.reportClientActivity"
+		payload := map[string]any{
+			"clientId": "test-desktop", "clientKind": "desktop-renderer", "visible": true,
+			"focused": true, "recentlyInteracted": true, "scopes": []string{},
+			"observedAt": time.Now().UTC().Format(time.RFC3339Nano),
+		}
+		var native map[string]any
+		if err := p.dispatch.rpcTo(ctx, p.dispatch.onDemand.Controller, map[string]any{
+			"_tag": "Request", "id": "native-activity", "tag": method, "payload": payload, "headers": []any{},
+		}, nil, func(reply map[string]any) error {
+			native, _ = reply["exit"].(map[string]any)
+			return nil
+		}); err != nil || native["_tag"] != "Success" {
+			t.Fatalf("native activity report failed: %v, %v", native, err)
+		}
+		client := newDispatchTestClient(t, ctx, server.URL, desktop)
+		defer func() { _ = client.conn.CloseNow() }()
+		before := controllerResolves.Load()
+		client.send("fleet-activity", method, payload)
+		if got := client.next("fleet-activity")["exit"]; !reflect.DeepEqual(got, native) {
+			t.Fatalf("fleet reply %v differs from native reply %v", got, native)
+		}
+		if controllerResolves.Load() != before {
+			t.Fatal("fleet forwarded a client activity report to the controller")
 		}
 	})
 	metadata, data := request(t, http.MethodGet, server.URL+"/.well-known/oauth-protected-resource/mcp", "")

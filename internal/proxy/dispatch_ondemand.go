@@ -321,9 +321,16 @@ func (d *dispatcher) callOnDemand(ctx context.Context, tag string, frame, payloa
 		}
 		<-ctx.Done()
 		return ctx.Err()
+	case "vcs.refreshBranch":
+		// The fleet's virtual project branch has no checkout to refresh.
+		return send(rpcSuccess(id, nil))
 	case "server.getConfig", "server.probe", "subscribeServerConfig", "subscribeProjectClones", "subscribeAuthAccess",
 		"peerLinks.list":
 		return d.rpcTo(ctx, d.onDemand.Controller, frame, acks, send)
+	case "server.reportClientActivity":
+		// Activity leases belong to a long-lived RPC connection. The fleet
+		// manages worker lifetime independently; acknowledge without waking one.
+		return send(rpcSuccess(id, nil))
 	case "server.refreshProviders":
 		return send(rpcSuccess(id, map[string]any{"providers": d.demandProviders()}))
 	default:

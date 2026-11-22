@@ -44,16 +44,42 @@ func TestDispatchKeepsHostPolicyWhenDisablingUpdates(t *testing.T) {
 	}
 }
 
-func checkFleetUpdateDescriptor(t *testing.T, descriptor map[string]any, version any) {
+func TestDispatchCapabilities(t *testing.T) {
+	caps := map[string]any{
+		"connectionProbe": true, "commandOutputStreaming": false, "peerLinkPairingCodes": true,
+		"mcpModeLimitHeader": true, "linkFence": true,
+		"attachmentUploads": true, "fileAttachments": map[string]any{"maxUploadBytes": 10},
+		"serverSelfUpdate": map[string]any{}, "peerLinks": true, "futureCapability": true,
+		"threadForceStop": true, "pullRequests": true, "agentActivityPublishing": true,
+		"shellOlderSettled": true, "shellThreadFamilies": true, "linkedThreadRefreshes": true,
+	}
+	dispatchCapabilities(caps)
+	want := map[string]any{
+		"connectionProbe": true, "commandOutputStreaming": false, "peerLinkPairingCodes": true,
+		"mcpModeLimitHeader": true, "linkFence": true, "agentActivityPublishing": false,
+		"shellOlderSettled": false, "shellThreadFamilies": false, "linkedThreadRefreshes": false,
+	}
+	if !reflect.DeepEqual(caps, want) {
+		t.Fatalf("fleet capabilities = %v, want %v", caps, want)
+	}
+}
+
+func checkFleetDescriptor(t *testing.T, descriptor map[string]any, version any) {
 	t.Helper()
 	caps, ok := descriptor["capabilities"].(map[string]any)
 	if !ok || version == nil || descriptor["serverVersion"] != version {
 		t.Fatal("fleet lost the controller version or capability map")
 	}
 	for _, key := range []string{"serverSelfUpdate", "serverInstallation", "npmReleaseLookup", "desktopAppUpdate",
-		"desktopAppChannelSwitch", "serverSelfUpdateProgress", "serverUpdateStaging", "serverUpdateThreadContinuation"} {
+		"desktopAppChannelSwitch", "serverSelfUpdateProgress", "serverUpdateStaging", "serverUpdateThreadContinuation",
+		"attachmentUploads", "fileAttachments", "pullRequests", "threadForceStop", "peerLinks", "serverBrowser"} {
 		if _, advertised := caps[key]; advertised {
 			t.Errorf("fleet advertises unsupported capability %s", key)
+		}
+	}
+	for _, key := range []string{"connectionProbe", "commandOutputStreaming", "vcsBranchStatus", "peerLinkPairingCodes", "mcpModeLimitHeader", "linkFence"} {
+		if caps[key] != true {
+			t.Errorf("fleet lost supported capability %s", key)
 		}
 	}
 }
@@ -153,9 +179,9 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 		environment["environmentId"] != discovery["environmentId"] {
 		t.Fatal("virtual environment name or identity differs between discovery and configuration")
 	}
-	t.Run("operator manages updates across discovery and config snapshots", func(t *testing.T) {
+	t.Run("fleet capabilities and policy across discovery and config snapshots", func(t *testing.T) {
 		version := controllerDescriptor["serverVersion"]
-		checkFleetUpdateDescriptor(t, discovery, version)
+		checkFleetDescriptor(t, discovery, version)
 		sub := newDispatchTestClient(t, ctx, server.URL, token)
 		defer func() { _ = sub.conn.CloseNow() }()
 		sub.send("cfg", "subscribeServerConfig", nil)
@@ -167,7 +193,7 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 		snapshot, _ := event["config"].(map[string]any)
 		for _, cfg := range []map[string]any{config, snapshot} {
 			env, _ := cfg["environment"].(map[string]any)
-			checkFleetUpdateDescriptor(t, env, version)
+			checkFleetDescriptor(t, env, version)
 			policy, _ := cfg["managedPolicy"].(map[string]any)
 			limits, _ := policy["limits"].(map[string]any)
 			updates, _ := limits["updates"].(map[string]any)
@@ -175,6 +201,16 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 				t.Fatal("missing managed update policy in fleet config")
 			}
 		}
+	})
+	t.Run("virtual branch reporting does not require a checkout", func(t *testing.T) {
+		conn := newDispatchTestClient(t, ctx, server.URL, token)
+		defer func() { _ = conn.conn.CloseNow() }()
+		conn.send("branch", "subscribeVcsBranch", nil)
+		want := []any{map[string]any{"refName": nil, "isRepo": true}}
+		if values := conn.next("branch")["values"]; !reflect.DeepEqual(values, want) {
+			t.Fatalf("virtual branch snapshot = %v, want %v", values, want)
+		}
+		conn.rpc("vcs.refreshBranch", nil)
 	})
 	providers, _ := config["providers"].([]any)
 	if len(providers) != 2 {

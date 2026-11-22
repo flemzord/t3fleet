@@ -87,15 +87,18 @@ func (d *dispatcher) proxy(origin string) (*Proxy, error) {
 }
 
 func dispatchCapabilities(v map[string]any) {
-	// The controller runs in desktop mode, but the fleet endpoint cannot
-	// update its binary, stage releases, or switch Desktop channels.
-	for _, key := range []string{"serverSelfUpdate", "serverSelfUpdateProgress", "serverUpdateStaging",
-		"serverUpdateThreadContinuation", "desktopAppUpdate", "desktopAppChannelSwitch", "serverInstallation", "npmReleaseLookup"} {
-		delete(v, key)
-	}
-	for _, key := range []string{"shellThreadFamilies", "shellOlderSettled", "linkedThreadRefreshes"} {
-		if _, ok := v[key]; ok {
+	// Advertise only features served by the fleet, including its inbound peer
+	// routes. New controller capabilities need an explicit fleet decision.
+	for key := range v {
+		switch key {
+		case "repositoryIdentity", "connectionProbe", "environmentIcon", "environmentThemes", "vcsBranchStatus",
+			"inlineMessageContext", "commandOutputStreaming", "freshContext",
+			"threadSettlement", "threadPinning", "threadVisitedTracking", "threadStop",
+			"mcpModeLimitHeader", "linkFence", "peerLinkPairingCodes":
+		case "shellThreadFamilies", "shellOlderSettled", "linkedThreadRefreshes", "agentActivityPublishing":
 			v[key] = false
+		default:
+			delete(v, key)
 		}
 	}
 }

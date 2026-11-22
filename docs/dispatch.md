@@ -14,9 +14,11 @@ For a private GitHub repository over HTTPS, the worker can use its existing Git 
 
 The fleet’s project and thread list does not wake workers. When a provider has no guaranteed passive connection, the list uses the last navigation metadata observed on an explicit thread action. Opening a thread can wake its worker; loading its messages still requires the worker.
 
+Discovery and Desktop configuration advertise only fleet features. For example, the fleet does not advertise uploads, pull request management, or scheduled tasks. Desktop activity reports are acknowledged by the gateway and do not change worker lifetime.
+
 ## Launch from another T3 server
 
-Desktop reads the fleet's outgoing links from the controller. Loading the link list does not wake workers.
+The fleet accepts incoming links. It can answer outgoing-link list requests from existing clients through the controller, but does not advertise creation or management of outgoing links. Reading the list does not wake workers.
 
 1. On the fleet host, run `t3fleet pair --peer-access LEVEL`. In the source T3 server’s **Linked Environments → Link**, enter the code. Enter the dispatch loopback address manually when both servers are on the same host; use private forwarding for a remote host.
 2. Use `t3_project_list` to find the project by repository identity. If missing, use T3’s `t3_project_clone` with the GitHub repository and destination, then `t3_project_create` with the returned `cwd` as `workspaceRoot`. Both the grant and caller must allow `full-access/default` to register a new project. A more limited writable link can launch into a project already registered in Desktop.
