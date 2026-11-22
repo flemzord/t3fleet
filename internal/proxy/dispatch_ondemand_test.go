@@ -415,6 +415,20 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 			}
 		}
 	})
+	t.Run("Desktop can find matches without streaming", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
+		defer cancel()
+		conn := newDispatchTestClient(t, ctx, server.URL, token)
+		defer func() { _ = conn.conn.CloseNow() }()
+		for threadID, count := range map[string]string{"on-demand-a": "0", "on-demand-b": "1"} {
+			result := conn.rpc("orchestration.searchThread", map[string]any{
+				"threadId": threadID, "query": "second fixture turn complete",
+			})
+			if requestKey(result["totalMatches"]) != count {
+				t.Fatalf("search in %s returned an unexpected match count: %v", threadID, result["totalMatches"])
+			}
+		}
+	})
 	if calls() != 3 {
 		t.Fatal("routing an existing thread provisioned again")
 	}
