@@ -396,6 +396,38 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 		waitDispatchProjectionRow(conn, threadID, "runtimeRequests", id, "resolved")
 		waitDispatchProjectionRow(conn, threadID, "runs", "", "completed")
 	})
+	t.Run("Desktop can interrupt a specific run", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+		defer cancel()
+		conn := newDispatchTestClient(t, ctx, server.URL, token)
+		defer func() { _ = conn.conn.CloseNow() }()
+		const threadID, messageID = "on-demand-c", "desktop-interrupt-message"
+		conn.rpc("orchestration.dispatchCommand", map[string]any{
+			"type": "message.dispatch", "threadId": threadID, "commandId": messageID, "messageId": messageID,
+			"text": "Start another approval turn", "attachments": []any{}, "createdBy": "user", "creationSource": "web",
+			"dispatchMode": map[string]any{"type": "start_immediately"},
+		})
+		waitDispatchProjectionRow(conn, threadID, "runtimeRequests", "", "pending")
+		projection := conn.rpc("orchestration.getThreadProjection", map[string]any{"threadId": threadID})
+		rows, _ := projection["runs"].([]any)
+		var targetID, completedID string
+		for _, value := range rows {
+			row, _ := value.(map[string]any)
+			if row["userMessageId"] == messageID {
+				targetID, _ = row["id"].(string)
+			} else if row["status"] == "completed" {
+				completedID, _ = row["id"].(string)
+			}
+		}
+		if targetID == "" || completedID == "" {
+			t.Fatal("expected a target run and a previously completed run")
+		}
+		conn.rpc("orchestration.dispatchCommand", map[string]any{
+			"type": "run.interrupt", "threadId": threadID, "commandId": "desktop-interrupt", "runId": targetID, "holdQueue": true,
+		})
+		waitDispatchProjectionRow(conn, threadID, "runs", targetID, "interrupted")
+		waitDispatchProjectionRow(conn, threadID, "runs", completedID, "completed")
+	})
 	client.rpc("orchestration.getThreadProjection", map[string]any{"threadId": "on-demand-b"})
 	worker, err := p.dispatch.threadWorker("on-demand-c")
 	if err != nil {

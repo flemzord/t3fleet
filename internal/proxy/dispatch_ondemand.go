@@ -289,7 +289,8 @@ func (d *dispatcher) callOnDemand(ctx context.Context, tag string, frame, payloa
 		return d.rpcTo(ctx, worker, frame, acks, send)
 	case "orchestration.dispatchCommand":
 		cmd, _ := payload["type"].(string)
-		if !slices.Contains([]string{"message.dispatch", "runtime-request.respond", "thread.visit", "thread.mark-unread", "thread.metadata.update",
+		if !slices.Contains([]string{"message.dispatch", "runtime-request.respond", "run.interrupt",
+			"thread.visit", "thread.mark-unread", "thread.metadata.update",
 			"thread.model-selection.set", "thread.stop", "thread.archive", "thread.unarchive", "thread.settle", "thread.pin", "thread.unpin"}, cmd) {
 			return errors.New("this command is outside on-demand dispatch")
 		}
