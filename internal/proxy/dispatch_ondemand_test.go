@@ -374,6 +374,47 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 			t.Fatalf("unexpected turn diff: %v", diff)
 		}
 	})
+	t.Run("Desktop can stream matches within a thread", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
+		defer cancel()
+		conn := newDispatchTestClient(t, ctx, server.URL, token)
+		defer func() { _ = conn.conn.CloseNow() }()
+		conn.send("search", "orchestration.searchThreadStream", map[string]any{
+			"threadId": "on-demand-b", "query": "second fixture turn complete",
+		})
+		var partial, complete bool
+		for {
+			frame := conn.next("search")
+			switch frame["_tag"] {
+			case "Exit":
+				conn.result(frame)
+				if !partial || !complete {
+					t.Fatal("search did not deliver both the first match and the completed result")
+				}
+				return
+			case "Chunk":
+				values, _ := frame["values"].([]any)
+				for _, value := range values {
+					result, _ := value.(map[string]any)
+					match, _ := result["match"].(map[string]any)
+					entry, _ := match["entryId"].(string)
+					if entry == "" || requestKey(result["totalMatches"]) != "1" {
+						t.Fatalf("unexpected search result: %v", result)
+					}
+					switch result["complete"] {
+					case false:
+						partial = true
+					case true, nil: // The pinned server omits complete on the final result.
+						complete = true
+					default:
+						t.Fatalf("unexpected search completion flag: %v", result)
+					}
+				}
+			default:
+				t.Fatalf("unexpected search frame: %v", frame)
+			}
+		}
+	})
 	if calls() != 3 {
 		t.Fatal("routing an existing thread provisioned again")
 	}

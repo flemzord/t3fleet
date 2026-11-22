@@ -15,7 +15,7 @@ For a private GitHub repository over HTTPS, the worker can use its existing Git 
 The fleet’s project and thread list does not wake workers. When a provider has no guaranteed passive connection, the list uses the last navigation metadata observed on an explicit thread action. Opening a thread can wake its worker; loading its messages still requires the worker.
 
 Desktop sends approvals, answers to agent questions, and requests to stop a specific run to the worker assigned to that thread.
-Desktop also loads diffs for individual turns from that worker.
+Desktop also loads diffs for individual turns and streams search results within the thread from that worker.
 
 Discovery and Desktop configuration advertise only fleet features. For example, the fleet does not advertise uploads, pull request management, or scheduled tasks. Desktop activity reports are acknowledged by the gateway and do not change worker lifetime.
 

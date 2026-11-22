@@ -306,7 +306,7 @@ func (d *dispatcher) callOnDemand(ctx context.Context, tag string, frame, payloa
 		return d.rpcTo(ctx, worker, frame, acks, send)
 	case "orchestration.subscribeThread", "orchestration.getThreadProjection", "orchestration.subscribePromptSuggestion",
 		"orchestration.subscribeCommandOutput", "orchestration.getTurnItem", "orchestration.getFullThreadDiff", "orchestration.getTurnDiff",
-		"orchestration.getNativeChildWork", "orchestration.getThreadFamily":
+		"orchestration.getNativeChildWork", "orchestration.getThreadFamily", "orchestration.searchThreadStream":
 		worker, err := d.threadWorker(threadID)
 		if err != nil {
 			return err
