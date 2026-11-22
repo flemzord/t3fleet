@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -86,21 +89,35 @@ func checkFleetDescriptor(t *testing.T, descriptor map[string]any, version any) 
 
 func waitDispatchProjectionRow(c *dispatchTestClient, threadID, collection, id, status string) map[string]any {
 	c.t.Helper()
+	return waitDispatchProjectionMatch(c, threadID, collection, func(row map[string]any) bool {
+		return row["status"] == status && (id == "" || row["id"] == id)
+	})
+}
+
+func waitDispatchProjectionMatch(c *dispatchTestClient, threadID, collection string, match func(map[string]any) bool) map[string]any {
+	c.t.Helper()
 	for {
 		projection := c.rpc("orchestration.getThreadProjection", map[string]any{"threadId": threadID})
 		rows, _ := projection[collection].([]any)
 		for _, value := range rows {
 			row, _ := value.(map[string]any)
-			if row["status"] == status && (id == "" || row["id"] == id) {
+			if match(row) {
 				return row
 			}
 		}
 		select {
 		case <-c.ctx.Done():
-			c.t.Fatalf("thread %s did not reach %s in %s", threadID, status, collection)
+			c.t.Fatalf("thread %s did not reach the expected state in %s", threadID, collection)
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+func waitDispatchCheckpoint(c *dispatchTestClient, threadID, turn string) {
+	c.t.Helper()
+	waitDispatchProjectionMatch(c, threadID, "checkpoints", func(row map[string]any) bool {
+		return row["status"] == "ready" && requestKey(row["appRunOrdinal"]) == turn
+	})
 }
 
 func TestLiveOnDemandDispatch(t *testing.T) {
@@ -324,12 +341,39 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 	if len(recoveredThreads) != 2 {
 		t.Fatalf("restart lost native thread listings: %#v", recoveredThreads)
 	}
+	waitDispatchCheckpoint(client, "on-demand-b", "1")
+	route := p.dispatch.demandRoute("on-demand-b")
+	mu.Lock()
+	workspace := exp[route.Key].workspace
+	mu.Unlock()
+	if workspace == "" {
+		t.Fatal("missing checkout for second thread")
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "turn-diff.txt"), []byte("second turn change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	client.rpc("orchestration.dispatchCommand", map[string]any{
 		"type": "message.dispatch", "commandId": "demand-followup", "threadId": "on-demand-b", "messageId": "demand-followup",
 		"text": "Continue the second thread", "attachments": []any{}, "createdBy": "user", "creationSource": "web",
 		"dispatchMode": map[string]any{"type": "start_immediately"},
 	})
 	client.waitReply("on-demand-b", "second fixture turn complete")
+	t.Run("Desktop can load a turn diff", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
+		defer cancel()
+		conn := newDispatchTestClient(t, ctx, server.URL, token)
+		defer func() { _ = conn.conn.CloseNow() }()
+		const threadID = "on-demand-b"
+		waitDispatchCheckpoint(conn, threadID, "2")
+		diff := conn.rpc("orchestration.getTurnDiff", map[string]any{
+			"threadId": threadID, "fromTurnCount": 1, "toTurnCount": 2, "ignoreWhitespace": false,
+		})
+		patch, _ := diff["diff"].(string)
+		if diff["threadId"] != threadID || requestKey(diff["fromTurnCount"]) != "1" ||
+			requestKey(diff["toTurnCount"]) != "2" || !strings.Contains(patch, "+second turn change") {
+			t.Fatalf("unexpected turn diff: %v", diff)
+		}
+	})
 	if calls() != 3 {
 		t.Fatal("routing an existing thread provisioned again")
 	}
