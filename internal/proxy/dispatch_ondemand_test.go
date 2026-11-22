@@ -515,8 +515,8 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 		waitDispatchProjectionRow(conn, threadID, "runtimeRequests", id, "resolved")
 		waitDispatchProjectionRow(conn, threadID, "runs", "", "completed")
 	})
-	t.Run("Desktop can interrupt a specific run", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	t.Run("Desktop can interrupt a specific run and manage its queue", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 12*time.Second)
 		defer cancel()
 		conn := newDispatchTestClient(t, ctx, server.URL, token)
 		defer func() { _ = conn.conn.CloseNow() }()
@@ -541,11 +541,67 @@ func TestLiveOnDemandDispatch(t *testing.T) {
 		if targetID == "" || completedID == "" {
 			t.Fatal("expected a target run and a previously completed run")
 		}
+		enqueue := func(id string) string {
+			t.Helper()
+			conn.rpc("orchestration.dispatchCommand", map[string]any{
+				"type": "message.dispatch", "threadId": threadID, "commandId": id, "messageId": id,
+				"text": "Queued message", "attachments": []any{}, "createdBy": "user", "creationSource": "web",
+				"dispatchMode": map[string]any{"type": "queue_after_active"},
+			})
+			row := waitDispatchProjectionMatch(conn, threadID, "runs", func(row map[string]any) bool {
+				return row["userMessageId"] == id && row["status"] == "queued"
+			})
+			runID, _ := row["id"].(string)
+			if runID == "" {
+				t.Fatal("queued message has no run ID")
+			}
+			return runID
+		}
+		discard := enqueue("desktop-queue-discard")
+		const editedMessage = "desktop-queue-edit-message"
+		edited := enqueue(editedMessage)
+		conn.rpc("orchestration.dispatchCommand", map[string]any{
+			"type": "queued-run.reorder", "threadId": threadID, "commandId": "desktop-queue-reorder",
+			"runId": edited, "beforeRunId": discard,
+		})
+		waitDispatchProjectionMatch(conn, threadID, "runs", func(row map[string]any) bool {
+			return row["id"] == edited && row["status"] == "queued" && requestKey(row["queuePosition"]) == "1"
+		})
+		conn.rpc("orchestration.dispatchCommand", map[string]any{
+			"type": "queued-run.edit", "threadId": threadID, "commandId": "desktop-queue-edit",
+			"runId": edited, "text": "Edited queued message",
+		})
+		waitDispatchProjectionMatch(conn, threadID, "messages", func(row map[string]any) bool {
+			return row["id"] == editedMessage && row["text"] == "Edited queued message"
+		})
+		conn.rpc("orchestration.dispatchCommand", map[string]any{
+			"type": "queued-run.cancel", "threadId": threadID, "commandId": "desktop-queue-cancel", "runId": discard,
+		})
+		projection = conn.rpc("orchestration.getThreadProjection", map[string]any{"threadId": threadID})
+		rows, _ = projection["runs"].([]any)
+		for _, value := range rows {
+			row, _ := value.(map[string]any)
+			if row["id"] == discard && row["status"] == "queued" {
+				t.Fatal("cancelled run remained in the queue")
+			}
+		}
 		conn.rpc("orchestration.dispatchCommand", map[string]any{
 			"type": "run.interrupt", "threadId": threadID, "commandId": "desktop-interrupt", "runId": targetID, "holdQueue": true,
 		})
 		waitDispatchProjectionRow(conn, threadID, "runs", targetID, "interrupted")
 		waitDispatchProjectionRow(conn, threadID, "runs", completedID, "completed")
+		waitDispatchProjectionMatch(conn, threadID, "runs", func(row map[string]any) bool {
+			return row["id"] == edited && row["status"] == "queued" && row["queueHeld"] == true
+		})
+		conn.rpc("orchestration.dispatchCommand", map[string]any{
+			"type": "queue.resume", "threadId": threadID, "commandId": "desktop-queue-resume",
+		})
+		pending := waitDispatchProjectionRow(conn, threadID, "runtimeRequests", "", "pending")
+		conn.rpc("orchestration.dispatchCommand", map[string]any{
+			"type": "runtime-request.respond", "threadId": threadID, "commandId": "desktop-queue-approve",
+			"requestId": pending["id"], "decision": "accept",
+		})
+		waitDispatchProjectionRow(conn, threadID, "runs", edited, "completed")
 	})
 	client.rpc("orchestration.getThreadProjection", map[string]any{"threadId": "on-demand-b"})
 	worker, err := p.dispatch.threadWorker("on-demand-c")

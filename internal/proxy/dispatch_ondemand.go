@@ -292,6 +292,8 @@ func (d *dispatcher) callOnDemand(ctx context.Context, tag string, frame, payloa
 		if !slices.Contains([]string{"message.dispatch", "runtime-request.respond", "run.interrupt",
 			"thread.visit", "thread.mark-unread", "thread.metadata.update",
 			"thread.runtime-mode.set", "thread.interaction-mode.set",
+			"queue.resume", "queued-run.start", "queued-run.reorder", "queued-run.edit", "queued-run.cancel",
+			"queued-message.promote-to-steer",
 			"thread.model-selection.set", "thread.stop", "thread.archive", "thread.unarchive", "thread.settle", "thread.pin", "thread.unpin"}, cmd) {
 			return errors.New("this command is outside on-demand dispatch")
 		}

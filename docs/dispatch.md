@@ -16,6 +16,7 @@ The fleet’s project and thread list does not wake workers. When a provider has
 
 Desktop sends approvals, answers to agent questions, and requests to stop a specific run to the worker assigned to that thread.
 Changes to the thread's runtime and interaction modes also go to that worker.
+Desktop can edit, reorder, cancel, or resume queued messages while the thread's worker exists.
 Desktop also loads diffs for individual turns and searches within the thread on that worker. Search supports both streamed and single-response results.
 
 Discovery and Desktop configuration advertise only fleet features. For example, the fleet does not advertise uploads, pull request management, or scheduled tasks. Desktop activity reports are acknowledged by the gateway and do not change worker lifetime.
