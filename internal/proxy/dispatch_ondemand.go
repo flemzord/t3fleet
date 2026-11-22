@@ -321,7 +321,8 @@ func (d *dispatcher) callOnDemand(ctx context.Context, tag string, frame, payloa
 		}
 		<-ctx.Done()
 		return ctx.Err()
-	case "server.getConfig", "server.probe", "subscribeServerConfig", "subscribeProjectClones", "subscribeAuthAccess":
+	case "server.getConfig", "server.probe", "subscribeServerConfig", "subscribeProjectClones", "subscribeAuthAccess",
+		"peerLinks.list":
 		return d.rpcTo(ctx, d.onDemand.Controller, frame, acks, send)
 	case "server.refreshProviders":
 		return send(rpcSuccess(id, map[string]any{"providers": d.demandProviders()}))

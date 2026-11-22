@@ -61,6 +61,16 @@ func TestLiveControllerPeerOAuth(t *testing.T) {
 	if err := p.dispatch.saveToken(t.Context(), desktop); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("Desktop can list outgoing links", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		client := newDispatchTestClient(t, ctx, server.URL, desktop)
+		defer func() { _ = client.conn.CloseNow() }()
+		links, ok := client.rpc("peerLinks.list", nil)["links"].([]any)
+		if !ok || len(links) != 0 {
+			t.Fatal("expected an empty outgoing link list from the fresh controller")
+		}
+	})
 	metadata, data := request(t, http.MethodGet, server.URL+"/.well-known/oauth-protected-resource/mcp", "")
 	if metadata.StatusCode != http.StatusOK || !strings.Contains(string(data), server.URL+"/mcp") ||
 		strings.Contains(string(data), controllerOrigin) {

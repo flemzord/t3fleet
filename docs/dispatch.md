@@ -16,6 +16,8 @@ The fleet’s project and thread list does not wake workers. When a provider has
 
 ## Launch from another T3 server
 
+Desktop reads the fleet's outgoing links from the controller. Loading the link list does not wake workers.
+
 1. On the fleet host, run `t3fleet pair --peer-access LEVEL`. In the source T3 server’s **Linked Environments → Link**, enter the code. Enter the dispatch loopback address manually when both servers are on the same host; use private forwarding for a remote host.
 2. Use `t3_project_list` to find the project by repository identity. If missing, use T3’s `t3_project_clone` with the GitHub repository and destination, then `t3_project_create` with the returned `cwd` as `workspaceRoot`. Both the grant and caller must allow `full-access/default` to register a new project. A more limited writable link can launch into a project already registered in Desktop.
 3. Call `t3_thread_launch` with the fleet project ID and a first text message. Choose a root checkout or a new worktree. Use the same `clientRequestId` to retry a launch with an uncertain result.
