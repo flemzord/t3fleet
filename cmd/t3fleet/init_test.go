@@ -147,6 +147,45 @@ func TestValidateChecksFileWithoutRuntimeOrCredentials(t *testing.T) {
 	}
 }
 
+func TestInitAndValidateDiscoverTOMLAndLegacyJSON(t *testing.T) {
+	isolateUserDirs(t)
+	tomlPath := config.DefaultPath()
+	jsonPath := filepath.Join(filepath.Dir(tomlPath), "config.json")
+	args := []string{"init", "--provider", "boat", "--boat-organization", "acme", "--boat-snapshot", "snap", "--t3-binary", "/opt/t3"}
+	if err := initApp(io.Discard, io.Discard, "", false).execute(t.Context(), args); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(tomlPath)
+	if err != nil || !bytes.Contains(data, []byte("[dispatch]")) {
+		t.Fatalf("init did not write the default TOML configuration: %v", err)
+	}
+	var out bytes.Buffer
+	if err := initApp(&out, io.Discard, "", false).execute(t.Context(), []string{"validate"}); err != nil ||
+		!strings.Contains(out.String(), tomlPath) {
+		t.Fatalf("automatic TOML selection failed: %v", err)
+	}
+	if err := initApp(io.Discard, io.Discard, "", false).execute(t.Context(), append(args, "--config", jsonPath)); err != nil {
+		t.Fatal(err)
+	}
+	err = initApp(io.Discard, io.Discard, "", false).execute(t.Context(), []string{"validate"})
+	if err == nil || !strings.Contains(err.Error(), "both config.toml and config.json exist") {
+		t.Fatalf("ambiguous configuration was not reported: %v", err)
+	}
+	out.Reset()
+	if err := initApp(&out, io.Discard, "", false).execute(t.Context(), []string{"validate", "--config", jsonPath}); err != nil ||
+		!strings.Contains(out.String(), jsonPath) {
+		t.Fatalf("explicit JSON selection failed: %v", err)
+	}
+	if err := os.Remove(tomlPath); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := initApp(&out, io.Discard, "", false).execute(t.Context(), []string{"validate"}); err != nil ||
+		!strings.Contains(out.String(), jsonPath) {
+		t.Fatalf("legacy default discovery failed: %v", err)
+	}
+}
+
 func TestMissingDefaultConfigUsesDefaultsAndSuggestsInit(t *testing.T) {
 	isolateUserDirs(t)
 	err := initApp(io.Discard, io.Discard, "", false).execute(t.Context(), []string{"list"})

@@ -52,26 +52,30 @@ func (a *app) execute(ctx context.Context, args []string) error {
 
 // configLocation reports the configuration path and where it came from:
 // --config, then T3FLEET_CONFIG, then the platform default.
-func (a *app) configLocation() (string, string) {
+func (a *app) configLocation() (path, source string, err error) {
 	if a.configPath != "" {
-		return a.configPath, "--config"
+		return a.configPath, "--config", nil
 	}
 	if path := os.Getenv("T3FLEET_CONFIG"); path != "" {
-		return path, "T3FLEET_CONFIG"
+		return path, "T3FLEET_CONFIG", nil
 	}
-	return config.DefaultPath(), "default"
+	path, err = config.DiscoverDefaultPath()
+	return path, "default", err
 }
 
 func (a *app) config() (config.Config, error) {
 	if a.cfg != nil {
 		return *a.cfg, nil
 	}
-	path, source := a.configLocation()
+	path, source, err := a.configLocation()
+	if err != nil {
+		return config.Config{}, err
+	}
 	cfg, err := a.load(path)
 	if err != nil && source == "default" {
 		// Only the implicit default may be absent: an explicit --config or
 		// T3FLEET_CONFIG that does not exist is a mistake worth reporting.
-		if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
+		if _, statErr := os.Lstat(path); errors.Is(statErr, os.ErrNotExist) {
 			cfg, err = config.Default(), nil
 			a.configMissing = true
 		}
@@ -174,7 +178,8 @@ Start with 't3fleet init', 't3fleet serve', then 't3fleet pair' from
 another terminal. Stopping the daemon does not release allocated workers.
 
 Configuration is read from --config, then $T3FLEET_CONFIG, then
-` + defaultPath + `.`,
+` + defaultPath + ` (or the legacy config.json alongside it). If both
+default files exist, select one explicitly.`,
 		Version:       version,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -185,7 +190,7 @@ Configuration is read from --config, then $T3FLEET_CONFIG, then
 	root.SetIn(a.stdin)
 	root.PersistentFlags().StringVar(&a.configPath, "config", "", "configuration file (default $T3FLEET_CONFIG or "+defaultPath+")")
 	_ = root.RegisterFlagCompletionFunc("config", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
-		return []string{"json"}, cobra.ShellCompDirectiveFilterFileExt
+		return []string{"toml", "json"}, cobra.ShellCompDirectiveFilterFileExt
 	})
 	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		return hinted(fmt.Sprintf("run '%s --help'", cmd.CommandPath()), "%v", err)
@@ -212,7 +217,10 @@ func (a *app) validateCommand() *cobra.Command {
 			if a.configMissing {
 				return errNoConfiguration
 			}
-			path, _ := a.configLocation()
+			path, _, err := a.configLocation()
+			if err != nil {
+				return err
+			}
 			fmt.Fprintf(a.stdout, "Valid configuration: %s\n", path)
 			return nil
 		},
@@ -241,7 +249,7 @@ func (a *app) serveCommand() *cobra.Command {
 Start the local T3 server and expose the fleet endpoint for paired clients.
 Worker allocation starts when a thread needs one. Other CLI commands use
 the separate loopback admin endpoint. Stopping the daemon does not delete workers.`,
-		Example:           "  t3fleet serve\n  t3fleet serve --config ~/.config/t3fleet/config.json",
+		Example:           "  t3fleet serve\n  t3fleet serve --config ~/.config/t3fleet/config.toml",
 		Args:              noArgs,
 		ValidArgsFunction: cobra.NoFileCompletions,
 		RunE: func(cmd *cobra.Command, _ []string) error {

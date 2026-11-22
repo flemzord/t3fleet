@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -39,7 +38,8 @@ func (a *app) initCommand() *cobra.Command {
 		Short:   "Create a configuration file",
 		GroupID: "daemon",
 		Long: `Create a t3fleet configuration file at the --config path, $T3FLEET_CONFIG,
-or the default location. In a terminal, init asks for the values that flags
+or the default location. New installations use TOML; use --config FILE.json
+to generate JSON. In a terminal, init asks for the values that flags
 do not provide. Set the Boat organization or Namespace tenant for each instance.
 The file holds no secrets. The daemon reads credentials when it uses an instance.
 
@@ -73,7 +73,10 @@ existing file is never replaced unless you pass --force.`,
 }
 
 func (a *app) runInit(ctx context.Context, cmd *cobra.Command, opts initOptions) error {
-	path, source := a.configLocation()
+	path, source, err := a.configLocation()
+	if err != nil {
+		return err
+	}
 	if !opts.print && !opts.force {
 		if _, err := os.Lstat(path); err == nil {
 			return hinted("edit it, pass --force to replace it, or choose another path with --config", "a configuration already exists at %s", path)
@@ -176,11 +179,10 @@ func (a *app) runInit(ctx context.Context, cmd *cobra.Command, opts initOptions)
 	if err := cfg.Validate(); err != nil {
 		return hinted("check the values passed to init", "the generated configuration is invalid: %v", err)
 	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	data, err := config.MarshalFile(path, cfg)
 	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
 	if opts.print {
 		_, err := a.stdout.Write(data)
 		return err

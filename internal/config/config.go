@@ -2,11 +2,8 @@
 package config
 
 import (
-	"bytes"
-	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
-	"io"
 	"net/netip"
 	"net/url"
 	"os"
@@ -77,9 +74,9 @@ func (d Dispatch) MaxWorkerCount() int {
 func DefaultPath() string {
 	dir, err := os.UserConfigDir()
 	if err != nil {
-		return "config.json"
+		return "config.toml"
 	}
-	return filepath.Join(dir, "t3fleet", "config.json")
+	return filepath.Join(dir, "t3fleet", "config.toml")
 }
 
 func Default() Config {
@@ -89,27 +86,6 @@ func Default() Config {
 		dir = filepath.Join(home, ".local", "state")
 	}
 	return Config{Listen: "127.0.0.1:47730", StateDir: filepath.Join(dir, "t3fleet"), ExpectedVersion: DefaultVersion, Providers: map[string]ProviderConfig{}}
-}
-
-func Load(path string) (Config, error) {
-	cfg := Default()
-	file, err := os.Open(path)
-	if err != nil {
-		return Config{}, errors.New("cannot open configuration; create a config file and pass --config PATH")
-	}
-	defer func() { _ = file.Close() }()
-	data, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
-	if err != nil || len(data) > 1<<20 || !bytes.HasPrefix(bytes.TrimSpace(data), []byte("{")) {
-		return Config{}, errors.New("configuration must be a JSON object no larger than 1 MiB")
-	}
-	if err := jsonv2.Unmarshal(data, &cfg, jsonv2.RejectUnknownMembers(true)); err != nil {
-		// An offending key or value may contain a secret; never echo raw input.
-		return Config{}, errors.New("invalid configuration JSON or unknown field; use dispatch and named providers with type and template")
-	}
-	if err := cfg.Validate(); err != nil {
-		return Config{}, err
-	}
-	return cfg, nil
 }
 
 var instanceName = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,62}$`)

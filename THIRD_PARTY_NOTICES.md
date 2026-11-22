@@ -42,6 +42,7 @@ retains its own license notices. Release archives include
 dependencies. Direct dependencies include:
 
 - [coder/websocket](https://github.com/coder/websocket), ISC license.
+- [pelletier/go-toml/v2](https://github.com/pelletier/go-toml), MIT license.
 - [golang.org/x/crypto](https://go.googlesource.com/crypto), Go BSD-style license.
 - [golang.org/x/term](https://go.googlesource.com/term), Go BSD-style license.
 - [Namespace integrations](https://github.com/namespacelabs/integrations), Apache-2.0 license.

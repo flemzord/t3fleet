@@ -26,7 +26,7 @@ buildGo127Module {
     ];
   };
   goSum = ../go.sum;
-  vendorHash = "sha256-xCubB6QPHsqytCx3OKUn83rnE8MjDuQf/+DxzKafe5U=";
+  vendorHash = "sha256-u2xA6Fj3txP0eA9DOGcx4F+fJj81vwWWriWbT4ruF1Y=";
 
   subPackages = [ "cmd/t3fleet" ];
   env.CGO_ENABLED = 0;
